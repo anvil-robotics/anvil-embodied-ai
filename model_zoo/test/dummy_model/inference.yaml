@@ -1,0 +1,20 @@
+# Inference configuration for dummy test model
+model:
+  path: model_zoo/test/dummy_model
+  device: cpu
+
+robot:
+  name: openarm_bimanual
+  num_joints: 14
+
+topics:
+  images:
+    - name: cam_wrist
+      topic: /camera/image_raw
+      encoding: rgb8
+  joint_states: /joint_states
+  actions: /actions
+
+inference:
+  frequency: 30
+  chunk_size: 100

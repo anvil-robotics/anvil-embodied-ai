@@ -1,0 +1,16 @@
+{
+  "model_type": "act",
+  "input_shapes": {
+    "observation.images.cam_wrist": [3, 480, 640],
+    "observation.state": [14]
+  },
+  "output_shapes": {
+    "action": [14]
+  },
+  "chunk_size": 100,
+  "n_obs_steps": 1,
+  "hidden_dim": 64,
+  "dim_feedforward": 128,
+  "n_heads": 4,
+  "n_layers": 2
+}
