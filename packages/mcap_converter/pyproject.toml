@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcap-converter"
+version = "0.1.0"
+description = "MCAP to LeRobot Dataset Converter - A modular conversion pipeline for transforming ROS2 MCAP recordings into LeRobot v3.0 format datasets"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Anvil Robotics" }
+]
+keywords = ["mcap", "lerobot", "ros2", "robotics", "dataset", "conversion"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Robotics",
+]
+dependencies = [
+    "mcap>=1.1.0",
+    "mcap-ros2-support>=0.5.0",
+    "lerobot>=0.1.0",
+    "numpy>=1.24.0",
+    "pillow>=10.0.0",
+    "opencv-python>=4.8.0",
+    "pyyaml>=6.0",
+    "huggingface-hub>=0.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+mcap-convert = "mcap_converter.cli.convert:main"
+mcap-inspect = "mcap_converter.cli.inspect:main"
+mcap-validate = "mcap_converter.cli.validate:main"
+mcap-upload = "mcap_converter.cli.upload:main"
+
+[project.urls]
+Homepage = "https://github.com/anvil-robotics/anvil-embodied-ai"
+Repository = "https://github.com/anvil-robotics/anvil-embodied-ai"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcap_converter"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
