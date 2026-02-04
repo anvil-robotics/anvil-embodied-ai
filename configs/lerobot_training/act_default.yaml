@@ -1,0 +1,86 @@
+# Default ACT (Action Chunking Transformer) Training Configuration
+#
+# This config provides sensible defaults for training ACT policies on
+# Anvil robot datasets. Adjust parameters based on your specific use case.
+#
+# Usage:
+#   lerobot-train \
+#     --dataset.repo_id=local \
+#     --dataset.root=/path/to/dataset \
+#     --config=configs/lerobot_training/act_default.yaml
+
+# =============================================================================
+# Dataset Configuration
+# =============================================================================
+dataset:
+  repo_id: local  # Use "local" for local datasets
+  # root: /path/to/dataset  # Set via CLI or environment variable
+
+# =============================================================================
+# Policy Configuration
+# =============================================================================
+policy:
+  type: act
+  device: cuda
+
+  # ACT architecture parameters
+  # These match LeRobot's ACT defaults - adjust for your robot
+  chunk_size: 100           # Number of actions to predict
+  n_action_steps: 100       # Actions to execute (usually same as chunk_size)
+
+  # Transformer architecture
+  dim_model: 512            # Transformer hidden dimension
+  n_heads: 8                # Number of attention heads
+  n_layers: 4               # Number of transformer layers
+
+  # Vision encoder
+  vision_backbone: resnet18  # Options: resnet18, resnet34, resnet50
+  pretrained_backbone: true  # Use ImageNet pretrained weights
+
+  # Training options
+  temporal_agg: true         # Enable temporal action aggregation
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+# Batch size - adjust based on GPU memory
+batch_size: 8
+
+# Training steps
+steps: 100000
+
+# Evaluation and checkpoint frequency (as fraction of total steps)
+eval_freq: 10000   # Every 10% of training
+save_freq: 10000   # Every 10% of training
+
+# Learning rate
+lr: 1e-4
+
+# Optimizer
+optimizer: adamw
+weight_decay: 1e-4
+
+# =============================================================================
+# Wandb Configuration
+# =============================================================================
+wandb:
+  enable: false
+  project: lerobot-anvil
+  # entity: your-entity  # Optional: set your wandb entity
+
+# =============================================================================
+# Custom Training Options (lerobot_training specific)
+# =============================================================================
+# These are applied via environment variables or CLI flags
+
+# Camera filtering (set via LEROBOT_CAMERA_FILTER environment variable)
+# Example: LEROBOT_CAMERA_FILTER=chest,waist,wrist_l
+# cameras: null
+
+# Task override for SmolVLA (set via LEROBOT_TASK_OVERRIDE environment variable)
+# Example: LEROBOT_TASK_OVERRIDE="Pick up the red cube"
+# task_override: null
+
+# Delta actions (set via --use-delta-actions CLI flag)
+# Converts actions to relative: action = target - current
+# use_delta_actions: false
