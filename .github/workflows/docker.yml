@@ -1,0 +1,107 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ros2/**'
+      - 'docker/**'
+      - 'model_zoo/test/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ros2/**'
+      - 'docker/**'
+      - 'model_zoo/test/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/inference/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create docker-compose.test.yml if not exists
+        run: |
+          if [ ! -f docker/inference/docker-compose.test.yml ]; then
+            cat > docker/inference/docker-compose.test.yml << 'EOF'
+          version: '3.8'
+
+          services:
+            inference-test:
+              build:
+                context: ../..
+                dockerfile: docker/inference/Dockerfile
+              container_name: lerobot-inference-test
+              environment:
+                - ROS_DOMAIN_ID=0
+              command: |
+                bash -c "
+                  source /opt/ros/jazzy/setup.bash &&
+                  source /workspace/install/setup.bash &&
+                  ros2 pkg list | grep lerobot_control &&
+                  echo 'Integration test passed!'
+                "
+          EOF
+          fi
+
+      - name: Run integration tests
+        run: |
+          cd docker/inference
+          docker compose -f docker-compose.test.yml build
+          docker compose -f docker-compose.test.yml run --rm inference-test
