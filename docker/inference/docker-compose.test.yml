@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  inference-node:
+    build:
+      context: ../..
+      dockerfile: docker/inference/Dockerfile
+    container_name: lerobot-inference-test
+    networks:
+      - ros2_test
+    environment:
+      - ROS_DOMAIN_ID=99
+    volumes:
+      - ../../model_zoo/test:/workspace/model_zoo:ro
+      - ../../configs:/workspace/configs:ro
+    command: >
+      ros2 launch lerobot_control inference.launch.py
+      model_path:=/workspace/model_zoo/dummy_model
+    healthcheck:
+      test: ["CMD", "ros2", "node", "list"]
+      interval: 5s
+      timeout: 10s
+      retries: 6
+
+  test-runner:
+    build:
+      context: ../..
+      dockerfile: docker/inference/Dockerfile
+    container_name: lerobot-test-runner
+    networks:
+      - ros2_test
+    environment:
+      - ROS_DOMAIN_ID=99
+    depends_on:
+      inference-node:
+        condition: service_healthy
+    command: >
+      ros2 run lerobot_control mock_controller_node
+      --ros-args -p timeout:=30.0 -p required_actions:=10
+
+networks:
+  ros2_test:
+    driver: bridge

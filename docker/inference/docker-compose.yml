@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  inference:
+    build:
+      context: ../..
+      dockerfile: docker/inference/Dockerfile
+    container_name: lerobot-inference
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      - ROS_DOMAIN_ID=0
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ../../model_zoo:/workspace/model_zoo:ro
+      - ../../configs:/workspace/configs:ro
+    command: ros2 launch lerobot_control inference.launch.py
