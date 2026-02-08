@@ -161,9 +161,9 @@ if [ "$DRY_RUN" = true ]; then
     echo "[DRY RUN] Would execute:"
     echo ""
     echo "  cd ${REPO_ROOT}"
-    echo "  uv run python -m mcap_converter.cli convert \\"
-    echo "      --input ${INPUT_DIR} \\"
-    echo "      --output ${OUTPUT_DIR} \\"
+    echo "  uv run --package mcap-converter mcap-convert \\"
+    echo "      --input-dir ${INPUT_DIR} \\"
+    echo "      --output-dir ${OUTPUT_DIR} \\"
     echo "      --config ${CONFIG}"
     echo ""
     exit 0
@@ -178,11 +178,11 @@ echo ""
 
 cd "${REPO_ROOT}"
 
-# Run the mcap_converter CLI
-# Note: Adjust the module path based on actual package structure
-uv run python -m mcap_converter.cli convert \
-    --input "${INPUT_DIR}" \
-    --output "${OUTPUT_DIR}" \
+# Run the mcap_converter CLI via its registered entry point
+# --package ensures uv installs/resolves the mcap-converter workspace member
+uv run --package mcap-converter mcap-convert \
+    --input-dir "${INPUT_DIR}" \
+    --output-dir "${OUTPUT_DIR}" \
     --config "${CONFIG}"
 
 echo ""
