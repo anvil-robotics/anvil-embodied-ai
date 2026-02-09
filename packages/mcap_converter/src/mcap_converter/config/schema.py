@@ -1,7 +1,7 @@
 """Configuration schema for MCAP to LeRobot conversion"""
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -90,23 +90,18 @@ class DataConfig:
     robot_state_topic: str = "/joint_states"
 
     # Joint name parsing configuration
-    joint_name_pattern: JointNamePattern = field(
-        default_factory=JointNamePattern
-    )
+    joint_name_pattern: JointNamePattern = field(default_factory=JointNamePattern)
 
     # Separate feature mappings for observation vs action
     # This allows different features for input (observation) and output (action)
     observation_feature_mapping: FeatureMapping = field(
-        default_factory=lambda: FeatureMapping(
-            state="position",
-            others=["velocity", "effort"]
-        )
+        default_factory=lambda: FeatureMapping(state="position", others=["velocity", "effort"])
     )
 
     action_feature_mapping: FeatureMapping = field(
         default_factory=lambda: FeatureMapping(
             state="position",
-            others=[]  # Actions typically only need position
+            others=[],  # Actions typically only need position
         )
     )
 
@@ -130,6 +125,16 @@ class DataConfig:
     image_resolution: List[int] = field(
         default_factory=lambda: [640, 480]  # [width, height]
     )
+
+    # Control mode: how action data is sourced
+    #   "leader_follower" - actions come from leader joints in /joint_states (default)
+    #   "quest_teleop" - actions come from Float64MultiArray command topics
+    control_mode: str = "leader_follower"
+
+    # Action topics for quest_teleop mode
+    # Maps ROS topic -> arm name (e.g., {"/follower_l_.../commands": "left"})
+    # Only used when control_mode == "quest_teleop"
+    action_topics: Dict[str, str] = field(default_factory=dict)
 
     # ========== DEPRECATED FIELDS (for backward compatibility) ==========
 

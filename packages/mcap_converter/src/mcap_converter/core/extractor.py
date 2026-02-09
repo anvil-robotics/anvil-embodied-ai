@@ -1,19 +1,19 @@
 """Data extraction from MCAP files"""
 
-import numpy as np
 from collections import deque
-from typing import Dict, Any, List, Tuple, Optional, Generator
-from pathlib import Path
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
-from .reader import McapReader
-from ..config.schema import DataConfig, DEFAULT_DATA_CONFIG, JointNamePattern
-from ..utils.image_utils import decode_image, decode_compressed_image
+import numpy as np
+
+from ..config.schema import DEFAULT_DATA_CONFIG, DataConfig, JointNamePattern
 from ..exceptions import DataExtractionError
-
+from ..utils.image_utils import decode_compressed_image, decode_image
+from .reader import McapReader
 
 # =============================================================================
 # Shared Utilities
 # =============================================================================
+
 
 def parse_joint_name(
     joint_name: str,
@@ -48,7 +48,7 @@ def parse_joint_name(
     for prefix, role_name in pattern.role_prefix.items():
         if joint_name.startswith(prefix + sep):
             role = role_name
-            remaining = joint_name[len(prefix) + len(sep):]
+            remaining = joint_name[len(prefix) + len(sep) :]
             break
 
     if role is None:
@@ -71,6 +71,7 @@ def parse_joint_name(
 # =============================================================================
 # DataExtractor - Batch Mode (loads entire episode into memory)
 # =============================================================================
+
 
 class DataExtractor:
     """
@@ -122,8 +123,8 @@ class DataExtractor:
             Key string (e.g., "joint_states_right_observation" or "joint_states_action")
         """
         if robot:
-            return f'joint_states_{robot}_{role}'
-        return f'joint_states_{role}'
+            return f"joint_states_{robot}_{role}"
+        return f"joint_states_{role}"
 
     def extract_episode(self, mcap_path: str) -> Dict[str, Any]:
         """
@@ -176,6 +177,10 @@ class DataExtractor:
             for t in self.config.camera_topics
         }
 
+        # Add action command topics for quest_teleop mode
+        if self.config.control_mode == "quest_teleop":
+            interested_topics.extend(self.config.action_topics.keys())
+
         # Also include legacy topics if configured
         if self.config.robot_state_topics:
             interested_topics.extend(self.config.robot_state_topics)
@@ -183,8 +188,12 @@ class DataExtractor:
         for message in reader.read_messages(topics=interested_topics):
             topic = message.channel.topic
 
+            # Handle action command topics (quest_teleop mode)
+            if self.config.control_mode == "quest_teleop" and topic in self.config.action_topics:
+                arm_name = self.config.action_topics[topic]
+                self._extract_action_command(message, extracted_data, arm_name)
             # Handle single robot state topic (new architecture)
-            if topic == self.config.robot_state_topic:
+            elif topic == self.config.robot_state_topic:
                 self._extract_joint_state_single_topic(message, extracted_data)
             # Handle legacy multi-topic architecture
             elif self.config.robot_state_topics and topic in self.config.robot_state_topics:
@@ -212,11 +221,11 @@ class DataExtractor:
         for topic in self.config.camera_topics:
             cam_name = self.config.camera_topic_mapping[topic]
             extracted_data[cam_name] = {
-                'timestamp': [],
-                'image_data': [],
-                'encoding': None,
-                'height': None,
-                'width': None,
+                "timestamp": [],
+                "image_data": [],
+                "encoding": None,
+                "height": None,
+                "width": None,
             }
 
         # Note: Joint state structures are created dynamically during extraction
@@ -243,23 +252,27 @@ class DataExtractor:
                 print(f"Warning: {e}")
                 continue
 
+            # In quest_teleop mode, skip action-role joints (actions come from command topics)
+            if self.config.control_mode == "quest_teleop" and role == "action":
+                continue
+
             key = (role, robot)
             if key not in grouped_data:
                 grouped_data[key] = {
-                    'joint_names': [],
-                    'position': [],
-                    'velocity': [],
-                    'effort': [],
+                    "joint_names": [],
+                    "position": [],
+                    "velocity": [],
+                    "effort": [],
                 }
 
-            grouped_data[key]['joint_names'].append(joint_id)
+            grouped_data[key]["joint_names"].append(joint_id)
 
             if ros_msg.position and i < len(ros_msg.position):
-                grouped_data[key]['position'].append(ros_msg.position[i])
+                grouped_data[key]["position"].append(ros_msg.position[i])
             if ros_msg.velocity and i < len(ros_msg.velocity):
-                grouped_data[key]['velocity'].append(ros_msg.velocity[i])
+                grouped_data[key]["velocity"].append(ros_msg.velocity[i])
             if ros_msg.effort and i < len(ros_msg.effort):
-                grouped_data[key]['effort'].append(ros_msg.effort[i])
+                grouped_data[key]["effort"].append(ros_msg.effort[i])
 
         # Store in extracted_data with structured keys
         for (role, robot), data in grouped_data.items():
@@ -267,17 +280,17 @@ class DataExtractor:
 
             if key not in extracted_data:
                 extracted_data[key] = {
-                    'timestamp': [],
-                    'joint_names': data['joint_names'],  # Set once (assumes consistent ordering)
-                    'position': [],
-                    'velocity': [],
-                    'effort': [],
+                    "timestamp": [],
+                    "joint_names": data["joint_names"],  # Set once (assumes consistent ordering)
+                    "position": [],
+                    "velocity": [],
+                    "effort": [],
                 }
 
-            extracted_data[key]['timestamp'].append(time_ns)
-            extracted_data[key]['position'].append(data['position'])
-            extracted_data[key]['velocity'].append(data['velocity'])
-            extracted_data[key]['effort'].append(data['effort'])
+            extracted_data[key]["timestamp"].append(time_ns)
+            extracted_data[key]["position"].append(data["position"])
+            extracted_data[key]["velocity"].append(data["velocity"])
+            extracted_data[key]["effort"].append(data["effort"])
 
     def _extract_joint_state_legacy(self, message, extracted_data: Dict):
         """
@@ -287,33 +300,66 @@ class DataExtractor:
         """
         # Determine if follower (observation) or leader (action)
         if message.channel.topic == self.config.robot_state_topics[0]:
-            joint_key = 'joint_states_observation'
+            joint_key = "joint_states_observation"
         else:
-            joint_key = 'joint_states_action'
+            joint_key = "joint_states_action"
 
         # Initialize if not exists
         if joint_key not in extracted_data:
             extracted_data[joint_key] = {
-                'timestamp': [],
-                'joint_names': [],
+                "timestamp": [],
+                "joint_names": [],
             }
 
         # Extract data
         ros_msg = message.ros_msg
         time_ns = (ros_msg.header.stamp.sec * 1e9 + ros_msg.header.stamp.nanosec) / 1e9
-        extracted_data[joint_key]['timestamp'].append(time_ns)
+        extracted_data[joint_key]["timestamp"].append(time_ns)
 
         # Store joint names (once) - JointState uses 'name' not 'joint_names'
-        if not extracted_data[joint_key]['joint_names']:
-            extracted_data[joint_key]['joint_names'] = list(ros_msg.name)
+        if not extracted_data[joint_key]["joint_names"]:
+            extracted_data[joint_key]["joint_names"] = list(ros_msg.name)
 
         # Extract position, velocity, effort directly from JointState arrays
-        for field_name in ['position', 'velocity', 'effort']:
+        for field_name in ["position", "velocity", "effort"]:
             field_data = getattr(ros_msg, field_name, None)
             if field_data is not None and len(field_data) > 0:
                 if field_name not in extracted_data[joint_key]:
                     extracted_data[joint_key][field_name] = []
                 extracted_data[joint_key][field_name].append(list(field_data))
+
+    def _extract_action_command(self, message, extracted_data: Dict, arm_name: str):
+        """
+        Extract action command from Float64MultiArray topic (quest_teleop mode).
+
+        Stores data in the same structure as _extract_joint_state_single_topic
+        so downstream alignment/conversion code works unmodified.
+
+        Args:
+            message: MCAP message with ROS Float64MultiArray
+            extracted_data: Dictionary to store extracted data
+            arm_name: Arm name (e.g., "left", "right") from action_topics config
+        """
+        ros_msg = message.ros_msg
+        timestamp = message.log_time.timestamp()  # Float64MultiArray has no header.stamp
+
+        key = self._get_joint_state_key("action", arm_name)
+
+        positions = list(ros_msg.data)
+
+        if key not in extracted_data:
+            extracted_data[key] = {
+                "timestamp": [],
+                "joint_names": [f"joint{i}" for i in range(len(positions))],
+                "position": [],
+                "velocity": [],
+                "effort": [],
+            }
+
+        extracted_data[key]["timestamp"].append(timestamp)
+        extracted_data[key]["position"].append(positions)
+        extracted_data[key]["velocity"].append([])
+        extracted_data[key]["effort"].append([])
 
     def _extract_image(self, message, extracted_data: Dict):
         """Extract image from ROS Image message"""
@@ -321,17 +367,17 @@ class DataExtractor:
         time_ns = (ros_msg.header.stamp.sec * 1e9 + ros_msg.header.stamp.nanosec) / 1e9
 
         cam_name = self.config.camera_topic_mapping[message.channel.topic]
-        extracted_data[cam_name]['timestamp'].append(time_ns)
+        extracted_data[cam_name]["timestamp"].append(time_ns)
 
         # Decode image
         img_data = decode_image(ros_msg.data, ros_msg.encoding, ros_msg.height, ros_msg.width)
-        extracted_data[cam_name]['image_data'].append(img_data)
+        extracted_data[cam_name]["image_data"].append(img_data)
 
         # Store metadata (once)
-        if extracted_data[cam_name]['encoding'] is None:
-            extracted_data[cam_name]['encoding'] = ros_msg.encoding
-            extracted_data[cam_name]['height'] = ros_msg.height
-            extracted_data[cam_name]['width'] = ros_msg.width
+        if extracted_data[cam_name]["encoding"] is None:
+            extracted_data[cam_name]["encoding"] = ros_msg.encoding
+            extracted_data[cam_name]["height"] = ros_msg.height
+            extracted_data[cam_name]["width"] = ros_msg.width
 
     def _extract_compressed_image(self, message, extracted_data: Dict):
         """Extract image from ROS CompressedImage message"""
@@ -339,39 +385,39 @@ class DataExtractor:
         time_ns = (ros_msg.header.stamp.sec * 1e9 + ros_msg.header.stamp.nanosec) / 1e9
 
         cam_name = self._compressed_topic_mapping[message.channel.topic]
-        extracted_data[cam_name]['timestamp'].append(time_ns)
+        extracted_data[cam_name]["timestamp"].append(time_ns)
 
         # Decode compressed image
         # CompressedImage format field contains the compression format (e.g., "jpeg", "png")
         img_data = decode_compressed_image(ros_msg.data, ros_msg.format)
-        extracted_data[cam_name]['image_data'].append(img_data)
+        extracted_data[cam_name]["image_data"].append(img_data)
 
         # Store metadata (once) - get dimensions from decoded image
-        if extracted_data[cam_name]['encoding'] is None:
-            extracted_data[cam_name]['encoding'] = ros_msg.format
-            extracted_data[cam_name]['height'] = img_data.shape[0]
-            extracted_data[cam_name]['width'] = img_data.shape[1]
+        if extracted_data[cam_name]["encoding"] is None:
+            extracted_data[cam_name]["encoding"] = ros_msg.format
+            extracted_data[cam_name]["height"] = img_data.shape[0]
+            extracted_data[cam_name]["width"] = img_data.shape[1]
 
     def _is_joint_state_key(self, key: str) -> bool:
         """Check if a key is a joint state key."""
-        return key.startswith('joint_states_')
+        return key.startswith("joint_states_")
 
     def _convert_to_arrays(self, extracted_data: Dict):
         """Convert lists to numpy arrays"""
         # Convert images
         for key, value in extracted_data.items():
             if key in self.config.camera_topic_mapping.values():
-                if len(value['image_data']) > 0:
-                    value['image_data'] = np.array(value['image_data'], dtype=np.uint8)
+                if len(value["image_data"]) > 0:
+                    value["image_data"] = np.array(value["image_data"], dtype=np.uint8)
                 else:
-                    value['image_data'] = np.empty((0,), dtype=np.uint8)
+                    value["image_data"] = np.empty((0,), dtype=np.uint8)
 
         # Convert timestamps (relative to first timestamp)
         # Find global first timestamp
         first_ts = None
         for key, value in extracted_data.items():
-            if 'timestamp' in value and len(value['timestamp']) > 0:
-                ts = value['timestamp'][0]
+            if "timestamp" in value and len(value["timestamp"]) > 0:
+                ts = value["timestamp"][0]
                 if first_ts is None or ts < first_ts:
                     first_ts = ts
 
@@ -380,20 +426,20 @@ class DataExtractor:
 
         # Apply relative timestamps
         for key, value in extracted_data.items():
-            if 'timestamp' in value:
-                ts_list = value['timestamp']
+            if "timestamp" in value:
+                ts_list = value["timestamp"]
                 if len(ts_list) > 0:
                     ts = np.array(ts_list, dtype=np.float64)
                     ts = ts - first_ts
-                    value['timestamp'] = ts.astype(np.float32)
+                    value["timestamp"] = ts.astype(np.float32)
                 else:
-                    value['timestamp'] = np.empty((0,), dtype=np.float32)
+                    value["timestamp"] = np.empty((0,), dtype=np.float32)
 
         # Convert joint states
         for key, value in extracted_data.items():
             if self._is_joint_state_key(key):
                 for field_name, field_values in value.items():
-                    if field_name in ['timestamp', 'joint_names']:
+                    if field_name in ["timestamp", "joint_names"]:
                         continue
                     if isinstance(field_values, list) and len(field_values) > 0:
                         value[field_name] = np.array(field_values, dtype=np.float32)
@@ -405,20 +451,21 @@ class DataExtractor:
         # Print joint state summaries
         for key, value in extracted_data.items():
             if self._is_joint_state_key(key):
-                count = len(value['timestamp'])
-                joint_count = len(value.get('joint_names', []))
+                count = len(value["timestamp"])
+                joint_count = len(value.get("joint_names", []))
                 print(f"[OK] Extracted {count} samples for {key} ({joint_count} joints)")
 
         # Print camera summaries
         for cam_name in self.config.camera_topic_mapping.values():
             if cam_name in extracted_data:
-                count = len(extracted_data[cam_name]['image_data'])
+                count = len(extracted_data[cam_name]["image_data"])
                 print(f"[OK] Extracted {count} images ({cam_name})")
 
 
 # =============================================================================
 # BufferedStreamExtractor - Streaming Mode (memory-bounded)
 # =============================================================================
+
 
 class BufferedStreamExtractor:
     """
@@ -462,11 +509,15 @@ class BufferedStreamExtractor:
         self.fps = fps
         self.buffer_seconds = buffer_seconds
         self.half_buffer = int(buffer_seconds * fps / 2)  # 75 frames for 5s @ 30fps
-        self.full_buffer = self.half_buffer * 2           # 150 frames
+        self.full_buffer = self.half_buffer * 2  # 150 frames
         self.target_size = tuple(config.image_resolution)  # (width, height)
 
         # Joint name pattern for parsing (reuse from DataExtractor)
         self._joint_pattern = config.joint_name_pattern
+
+        # Control mode for action data sourcing
+        self._control_mode = config.control_mode
+        self._action_topics = config.action_topics
 
     def extract_frames(
         self,
@@ -520,12 +571,17 @@ class BufferedStreamExtractor:
         all_topics = list(all_camera_topics)
         all_topics.append(self.config.robot_state_topic)
 
+        # Add action command topics for quest_teleop mode
+        if self._control_mode == "quest_teleop":
+            all_topics.extend(self._action_topics.keys())
+
         # Get main camera (first one in config)
         main_cam = list(self.config.camera_topic_mapping.values())[0]
 
         cursor = 0  # Index of frame to process next
         frames_yielded = 0
         first_ts = None
+        _logged_joint_roles = False
 
         for message in reader.read_messages(topics=all_topics):
             topic = message.channel.topic
@@ -533,6 +589,12 @@ class BufferedStreamExtractor:
             # Handle joint state messages
             if topic == self.config.robot_state_topic:
                 self._buffer_joint_state(message, joint_buffers)
+                continue
+
+            # Handle action command topics (quest_teleop mode)
+            if self._control_mode == "quest_teleop" and topic in self._action_topics:
+                arm_name = self._action_topics[topic]
+                self._buffer_action_command(message, joint_buffers, arm_name)
                 continue
 
             # Handle camera messages
@@ -559,6 +621,25 @@ class BufferedStreamExtractor:
 
             # Start processing when main camera buffer reaches threshold
             main_buffer_len = len(camera_buffers[main_cam])
+
+            # Log joint buffer roles once when first frame is about to be processed
+            if not _logged_joint_roles and main_buffer_len >= self.half_buffer:
+                _logged_joint_roles = True
+                roles_found = sorted(joint_buffers.keys())
+                print(f"[BufferedStream] Joint buffer roles: {roles_found}")
+                has_obs = any(r == "observation" for r, _ in roles_found)
+                has_act = any(r == "action" for r, _ in roles_found)
+                if has_obs and not has_act:
+                    print(
+                        "[BufferedStream] WARNING: No action (leader) joints found in /joint_states."
+                    )
+                    print(
+                        f"[BufferedStream]   Expected joint name prefixes for action: "
+                        f"{[p for p, role in self._joint_pattern.role_prefix.items() if role == 'action']}"
+                    )
+                    print(
+                        "[BufferedStream]   All frames will be skipped unless action data is available."
+                    )
 
             # Condition: buffer has at least half_buffer frames ahead of cursor
             if main_buffer_len >= self.half_buffer + cursor:
@@ -592,7 +673,7 @@ class BufferedStreamExtractor:
                     cursor -= 1  # Adjust cursor after removal
 
         # Flush: process remaining frames in buffer
-        print(f"[BufferedStream] Flushing remaining buffer...")
+        print("[BufferedStream] Flushing remaining buffer...")
         while cursor < len(camera_buffers[main_cam]):
             frame = self._align_frame_at_cursor(
                 camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
@@ -632,7 +713,7 @@ class BufferedStreamExtractor:
 
         # Resize main camera image
         resized_main = resize_func(main_img, self.target_size)
-        frame = {f'observation.images.{main_cam}': resized_main}
+        frame = {f"observation.images.{main_cam}": resized_main}
 
         # Find nearest match for each other camera
         for cam_name, buffer in camera_buffers.items():
@@ -648,7 +729,7 @@ class BufferedStreamExtractor:
             if nearest_idx is not None:
                 _, img = buffer[nearest_idx]
                 resized_img = resize_func(img, self.target_size)
-                frame[f'observation.images.{cam_name}'] = resized_img
+                frame[f"observation.images.{cam_name}"] = resized_img
             else:
                 return None
 
@@ -659,7 +740,7 @@ class BufferedStreamExtractor:
                 return None  # Skip frame if joint states not available
             frame.update(joint_aligned)
 
-        frame['task'] = task
+        frame["task"] = task
         return frame
 
     def _align_joint_states(
@@ -686,7 +767,7 @@ class BufferedStreamExtractor:
         action_data = {}  # {robot: {pos}}
 
         for (role, robot), data in joint_buffers.items():
-            buffer = data['buffer']
+            buffer = data["buffer"]
 
             if len(buffer) == 0:
                 return None  # Required joint data missing
@@ -698,14 +779,14 @@ class BufferedStreamExtractor:
 
             ts, pos, vel, eff = buffer[nearest_idx]
 
-            if role == 'observation':
+            if role == "observation":
                 obs_data[robot] = {
-                    'pos': pos.copy(),
-                    'vel': vel.copy() if vel.size > 0 else None,
-                    'eff': eff.copy() if eff.size > 0 else None,
+                    "pos": pos.copy(),
+                    "vel": vel.copy() if vel.size > 0 else None,
+                    "eff": eff.copy() if eff.size > 0 else None,
                 }
             else:  # action
-                action_data[robot] = {'pos': pos.copy()}
+                action_data[robot] = {"pos": pos.copy()}
 
         # Check if multi-robot (has named robots like 'left', 'right')
         robots = sorted([r for r in set(obs_data.keys()) | set(action_data.keys()) if r])
@@ -715,39 +796,52 @@ class BufferedStreamExtractor:
             result = {}
 
             # Concatenate observation state
-            obs_positions = [obs_data[r]['pos'] for r in robots if r in obs_data]
+            obs_positions = [obs_data[r]["pos"] for r in robots if r in obs_data]
             if obs_positions:
-                result['observation.state'] = np.concatenate(obs_positions)
+                result["observation.state"] = np.concatenate(obs_positions)
 
             # Concatenate observation velocity (if available)
-            obs_velocities = [obs_data[r]['vel'] for r in robots if r in obs_data and obs_data[r]['vel'] is not None]
+            obs_velocities = [
+                obs_data[r]["vel"]
+                for r in robots
+                if r in obs_data and obs_data[r]["vel"] is not None
+            ]
             if obs_velocities:
-                result['observation.velocity'] = np.concatenate(obs_velocities)
+                result["observation.velocity"] = np.concatenate(obs_velocities)
 
             # Concatenate observation effort (if available)
-            obs_efforts = [obs_data[r]['eff'] for r in robots if r in obs_data and obs_data[r]['eff'] is not None]
+            obs_efforts = [
+                obs_data[r]["eff"]
+                for r in robots
+                if r in obs_data and obs_data[r]["eff"] is not None
+            ]
             if obs_efforts:
-                result['observation.effort'] = np.concatenate(obs_efforts)
+                result["observation.effort"] = np.concatenate(obs_efforts)
 
-            # Concatenate action
-            action_positions = [action_data[r]['pos'] for r in robots if r in action_data]
-            if action_positions:
-                result['action'] = np.concatenate(action_positions)
+            # Concatenate action - require ALL robots to have action data
+            action_positions = []
+            for r in robots:
+                if r not in action_data:
+                    return None  # Action data missing for this arm, skip frame
+                action_positions.append(action_data[r]["pos"])
+            result["action"] = np.concatenate(action_positions)
 
             return result
         else:
             # Single robot: use original naming (no prefix)
             result = {}
 
-            if '' in obs_data:
-                result['observation.state'] = obs_data['']['pos']
-                if obs_data['']['vel'] is not None:
-                    result['observation.velocity'] = obs_data['']['vel']
-                if obs_data['']['eff'] is not None:
-                    result['observation.effort'] = obs_data['']['eff']
+            if "" in obs_data:
+                result["observation.state"] = obs_data[""]["pos"]
+                if obs_data[""]["vel"] is not None:
+                    result["observation.velocity"] = obs_data[""]["vel"]
+                if obs_data[""]["eff"] is not None:
+                    result["observation.effort"] = obs_data[""]["eff"]
 
-            if '' in action_data:
-                result['action'] = action_data['']['pos']
+            if "" in action_data:
+                result["action"] = action_data[""]["pos"]
+            else:
+                return None  # Action data required but not found in joint buffers
 
             return result
 
@@ -770,7 +864,7 @@ class BufferedStreamExtractor:
             return None
 
         # Linear search for nearest (buffer is small, typically 150-1000 items)
-        min_diff = float('inf')
+        min_diff = float("inf")
         nearest_idx = 0
 
         for i, item in enumerate(buffer):
@@ -810,39 +904,88 @@ class BufferedStreamExtractor:
             except DataExtractionError:
                 continue  # Skip unparseable joints
 
+            # In quest_teleop mode, skip action-role joints (actions come from command topics)
+            if self._control_mode == "quest_teleop" and role == "action":
+                continue
+
             key = (role, robot)
             if key not in grouped:
                 grouped[key] = {
-                    'joint_ids': [],
-                    'position': [],
-                    'velocity': [],
-                    'effort': [],
+                    "joint_ids": [],
+                    "position": [],
+                    "velocity": [],
+                    "effort": [],
                 }
 
-            grouped[key]['joint_ids'].append(joint_id)
+            grouped[key]["joint_ids"].append(joint_id)
 
             if ros_msg.position and i < len(ros_msg.position):
-                grouped[key]['position'].append(ros_msg.position[i])
+                grouped[key]["position"].append(ros_msg.position[i])
             if ros_msg.velocity and i < len(ros_msg.velocity):
-                grouped[key]['velocity'].append(ros_msg.velocity[i])
+                grouped[key]["velocity"].append(ros_msg.velocity[i])
             if ros_msg.effort and i < len(ros_msg.effort):
-                grouped[key]['effort'].append(ros_msg.effort[i])
+                grouped[key]["effort"].append(ros_msg.effort[i])
 
         # Add to buffers
         for key, data in grouped.items():
             if key not in joint_buffers:
                 joint_buffers[key] = {
-                    'buffer': deque(),
-                    'joint_names': data['joint_ids'],  # Store joint names once
+                    "buffer": deque(),
+                    "joint_names": data["joint_ids"],  # Store joint names once
                 }
 
             # Create arrays
-            pos = np.array(data['position'], dtype=np.float32) if data['position'] else np.array([], dtype=np.float32)
-            vel = np.array(data['velocity'], dtype=np.float32) if data['velocity'] else np.array([], dtype=np.float32)
-            eff = np.array(data['effort'], dtype=np.float32) if data['effort'] else np.array([], dtype=np.float32)
+            pos = (
+                np.array(data["position"], dtype=np.float32)
+                if data["position"]
+                else np.array([], dtype=np.float32)
+            )
+            vel = (
+                np.array(data["velocity"], dtype=np.float32)
+                if data["velocity"]
+                else np.array([], dtype=np.float32)
+            )
+            eff = (
+                np.array(data["effort"], dtype=np.float32)
+                if data["effort"]
+                else np.array([], dtype=np.float32)
+            )
 
             # Append as tuple: (timestamp, position, velocity, effort)
-            joint_buffers[key]['buffer'].append((timestamp, pos, vel, eff))
+            joint_buffers[key]["buffer"].append((timestamp, pos, vel, eff))
+
+    def _buffer_action_command(
+        self,
+        message,
+        joint_buffers: Dict[Tuple[str, str], Dict],
+        arm_name: str,
+    ) -> None:
+        """
+        Buffer action command from Float64MultiArray topic (quest_teleop mode).
+
+        Stores data in the same (timestamp, pos, vel, eff) tuple format as
+        _buffer_joint_state so downstream alignment code works unmodified.
+
+        Args:
+            message: MCAP message with ROS Float64MultiArray
+            joint_buffers: Dict keyed by (role, robot) containing buffer and metadata
+            arm_name: Arm name (e.g., "left", "right") from action_topics config
+        """
+        ros_msg = message.ros_msg
+        timestamp = message.log_time.timestamp()  # Float64MultiArray has no header.stamp
+
+        pos = np.array(ros_msg.data, dtype=np.float32)
+        vel = np.array([], dtype=np.float32)
+        eff = np.array([], dtype=np.float32)
+
+        key = ("action", arm_name)
+        if key not in joint_buffers:
+            joint_buffers[key] = {
+                "buffer": deque(),
+                "joint_names": [f"joint{i}" for i in range(len(pos))],
+            }
+
+        joint_buffers[key]["buffer"].append((timestamp, pos, vel, eff))
 
     def _sync_joint_buffers(
         self,
@@ -859,7 +1002,7 @@ class BufferedStreamExtractor:
             oldest_camera_ts: Timestamp of oldest remaining camera frame
         """
         for key, data in joint_buffers.items():
-            buffer = data['buffer']
+            buffer = data["buffer"]
             while buffer and buffer[0][0] < oldest_camera_ts:
                 buffer.popleft()
 
@@ -875,8 +1018,8 @@ class BufferedStreamExtractor:
         """
         joint_names = {}
         for (role, robot), data in joint_buffers.items():
-            if role == 'observation':  # Use observation to get joint names (same for action)
+            if role == "observation":  # Use observation to get joint names (same for action)
                 prefix = robot if robot else ""
                 if prefix not in joint_names:
-                    joint_names[prefix] = data['joint_names']
+                    joint_names[prefix] = data["joint_names"]
         return joint_names

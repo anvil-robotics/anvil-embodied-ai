@@ -34,12 +34,14 @@ def format_duration(seconds: float) -> str:
         secs = seconds % 60
         return f"{hours}h {minutes}m {secs:.0f}s"
 
+
 from mcap_converter import (
-    McapReader,
-    LeRobotWriter,
     ConfigLoader,
     DataConfig,
+    LeRobotWriter,
+    McapReader,
 )
+from mcap_converter.config.validators import validate_config
 from mcap_converter.core.extractor import BufferedStreamExtractor
 
 
@@ -84,7 +86,7 @@ def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
             for prefix, role_name in joint_pattern.role_prefix.items():
                 if joint_name.startswith(prefix + sep):
                     role = role_name
-                    remaining = joint_name[len(prefix) + len(sep):]
+                    remaining = joint_name[len(prefix) + len(sep) :]
                     break
 
             if role != "observation":
@@ -114,7 +116,7 @@ def convert_session(
     output_dir: str,
     repo_id: str,
     robot_type: str = "anvil_openarm",
-    fps: int = 30,
+    fps: int = 60,
     tolerance_s: float = 1e-3,
     task: str = "manipulation",
     config: DataConfig = None,
@@ -140,6 +142,9 @@ def convert_session(
 
     if config is None:
         config = ConfigLoader.get_default()
+
+    # Validate configuration before proceeding
+    validate_config(config)
 
     # Find all MCAP files
     mcap_files = collect_mcap_files(input_dir)
@@ -175,6 +180,9 @@ def convert_session(
         print(f"[{get_timestamp()}] Detected single-arm robot")
         print(f"  joints: {joint_names.get('', [])}")
     print(f"[{get_timestamp()}] Total joints: {total_joints} (observation + action)")
+    print(f"[{get_timestamp()}] Control mode: {config.control_mode}")
+    if config.control_mode == "quest_teleop":
+        print(f"[{get_timestamp()}] Action topics: {config.action_topics}")
 
     # Get camera names
     camera_names = list(config.camera_topic_mapping.values())
@@ -196,16 +204,21 @@ def convert_session(
     else:
         # Save config from DataConfig object
         import yaml
-        with open(conversion_config_dest, 'w') as f:
-            yaml.dump({
-                'robot_state_topic': config.robot_state_topic,
-                'joint_names': {
-                    'separator': config.joint_name_pattern.separator,
-                    'source': config.joint_name_pattern.source,
-                    'arms': config.joint_name_pattern.arms,
-                },
-                'camera_topic_mapping': config.camera_topic_mapping,
-            }, f, default_flow_style=False)
+
+        config_data = {
+            "robot_state_topic": config.robot_state_topic,
+            "joint_names": {
+                "separator": config.joint_name_pattern.separator,
+                "source": config.joint_name_pattern.source,
+                "arms": config.joint_name_pattern.arms,
+            },
+            "camera_topic_mapping": config.camera_topic_mapping,
+            "control_mode": config.control_mode,
+        }
+        if config.action_topics:
+            config_data["action_topics"] = config.action_topics
+        with open(conversion_config_dest, "w") as f:
+            yaml.dump(config_data, f, default_flow_style=False)
         print(f"[{get_timestamp()}] Saved conversion config: {conversion_config_dest}")
 
     # Process each MCAP file as one episode
@@ -270,74 +283,41 @@ def main(args=None):
         description="Convert MCAP files to LeRobot dataset (Modular Version)"
     )
     parser.add_argument(
-        '-i', '--input-dir',
+        "-i", "--input-dir", type=str, required=True, help="Input directory containing MCAP files"
+    )
+    parser.add_argument(
+        "-o", "--output-dir", type=str, default="data/processed/dataset", help="Output directory"
+    )
+    parser.add_argument("--config", type=str, help="Path to YAML config file (optional)")
+    parser.add_argument("--hf-user", type=str, help="Hugging Face username")
+    parser.add_argument("--hf-repo", type=str, help="Dataset repository name")
+    parser.add_argument(
+        "--robot-type",
         type=str,
-        required=True,
-        help='Input directory containing MCAP files'
+        default="anvil_openarm",
+        choices=["anvil_openarm", "anvil_yam"],
+        help="Robot type",
+    )
+    parser.add_argument("--fps", type=int, default=30, help="Video framerate")
+    parser.add_argument(
+        "--tolerance-s", type=float, default=1e-3, help="Timestamp difference tolerance"
     )
     parser.add_argument(
-        '-o', '--output-dir',
-        type=str,
-        default='data/processed/dataset',
-        help='Output directory'
+        "--task", type=str, default="manipulation", help="Task name for the dataset"
     )
+    parser.add_argument("--push-to-hub", action="store_true", help="Upload to Hugging Face Hub")
     parser.add_argument(
-        '--config',
-        type=str,
-        help='Path to YAML config file (optional)'
-    )
-    parser.add_argument(
-        '--hf-user',
-        type=str,
-        help='Hugging Face username'
-    )
-    parser.add_argument(
-        '--hf-repo',
-        type=str,
-        help='Dataset repository name'
-    )
-    parser.add_argument(
-        '--robot-type',
-        type=str,
-        default='anvil_openarm',
-        choices=['anvil_openarm', 'anvil_yam'],
-        help='Robot type'
-    )
-    parser.add_argument(
-        '--fps',
-        type=int,
-        default=30,
-        help='Video framerate'
-    )
-    parser.add_argument(
-        '--tolerance-s',
-        type=float,
-        default=1e-3,
-        help='Timestamp difference tolerance'
-    )
-    parser.add_argument(
-        '--task',
-        type=str,
-        default='manipulation',
-        help='Task name for the dataset'
-    )
-    parser.add_argument(
-        '--push-to-hub',
-        action='store_true',
-        help='Upload to Hugging Face Hub'
-    )
-    parser.add_argument(
-        '--buffer-seconds',
+        "--buffer-seconds",
         type=float,
         default=5.0,
-        help='Buffer window for time alignment in seconds (default: 5.0). '
-             'Used for memory-efficient streaming extraction.'
+        help="Buffer window for time alignment in seconds (default: 5.0). "
+        "Used for memory-efficient streaming extraction.",
     )
 
     args = parser.parse_args(args)
 
     # Normalize paths
-    args.output_dir = args.output_dir.rstrip('/')
+    args.output_dir = args.output_dir.rstrip("/")
 
     # Handle HuggingFace username
     if args.hf_user:
@@ -345,7 +325,7 @@ def main(args=None):
     else:
         try:
             user_info = huggingface_hub.whoami()
-            hf_username = user_info['name']
+            hf_username = user_info["name"]
         except Exception as e:
             print(f"[WARNING] Cannot get Hugging Face user information: {e}")
             hf_username = "anvil_robot"
@@ -405,9 +385,10 @@ def main(args=None):
     except Exception as e:
         print(f"\n[{get_timestamp()}] Error occurred during conversion: {e}")
         import traceback
+
         traceback.print_exc()
         exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -57,6 +57,21 @@ image_resolution: [640, 480]
 
 
 # =============================================================================
+# Control Mode
+# =============================================================================
+# How action data (target positions) is sourced:
+#   "leader_follower" - actions come from leader joints in /joint_states (default)
+#   "quest_teleop"    - actions come from Float64MultiArray command topics
+control_mode: "leader_follower"
+
+# Action topics for quest_teleop mode (maps ROS topic -> arm name)
+# Only used when control_mode is "quest_teleop"
+# action_topics:
+#   "/follower_l_forward_position_controller/commands": "left"
+#   "/follower_r_forward_position_controller/commands": "right"
+
+
+# =============================================================================
 # Feature Extraction
 # =============================================================================
 

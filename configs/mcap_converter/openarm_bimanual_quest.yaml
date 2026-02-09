@@ -1,0 +1,73 @@
+# =============================================================================
+# OpenArm MCAP to LeRobot Conversion Configuration (Quest Teleop)
+# =============================================================================
+# Use this config when action data comes from VR controllers (Quest)
+# publishing Float64MultiArray commands instead of leader joints.
+
+# ROS2 Topic containing all joint states (sensor_msgs/JointState)
+robot_state_topic: "/joint_states"
+
+
+# =============================================================================
+# Joint Name Parsing
+# =============================================================================
+# In quest_teleop mode, only follower (observation) joints are parsed from
+# /joint_states. Leader joints are ignored even if present.
+
+joint_names:
+  separator: "_"
+
+  source:
+    follower: observation
+
+  # Second part: arm identifier -> for bimanual robots
+  arms:
+    r: right
+    l: left
+
+
+# =============================================================================
+# Camera Configuration
+# =============================================================================
+
+camera_topics:
+  - "/camera0/image_raw"
+  - "/camera1/image_raw"
+  - "/camera2/image_raw"
+  - "/camera3/image_raw"
+
+camera_topic_mapping:
+  "/camera0/image_raw": "waist"
+  "/camera1/image_raw": "wrist_r"
+  "/camera2/image_raw": "chest"
+  "/camera3/image_raw": "wrist_l"
+
+# Target image resolution [width, height]
+image_resolution: [640, 480]
+
+
+# =============================================================================
+# Control Mode
+# =============================================================================
+# Actions come from Float64MultiArray command topics (Quest VR controllers)
+control_mode: "quest_teleop"
+
+# Maps ROS command topic -> arm name
+action_topics:
+  "/follower_l_forward_position_controller/commands": "left"
+  "/follower_r_forward_position_controller/commands": "right"
+
+
+# =============================================================================
+# Feature Extraction
+# =============================================================================
+
+observation_feature_mapping:
+  state: "position"
+  others:
+    - "velocity"
+    - "effort"
+
+action_feature_mapping:
+  state: "position"
+  others: []
