@@ -10,10 +10,17 @@ services:
     ipc: host
     privileged: true
     environment:
-      - ROS_DOMAIN_ID=0
+      - ROS_DOMAIN_ID=28
       - DISPLAY=${DISPLAY}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ../../model_zoo:/workspace/model_zoo:ro
       - ../../configs:/workspace/configs:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     command: ros2 launch lerobot_control inference.launch.py

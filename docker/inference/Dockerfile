@@ -26,14 +26,14 @@ COPY ros2/src/lerobot_control /workspace/src/lerobot_control
 # Copy configs
 COPY configs/lerobot_control /workspace/configs
 
-# Install Python dependencies
-RUN cd /workspace/src/lerobot_control && \
-    pip3 install -r requirements.txt || true
-
-# Build ROS2 workspace
+# Build ROS2 workspace (before pip install to preserve system setuptools)
 RUN . /opt/ros/jazzy/setup.sh && \
     cd /workspace && \
     colcon build --symlink-install
+
+# Install Python dependencies from lerobot_control setup.py
+RUN cd /workspace/src/lerobot_control && \
+    pip3 install --break-system-packages --ignore-installed .
 
 # Set entrypoint
 COPY docker/inference/entrypoint.sh /entrypoint.sh

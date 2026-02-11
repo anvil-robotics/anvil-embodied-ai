@@ -109,3 +109,6 @@ echo ""
 echo "To run with GPU support:"
 echo "  docker run --rm -it --gpus all ${IMAGE_NAME}:${TAG}"
 echo ""
+
+
+# This worked for me: docker compose -f docker/inference/docker-compose.yml build --no-cache
