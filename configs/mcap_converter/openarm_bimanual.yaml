@@ -1,0 +1,94 @@
+# =============================================================================
+# OpenArm MCAP to LeRobot Conversion Configuration
+# =============================================================================
+
+# ROS2 Topic containing all joint states (sensor_msgs/JointState)
+robot_state_topic: "/joint_states"
+
+
+# =============================================================================
+# Joint Name Parsing
+# =============================================================================
+# Your joint names look like: "leader_r_joint1", "follower_l_finger_joint1"
+# Pattern: {source}_{arm}_{joint_id}
+#
+# Example parsing:
+#   "leader_r_joint1"       -> action, right arm, joint1
+#   "follower_l_finger_joint1" -> observation, left arm, finger_joint1
+
+joint_names:
+  separator: "_"
+
+  # First part: data source -> determines observation vs action
+  #   leader/master joints   = action (target positions to reach)
+  #   follower/puppet joints = observation (current robot state)
+  source:
+    leader: action
+    follower: observation
+
+  # Second part: arm identifier -> for bimanual robots
+  # Set to {} for single-arm robots
+  arms:
+    r: right
+    l: left
+
+
+# =============================================================================
+# Camera Configuration
+# =============================================================================
+
+# ROS2 image topics (sensor_msgs/Image or sensor_msgs/CompressedImage)
+camera_topics:
+  - "/camera0/image_raw"
+  - "/camera1/image_raw"
+  - "/camera2/image_raw"
+  - "/camera3/image_raw"
+
+# Map ROS topics to dataset camera names
+# These become: observation.images.{name}
+camera_topic_mapping:
+  "/camera0/image_raw": "waist"
+  "/camera1/image_raw": "wrist_r"
+  "/camera2/image_raw": "chest"
+  "/camera3/image_raw": "wrist_l"
+
+# Target image resolution [width, height]
+image_resolution: [640, 480]
+
+
+# =============================================================================
+# Feature Extraction
+# =============================================================================
+
+# What to extract from observation joints (follower)
+observation_feature_mapping:
+  state: "position"      # Primary feature -> observation.state
+  others:                # Additional features
+    - "velocity"         # -> observation.velocity
+    - "effort"           # -> observation.effort
+
+# What to extract from action joints (leader)
+action_feature_mapping:
+  state: "position"      # Primary feature -> action
+  others: []             # No additional action features
+
+
+# =============================================================================
+# Quick Reference
+# =============================================================================
+#
+# Input (ROS JointState message):
+#   name: ["leader_r_joint1", "leader_r_joint2", ..., "follower_l_joint1", ...]
+#   position: [0.1, 0.2, ..., 0.3, ...]
+#   velocity: [0.01, 0.02, ..., 0.03, ...]
+#   effort: [1.0, 2.0, ..., 3.0, ...]
+#
+# Output (LeRobot dataset):
+#   observation.state     [16]  = [left_joints..., right_joints...]  (from follower)
+#   observation.velocity  [16]  = [left_joints..., right_joints...]  (from follower)
+#   observation.effort    [16]  = [left_joints..., right_joints...]  (from follower)
+#   action                [16]  = [left_joints..., right_joints...]  (from leader)
+#   observation.images.waist    = camera0 frames
+#   observation.images.chest    = camera2 frames
+#   observation.images.wrist_r  = camera1 frames
+#   observation.images.wrist_l  = camera3 frames
