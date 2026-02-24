@@ -1,0 +1,121 @@
+# Mock distributed CycloneDDS discovery test.
+#
+# Three containers on a Docker bridge network using CycloneDDS middleware.
+# Validates: middleware installation, entrypoint env var wiring, and
+# cross-container topic discovery — no GPU or real hardware needed.
+#
+# Usage:
+#   docker compose -f docker-compose.mockdist.yml up --build --abort-on-container-exit
+
+services:
+  # Publishes dummy images + joint states (simulates Robot PC)
+  mock-robot:
+    build:
+      context: .
+      dockerfile: docker/inference/Dockerfile
+    container_name: lerobot-test-mock-robot
+    networks:
+      - ros2_test
+    environment:
+      - ROS_DOMAIN_ID=99
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/test_bridge.xml
+    volumes:
+      - ./configs:/workspace/configs:ro
+    command: >
+      ros2 run lerobot_control mock_controller_node
+      --ros-args -p timeout:=120.0 -p required_actions:=999999
+      -p camera_resolution:=${CAMERA_RES:-480p} -p camera_fps:=${CAMERA_FPS:-30}
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f mock_controller_node > /dev/null"]
+      start_period: 3s
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  # Inference node in monitor_only mode — subscribes + logs FPS, no model needed
+  inference-node:
+    build:
+      context: .
+      dockerfile: docker/inference/Dockerfile
+    container_name: lerobot-test-inference
+    networks:
+      - ros2_test
+    environment:
+      - ROS_DOMAIN_ID=99
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/test_bridge.xml
+    volumes:
+      - ./configs:/workspace/configs:ro
+    depends_on:
+      mock-robot:
+        condition: service_healthy
+    command: >
+      ros2 launch lerobot_control inference.launch.py
+      monitor_only:=true
+      config_file:=/workspace/configs/lerobot_control/test_mockdist.yaml
+
+  # Lightweight discovery check — verifies both nodes see each other via CycloneDDS
+  discovery-check:
+    build:
+      context: .
+      dockerfile: docker/inference/Dockerfile
+    container_name: lerobot-test-discovery
+    networks:
+      - ros2_test
+    environment:
+      - ROS_DOMAIN_ID=99
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/test_bridge.xml
+    volumes:
+      - ./configs:/workspace/configs:ro
+    depends_on:
+      mock-robot:
+        condition: service_healthy
+    entrypoint: ["/entrypoint.sh"]
+    command:
+      - bash
+      - -c
+      - |
+        echo "=== CycloneDDS Discovery Check ==="
+        echo "RMW_IMPLEMENTATION=$${RMW_IMPLEMENTATION}"
+        echo "CYCLONEDDS_URI=$${CYCLONEDDS_URI}"
+        echo "ROS_DOMAIN_ID=$${ROS_DOMAIN_ID}"
+        echo ""
+
+        echo "--- Checking middleware ---"
+        ros2 doctor --report 2>/dev/null | grep -i middleware || echo "(middleware line not found, continuing)"
+        echo ""
+
+        echo "--- Waiting for topic discovery (max 30s) ---"
+        TRIES=0
+        while [ $$TRIES -lt 30 ]; do
+          TOPICS=$$(ros2 topic list 2>/dev/null)
+          if echo "$$TOPICS" | grep -q "/joint_states" && echo "$$TOPICS" | grep -q "/camera0/image_raw/compressed" && echo "$$TOPICS" | grep -q "/camera1/image_raw/compressed" && echo "$$TOPICS" | grep -q "/camera2/image_raw/compressed" && echo "$$TOPICS" | grep -q "/camera3/image_raw/compressed"; then
+            echo "PASS: discovered /joint_states and 4 camera topics"
+            echo ""
+            echo "--- All discovered topics ---"
+            echo "$$TOPICS"
+            echo ""
+            echo "--- All discovered nodes ---"
+            ros2 node list 2>/dev/null
+            echo ""
+            echo "=== Discovery check PASSED ==="
+            echo ""
+            echo "Observing for 60s (watch inference-node stats)..."
+            sleep 60
+            echo "=== Observation complete ==="
+            exit 0
+          fi
+          TRIES=$$((TRIES + 1))
+          sleep 1
+        done
+
+        echo "FAIL: could not discover expected topics after 30s"
+        echo "Topics found:"
+        ros2 topic list 2>/dev/null
+        exit 1
+
+networks:
+  ros2_test:
+    driver: bridge

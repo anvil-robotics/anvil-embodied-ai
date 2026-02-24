@@ -1,50 +1,40 @@
 # Model Zoo
 
-This directory stores trained model weights for inference.
+This directory stores trained model weights for inference. Contents are gitignored.
 
 ## Directory Structure
 
 ```
 model_zoo/
-├── test/                    # Dummy model for CI testing
-│   └── dummy_model/
-├── <your-model-name>/       # Your trained models
-│   ├── config.json
-│   ├── model.safetensors
-│   └── inference.yaml
+├── <your-model-name>/
+│   └── checkpoints/
+│       └── last/
+│           └── pretrained_model/
+│               ├── config.json
+│               └── model.safetensors
 └── README.md
 ```
 
-## Downloading Models
-
-### From HuggingFace Hub
-
-Use the download script to fetch models from HuggingFace:
-
-```bash
-./scripts/download-models.sh <huggingface-repo-id> <model-name>
-```
-
-Example:
-```bash
-./scripts/download-models.sh anvil-robotics/openarm-act-v1 openarm-act-v1
-```
+## Adding Models
 
 ### Manual Download
 
 1. Visit the model page on HuggingFace Hub
-2. Download the following files:
-   - `config.json` - Model configuration
-   - `model.safetensors` - Model weights
-3. Create inference configuration `inference.yaml` (see examples in `configs/lerobot_control/`)
+2. Download the checkpoint directory containing:
+   - `config.json` — model architecture parameters
+   - `model.safetensors` — model weights
+3. Place it under `model_zoo/<model-name>/`
+4. Update `.env` with the container path:
+   ```
+   MODEL_PATH=/workspace/model_zoo/<model-name>/checkpoints/last/pretrained_model
+   ```
 
 ## Model Format
 
-Models should be in LeRobot-compatible format:
+Models should be in LeRobot-compatible format (output of `lerobot-train`):
 
-- **config.json**: Contains model architecture parameters, input/output dimensions
-- **model.safetensors**: Model weights in safetensors format
-- **inference.yaml**: (Optional) Inference parameters specific to your robot setup
+- **config.json**: Model architecture, input/output dimensions, chunk size
+- **model.safetensors**: Weights in safetensors format
 
 ## Training Your Own Models
 
