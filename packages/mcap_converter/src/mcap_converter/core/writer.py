@@ -56,6 +56,7 @@ class LeRobotWriter:
         fps: int = 30,
         config: DataConfig = DEFAULT_DATA_CONFIG,
         vcodec: str = "h264",
+        quiet: bool = False,
     ):
         """
         Initialize LeRobot writer
@@ -67,6 +68,7 @@ class LeRobotWriter:
             fps: Video frames per second
             config: Data configuration
             vcodec: Video codec for encoding ("h264", "hevc", or "libsvtav1")
+            quiet: If True, suppress all print output (default: False)
         """
         self.output_dir = Path(output_dir)
         self.repo_id = repo_id
@@ -74,6 +76,7 @@ class LeRobotWriter:
         self.fps = fps
         self.config = config
         self.vcodec = vcodec
+        self.quiet = quiet
 
     def create_dataset(
         self,
@@ -95,10 +98,11 @@ class LeRobotWriter:
         # Define features
         features = self._define_features(joint_names, camera_names)
 
-        print("\n=== Creating LeRobot dataset (latest format) ===")
-        print(f"Output: {self.output_dir}")
-        print(f"Repo ID: {self.repo_id}")
-        print(f"Features: {list(features.keys())}")
+        if not self.quiet:
+            print("\n=== Creating LeRobot dataset (latest format) ===")
+            print(f"Output: {self.output_dir}")
+            print(f"Repo ID: {self.repo_id}")
+            print(f"Features: {list(features.keys())}")
 
         # Create dataset
         # Note: root is the output directory itself (not parent)
@@ -128,7 +132,7 @@ class LeRobotWriter:
             episode_frames: List of aligned frames from TimeAligner
             episode_index: Episode index (for progress reporting)
         """
-        if episode_index is not None:
+        if episode_index is not None and not self.quiet:
             print(f"\nAdding episode {episode_index + 1}")
             print(f"  About to write {len(episode_frames)} frames")
 
@@ -137,18 +141,20 @@ class LeRobotWriter:
             dataset.add_frame(frame_data)
 
             # Progress reporting
-            if episode_index is not None and (frame_idx + 1) % 100 == 0:
+            if episode_index is not None and not self.quiet and (frame_idx + 1) % 100 == 0:
                 progress = (frame_idx + 1) / len(episode_frames) * 100
                 print(
                     f"    Processing progress: {frame_idx + 1}/{len(episode_frames)} ({progress:.1f}%)"
                 )
 
         # Save episode
-        print("  - Saving episode and encoding images...")
+        if not self.quiet:
+            print("  - Saving episode and encoding images...")
         dataset.save_episode()
 
         # Stop image writer
-        print("  - Stopping image writer...")
+        if not self.quiet:
+            print("  - Stopping image writer...")
         dataset.stop_image_writer()
 
     def finalize(self, dataset: LeRobotDataset):
@@ -163,15 +169,18 @@ class LeRobotWriter:
         Args:
             dataset: LeRobotDataset instance
         """
-        print("  - Finalizing dataset (writing metadata and closing parquet)...")
+        if not self.quiet:
+            print("  - Finalizing dataset (writing metadata and closing parquet)...")
         dataset.finalize()
 
         # Clean up temporary images directory
-        print("  - Cleaning up temporary images directory...")
+        if not self.quiet:
+            print("  - Cleaning up temporary images directory...")
         images_tmp_dir = self.output_dir / "images"
         if images_tmp_dir.exists():
             shutil.rmtree(images_tmp_dir)
-            print("    [OK] Cleaned images/")
+            if not self.quiet:
+                print("    [OK] Cleaned images/")
 
     def _define_features(
         self,

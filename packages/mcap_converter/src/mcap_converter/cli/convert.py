@@ -5,14 +5,28 @@ Uses extracted core modules for cleaner, testable code.
 """
 
 import argparse
+import contextlib
 import os
 import shutil
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import List
 
 import huggingface_hub
+from rich.console import Console, Group
+from rich.padding import Padding
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.table import Table
 
 from mcap_converter import (
     ConfigLoader,
@@ -22,10 +36,31 @@ from mcap_converter import (
 )
 from mcap_converter.core.extractor import BufferedStreamExtractor
 
+console = Console()
 
-def get_timestamp() -> str:
-    """Get current timestamp string for logging."""
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def log(message: str) -> None:
+    """Print a timestamped log message, left-aligned."""
+    ts = datetime.now().strftime("%H:%M:%S")
+    console.print(f"[dim][{ts}][/dim] {message}")
+
+
+@contextlib.contextmanager
+def suppress_fd_output():
+    """Suppress stdout/stderr at the file descriptor level (catches C/ffmpeg output)."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    old_stdout = os.dup(1)
+    old_stderr = os.dup(2)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        os.dup2(old_stdout, 1)
+        os.dup2(old_stderr, 2)
+        os.close(old_stdout)
+        os.close(old_stderr)
+        os.close(devnull)
 
 
 def format_duration(seconds: float) -> str:
@@ -148,10 +183,10 @@ def convert_session(
     if not mcap_files:
         raise FileNotFoundError(f"No .mcap files found in {input_dir}")
 
-    print(f"[{get_timestamp()}] Found {len(mcap_files)} MCAP files")
-    print(f"[{get_timestamp()}] Buffered streaming (buffer={buffer_seconds}s)")
+    log(f"Found [bold]{len(mcap_files)}[/bold] MCAP files")
+    log(f"Buffered streaming (buffer={buffer_seconds}s)")
 
-    # Initialize writer
+    # Initialize writer (quiet — Rich handles output)
     writer = LeRobotWriter(
         output_dir=output_dir,
         repo_id=repo_id,
@@ -159,10 +194,11 @@ def convert_session(
         fps=fps,
         config=config,
         vcodec=vcodec,
+        quiet=True,
     )
 
     # Get joint names
-    print(f"[{get_timestamp()}] Quick scan for joint names: {mcap_files[0]}")
+    log(f"Quick scan for joint names: [dim]{mcap_files[0]}[/dim]")
     joint_names = quick_scan_joint_names(str(mcap_files[0]), config)
     if not joint_names:
         raise ValueError("Cannot get joint names from reference MCAP (no observation joints found)")
@@ -171,19 +207,19 @@ def convert_session(
     robots = [r for r in joint_names.keys() if r]
     total_joints = sum(len(v) for v in joint_names.values())
     if robots:
-        print(f"[{get_timestamp()}] Detected bimanual robot: {robots}")
+        log(f"Detected [bold cyan]bimanual[/bold cyan] robot: {robots}")
         for robot in sorted(robots):
-            print(f"  {robot}: {joint_names[robot]}")
+            log(f"  {robot}: {joint_names[robot]}")
     else:
-        print(f"[{get_timestamp()}] Detected single-arm robot")
-        print(f"  joints: {joint_names.get('', [])}")
-    print(f"[{get_timestamp()}] Total joints: {total_joints} (observation + action)")
+        log("Detected [bold cyan]single-arm[/bold cyan] robot")
+        log(f"  joints: {joint_names.get('', [])}")
+    log(f"Total joints: [bold]{total_joints}[/bold] (observation + action)")
 
     # Get camera names
     camera_names = list(config.camera_topic_mapping.values())
     if not camera_names:
         raise ValueError("No camera images available, cannot create dataset image features")
-    print(f"[{get_timestamp()}] Cameras: {camera_names}")
+    log(f"Cameras: {camera_names}")
 
     # Create dataset
     dataset = writer.create_dataset(
@@ -195,7 +231,7 @@ def convert_session(
     conversion_config_dest = os.path.join(output_dir, "conversion_config.yaml")
     if config_path and os.path.exists(config_path):
         shutil.copy(config_path, conversion_config_dest)
-        print(f"[{get_timestamp()}] Copied conversion config: {conversion_config_dest}")
+        log(f"Copied conversion config: [dim]{conversion_config_dest}[/dim]")
     else:
         # Save config from DataConfig object
         import yaml
@@ -214,60 +250,141 @@ def convert_session(
                 f,
                 default_flow_style=False,
             )
-        print(f"[{get_timestamp()}] Saved conversion config: {conversion_config_dest}")
+        log(f"Saved conversion config: [dim]{conversion_config_dest}[/dim]")
 
     # Process each MCAP file as one episode
     total_frames = 0
     episode_times = []
+    episode_frame_counts = []
 
-    for episode_idx, mcap_path in enumerate(mcap_files):
-        episode_start_time = time.time()
-        print(f"\n{'=' * 70}")
-        print(f"[{get_timestamp()}] Processing episode {episode_idx + 1}/{len(mcap_files)}")
-        print(f"  MCAP: {mcap_path}")
-        print(f"{'=' * 70}")
-
-        # Use buffered streaming for memory-efficient extraction
-        stream_extractor = BufferedStreamExtractor(
-            config=config,
-            buffer_seconds=buffer_seconds,
-            fps=fps,
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=40),
+        TextColumn("{task.fields[status]}"),
+        TextColumn("[dim]|[/dim]"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        overall_task = progress.add_task(
+            "[bold blue]Converting episodes",
+            total=len(mcap_files),
+            status=f"0/{len(mcap_files)} episodes",
         )
 
-        frame_count = 0
-        for frame in stream_extractor.extract_frames(str(mcap_path), task=task):
-            dataset.add_frame(frame)
-            frame_count += 1
+        for episode_idx, mcap_path in enumerate(mcap_files):
+            episode_start_time = time.time()
 
-        print(f"[{get_timestamp()}] Saving episode ({frame_count} frames)...")
-        dataset.save_episode()
-        dataset.stop_image_writer()
+            episode_task = progress.add_task(
+                f"  [dim]{mcap_path.name}[/dim]",
+                total=None,
+                status="starting...",
+            )
 
-        episode_time = time.time() - episode_start_time
-        episode_times.append(episode_time)
-        total_frames += frame_count
-        print(f"[{get_timestamp()}] Episode completed in {format_duration(episode_time)}")
+            # Use buffered streaming for memory-efficient extraction (quiet — Rich handles output)
+            frame_count = 0
+
+            def on_frame_progress(count, _task=episode_task):
+                nonlocal frame_count
+                frame_count = count
+                elapsed = time.time() - episode_start_time
+                speed = count / elapsed if elapsed > 0 else 0
+                progress.update(
+                    _task,
+                    completed=count,
+                    status=f"[green]{count}[/green] frames [dim]({speed:.0f} f/s)[/dim]",
+                )
+
+            stream_extractor = BufferedStreamExtractor(
+                config=config,
+                buffer_seconds=buffer_seconds,
+                fps=fps,
+                quiet=True,
+                progress_callback=on_frame_progress,
+            )
+
+            for frame in stream_extractor.extract_frames(str(mcap_path), task=task):
+                dataset.add_frame(frame)
+
+            # Save episode — suppress ffmpeg/libx264 noise
+            progress.update(
+                episode_task,
+                status=f"[yellow]saving {frame_count} frames...[/yellow]",
+            )
+            with suppress_fd_output():
+                dataset.save_episode()
+                dataset.stop_image_writer()
+
+            episode_time = time.time() - episode_start_time
+            episode_times.append(episode_time)
+            episode_frame_counts.append(frame_count)
+            total_frames += frame_count
+
+            # Mark episode done with green bar
+            progress.update(
+                episode_task,
+                total=frame_count,
+                completed=frame_count,
+                status=f"[green]{frame_count} frames[/green] in {format_duration(episode_time)}",
+            )
+            progress.advance(overall_task)
+            progress.update(
+                overall_task,
+                status=f"{episode_idx + 1}/{len(mcap_files)} episodes",
+            )
 
     # Finalize dataset
-    writer.finalize(dataset)
+    with console.status("[bold]Finalizing dataset (metadata & cleanup)..."):
+        with suppress_fd_output():
+            writer.finalize(dataset)
 
     # Calculate timing statistics
     total_time = time.time() - session_start_time
     avg_episode_time = sum(episode_times) / len(episode_times) if episode_times else 0
     fps_actual = total_frames / total_time if total_time > 0 else 0
 
-    print(f"\n{'=' * 70}")
-    print(f"[{get_timestamp()}] Successfully created LeRobot dataset!")
-    print(f"{'=' * 70}")
-    print(f"  Episodes:        {dataset.meta.total_episodes}")
-    print(f"  Total frames:    {total_frames}")
-    print(f"  Location:        {output_dir}")
-    print(f"  Conversion config: {conversion_config_dest}")
-    print(f"{'=' * 70}")
-    print(f"  Total time:      {format_duration(total_time)}")
-    print(f"  Avg per episode: {format_duration(avg_episode_time)}")
-    print(f"  Processing rate: {fps_actual:.1f} frames/sec")
-    print(f"{'=' * 70}")
+    # Build final report
+    # Summary table
+    summary = Table(show_header=False, box=None, padding=(0, 2))
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("Episodes", str(dataset.meta.total_episodes))
+    summary.add_row("Total frames", str(total_frames))
+    summary.add_row("Location", output_dir)
+    summary.add_row("Conversion config", conversion_config_dest)
+
+    # Per-episode table
+    ep_table = Table(title="Per-Episode Breakdown", title_style="bold", title_justify="left", padding=(0, 1))
+    ep_table.add_column("#", justify="right", style="dim")
+    ep_table.add_column("MCAP File")
+    ep_table.add_column("Frames", justify="right")
+    ep_table.add_column("Duration", justify="right")
+    ep_table.add_column("Speed", justify="right")
+    for i, mcap_path in enumerate(mcap_files):
+        ep_fps = episode_frame_counts[i] / episode_times[i] if episode_times[i] > 0 else 0
+        ep_table.add_row(
+            str(i + 1),
+            mcap_path.name,
+            str(episode_frame_counts[i]),
+            format_duration(episode_times[i]),
+            f"{ep_fps:.1f} f/s",
+        )
+
+    # Timing table
+    timing = Table(show_header=False, box=None, padding=(0, 2))
+    timing.add_column(style="bold")
+    timing.add_column()
+    timing.add_row("Total time", format_duration(total_time))
+    timing.add_row("Avg per episode", format_duration(avg_episode_time))
+    timing.add_row("Processing rate", f"{fps_actual:.1f} frames/sec")
+
+    report = Panel(
+        Group(summary, "", Padding(ep_table, (0, 0, 0, 2)), "", timing),
+        title="[bold green]LeRobot Dataset Created Successfully",
+        border_style="green",
+        padding=(1, 2),
+    )
+    console.print(report)
 
     return dataset
 
@@ -348,7 +465,7 @@ examples:
             user_info = huggingface_hub.whoami()
             hf_username = user_info["name"]
         except Exception as e:
-            print(f"[WARNING] Cannot get Hugging Face user information: {e}")
+            log(f"[yellow]Cannot get Hugging Face user info: {e}[/yellow]")
             hf_username = "anvil_robot"
 
     # Construct repo_id
@@ -358,31 +475,38 @@ examples:
     # Load configuration
     if args.config:
         config = ConfigLoader.from_yaml(args.config)
-        print(f"[{get_timestamp()}] Loaded config from: {args.config}")
+        log(f"Loaded config from: [dim]{args.config}[/dim]")
     else:
         config = ConfigLoader.get_default()
-        print(f"[{get_timestamp()}] Using default configuration")
+        log("Using default configuration")
 
-    print("=" * 70)
-    print(f"[{get_timestamp()}] MCAP to LeRobot Dataset Converter")
-    print("=" * 70)
-    print(f"  Input directory:  {args.input_dir}")
-    print(f"  Output directory: {args.output_dir}")
-    print(f"  HuggingFace Repo: {repo_id}")
-    print(f"  Robot Type:       {args.robot_type}")
-    print(f"  FPS:              {args.fps}")
-    print(f"  Buffer seconds:   {args.buffer_seconds}")
-    print(f"  Video codec:      {args.vcodec}")
-    print("=" * 70)
+    # Startup banner
+    banner = Table(show_header=False, box=None, padding=(0, 2))
+    banner.add_column(style="bold")
+    banner.add_column()
+    banner.add_row("Input directory", args.input_dir)
+    banner.add_row("Output directory", args.output_dir)
+    banner.add_row("HuggingFace Repo", repo_id)
+    banner.add_row("Robot Type", args.robot_type)
+    banner.add_row("FPS", str(args.fps))
+    banner.add_row("Buffer", f"{args.buffer_seconds}s")
+    banner.add_row("Video codec", args.vcodec)
+
+    console.print(Panel(
+        banner,
+        title="[bold]MCAP to LeRobot Dataset Converter",
+        border_style="blue",
+        padding=(1, 2),
+    ))
 
     try:
         # Remove output directory if exists
         if os.path.exists(args.output_dir):
             shutil.rmtree(args.output_dir)
-            print(f"[{get_timestamp()}] Removed existing output directory")
+            log("Removed existing output directory")
 
         # Convert session
-        print(f"\n[{get_timestamp()}] Starting conversion...")
+        log("[bold]Starting conversion...[/bold]")
         dataset = convert_session(
             input_dir=args.input_dir,
             output_dir=args.output_dir,
@@ -397,19 +521,14 @@ examples:
             vcodec=args.vcodec,
         )
 
-        print(f"\n[{get_timestamp()}] Dataset format: LeRobot v3.0")
-
         # Upload to Hub if requested
         if args.push_to_hub:
-            print(f"\n[{get_timestamp()}] Uploading dataset to Hugging Face Hub...")
-            dataset.push_to_hub()
-            print(f"[{get_timestamp()}] Dataset uploaded successfully!")
+            with console.status("[bold]Uploading dataset to Hugging Face Hub..."):
+                dataset.push_to_hub()
+            log("[green]Dataset uploaded successfully![/green]")
 
-    except Exception as e:
-        print(f"\n[{get_timestamp()}] Error occurred during conversion: {e}")
-        import traceback
-
-        traceback.print_exc()
+    except Exception:
+        console.print_exception()
         exit(1)
 
 
