@@ -75,10 +75,10 @@ arms:
 # ROS topic -> ML model camera name (must match training config)
 
 camera_mapping:
-  "/camera0/image_raw/compressed": "waist"
-  "/camera1/image_raw/compressed": "wrist_r"
-  "/camera2/image_raw/compressed": "chest"
-  "/camera3/image_raw/compressed": "wrist_l"
+  "/cam_waist/image_raw/compressed": "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed": "chest"
+  "/cam_wrist_l/image_raw/compressed": "wrist_l"
 
 # -----------------------------------------------------------------------------
 # Safety Parameters
