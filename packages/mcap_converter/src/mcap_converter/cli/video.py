@@ -18,7 +18,7 @@ Usage:
     mcap2mp4 -i recording.mcap --scan-only
 
     # Convert specific topics
-    mcap2mp4 -i recording.mcap -o ./videos --topics /camera0/image_raw/compressed
+    mcap2mp4 -i recording.mcap -o ./videos --topics /cam_waist/image_raw/compressed
 
     # With options
     mcap2mp4 -i recording.mcap -o ./videos --fps 30 --codec libx264 --crf 20 --resize 640x480
@@ -93,7 +93,7 @@ def topic_to_camera_name(topic: str) -> str:
     Examples:
         "/usb_cam_waist/image_raw/compressed" -> "usb_cam_waist"
         "/camera/image_raw" -> "camera"
-        "/camera0/image_raw/compressed" -> "camera0"
+        "/cam_waist/image_raw/compressed" -> "waist"
         "/wrist_r/image" -> "wrist_r"
     """
     # Remove leading slash
@@ -427,7 +427,7 @@ def main(args: list[str] | None = None) -> None:
 examples:
   mcap-to-video -i recording.mcap -o ./videos
   mcap-to-video -i recording.mcap --scan-only
-  mcap-to-video -i recording.mcap -o ./videos --topics /camera0/image_raw/compressed
+  mcap-to-video -i recording.mcap -o ./videos --topics /cam_waist/image_raw/compressed
   mcap-to-video -i recording.mcap -o ./videos --fps 30 --codec libx264 --resize 640x480
 """,
     )

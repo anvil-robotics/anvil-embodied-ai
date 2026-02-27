@@ -23,11 +23,9 @@ services:
     volumes:
       - ./configs:/workspace/configs:ro
     command: >
-      ros2 run lerobot_control mock_controller_node
-      --ros-args -p timeout:=120.0 -p required_actions:=999999
-      -p camera_resolution:=${CAMERA_RES:-480p} -p camera_fps:=${CAMERA_FPS:-30}
+      ros2 run lerobot_control mock_controller_node --ros-args -p timeout:=120.0 -p required_actions:=999999 -p camera_resolution:=${CAMERA_RES:-480p} -p camera_fps:=${CAMERA_FPS:-30}
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f mock_controller_node > /dev/null"]
+      test: [ "CMD-SHELL", "pgrep -f mock_controller_node > /dev/null" ]
       start_period: 3s
       interval: 2s
       timeout: 3s
@@ -51,9 +49,7 @@ services:
       mock-robot:
         condition: service_healthy
     command: >
-      ros2 launch lerobot_control inference.launch.py
-      monitor_only:=true
-      config_file:=/workspace/configs/lerobot_control/test_mockdist.yaml
+      ros2 launch lerobot_control inference.launch.py monitor_only:=true config_file:=/workspace/configs/lerobot_control/test_mockdist.yaml
 
   # Lightweight discovery check — verifies both nodes see each other via CycloneDDS
   discovery-check:
@@ -72,7 +68,7 @@ services:
     depends_on:
       mock-robot:
         condition: service_healthy
-    entrypoint: ["/entrypoint.sh"]
+    entrypoint: [ "/entrypoint.sh" ]
     command:
       - bash
       - -c
@@ -91,7 +87,7 @@ services:
         TRIES=0
         while [ $$TRIES -lt 30 ]; do
           TOPICS=$$(ros2 topic list 2>/dev/null)
-          if echo "$$TOPICS" | grep -q "/joint_states" && echo "$$TOPICS" | grep -q "/camera0/image_raw/compressed" && echo "$$TOPICS" | grep -q "/camera1/image_raw/compressed" && echo "$$TOPICS" | grep -q "/camera2/image_raw/compressed" && echo "$$TOPICS" | grep -q "/camera3/image_raw/compressed"; then
+          if echo "$$TOPICS" | grep -q "/joint_states" && echo "$$TOPICS" | grep -q "/cam_waist/image_raw/compressed" && echo "$$TOPICS" | grep -q "/cam_wrist_r/image_raw/compressed" && echo "$$TOPICS" | grep -q "/cam_chest/image_raw/compressed" && echo "$$TOPICS" | grep -q "/cam_wrist_l/image_raw/compressed"; then
             echo "PASS: discovered /joint_states and 4 camera topics"
             echo ""
             echo "--- All discovered topics ---"
