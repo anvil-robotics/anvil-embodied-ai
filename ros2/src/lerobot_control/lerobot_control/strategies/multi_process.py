@@ -187,8 +187,8 @@ class MultiProcessStrategy:
         for camera_name, (image, timestamp) in images.items():
             # Convert to tensor and normalize to [0, 1]
             image_tensor = torch.from_numpy(image).float() / 255.0
-            # Rearrange to (C, H, W)
-            image_tensor = image_tensor.permute(2, 0, 1)
+            # Rearrange to (C, H, W) and add batch dimension
+            image_tensor = image_tensor.permute(2, 0, 1).unsqueeze(0)
             observation[f"observation.images.{camera_name}"] = image_tensor
 
         # Add joint state with dual-arm mapping
@@ -205,7 +205,9 @@ class MultiProcessStrategy:
                     joint_name = f"{obs_prefix}{sep}{arm_key}{sep}{joint_id}"
                     ordered_positions.append(self._joint_positions.get(joint_name, 0.0))
 
-            observation["observation.state"] = torch.tensor(ordered_positions, dtype=torch.float32)
+            observation["observation.state"] = torch.tensor(
+                ordered_positions, dtype=torch.float32
+            ).unsqueeze(0)
 
         return observation
 

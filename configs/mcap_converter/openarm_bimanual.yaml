@@ -39,18 +39,18 @@ joint_names:
 
 # ROS2 image topics (sensor_msgs/Image or sensor_msgs/CompressedImage)
 camera_topics:
-  - "/camera0/image_raw"
-  - "/camera1/image_raw"
-  - "/camera2/image_raw"
-  - "/camera3/image_raw"
+  - "/cam_waist/image_raw"
+  - "/cam_wrist_r/image_raw"
+  - "/cam_chest/image_raw"
+  - "/cam_wrist_l/image_raw"
 
 # Map ROS topics to dataset camera names
 # These become: observation.images.{name}
 camera_topic_mapping:
-  "/camera0/image_raw": "waist"
-  "/camera1/image_raw": "wrist_r"
-  "/camera2/image_raw": "chest"
-  "/camera3/image_raw": "wrist_l"
+  "/cam_waist/image_raw": "waist"
+  "/cam_wrist_r/image_raw": "wrist_r"
+  "/cam_chest/image_raw": "chest"
+  "/cam_wrist_l/image_raw": "wrist_l"
 
 # Target image resolution [width, height]
 image_resolution: [640, 480]

@@ -321,6 +321,9 @@ class LeRobotInferenceNode(Node):
                 else:
                     observation = self.preprocessor.process_observation(observation)
 
+            # Ensure observation tensors are on the same device as the model
+            observation = self._move_to_device(observation)
+
             # Run inference
             with torch.inference_mode():
                 action = self.model.select_action(observation)
@@ -344,6 +347,18 @@ class LeRobotInferenceNode(Node):
 
             self.get_logger().error(f"Inference error: {e}")
             self.get_logger().error(traceback.format_exc())
+
+    def _move_to_device(self, data):
+        """Recursively move tensors to the configured device."""
+        if torch.is_tensor(data):
+            return data.to(self.device)
+        if isinstance(data, dict):
+            return {key: self._move_to_device(value) for key, value in data.items()}
+        if isinstance(data, tuple):
+            return tuple(self._move_to_device(value) for value in data)
+        if isinstance(data, list):
+            return [self._move_to_device(value) for value in data]
+        return data
 
     def _publish_action(self, action: np.ndarray) -> None:
         """Publish action to arm controllers."""

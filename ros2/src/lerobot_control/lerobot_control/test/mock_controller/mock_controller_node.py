@@ -60,10 +60,10 @@ class MockControllerNode(Node):
 
         # Publishers — 4 CompressedImage cameras matching production topics
         self._camera_topics = [
-            "/camera0/image_raw/compressed",
-            "/camera1/image_raw/compressed",
-            "/camera2/image_raw/compressed",
-            "/camera3/image_raw/compressed",
+            "/cam_waist/image_raw/compressed",
+            "/cam_wrist_r/image_raw/compressed",
+            "/cam_chest/image_raw/compressed",
+            "/cam_wrist_l/image_raw/compressed",
         ]
         self.image_pubs = [
             self.create_publisher(CompressedImage, topic, 10)
