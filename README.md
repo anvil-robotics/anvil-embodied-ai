@@ -9,6 +9,18 @@ Anvil-Embodied-AI provides a pipeline for imitation learning on Anvil robots:
 1. **Data Collection**: Record teleoperation demonstrations as ROS2 MCAP files
 2. **Data Conversion**: Convert MCAP recordings to LeRobot v3.0 dataset format
 3. **Model Training**: Train ACT, SmolVLA, or other policies via LeRobot
+4. **Inference**: Deploy trained models on a GPU PC communicating with the Robot PC via CycloneDDS
+
+## Architecture
+
+```
+ Robot PC (anvil-workcell)              GPU PC (this repo)
+┌──────────────────────┐    ethernet   ┌──────────────────────┐
+│  ros2_control        │◄────────────►│  lerobot_control     │
+│  joint_states (500Hz)│  CycloneDDS  │  inference (30Hz)    │
+│  cameras (4x 30Hz)   │              │  action commands     │
+└──────────────────────┘              └──────────────────────┘
+```
 
 ## Quick Start
 
@@ -43,16 +55,44 @@ uv run dataset-validate --root /tmp/my-dataset
 uv run lerobot-train --dataset.repo_id=local --dataset.root=/tmp/my-dataset --policy.type=act
 ```
 
+### Run Inference (Docker)
+
+```bash
+cp .env.example .env              # configure model path, ROS_DOMAIN_ID, CycloneDDS
+docker compose up                  # run inference on GPU PC
+```
+
+### Test Distributed Connectivity
+
+```bash
+# Monitor-only mode: verify DDS data streams without loading a model
+MONITOR_ONLY=true docker compose up
+
+# Mock distributed test: CycloneDDS discovery on Docker bridge (no hardware needed)
+docker compose -f docker-compose.mockdist.yml up --build --abort-on-container-exit
+```
+
 ## Project Structure
 
 ```
 anvil-embodied-ai/
 ├── packages/
-│   ├── mcap_converter/     # MCAP to LeRobot conversion
-│   └── lerobot_training/   # Training utilities & transforms
-├── configs/                # Configuration files
-├── scripts/                # Utility scripts
-└── docs/                   # Documentation
+│   ├── mcap_converter/            # MCAP to LeRobot conversion
+│   └── lerobot_training/          # Training utilities & transforms
+├── ros2/
+│   └── src/lerobot_control/       # ROS2 inference node (Jazzy)
+├── configs/
+│   ├── cyclonedds/                # CycloneDDS peer configs (GPU PC, Robot PC)
+│   ├── lerobot_control/           # Inference node config (cameras, joints, arms)
+│   └── mcap_converter/            # Data conversion config
+├── docker/
+│   └── inference/                 # Dockerfile + entrypoint
+├── docker-compose.yml             # Production inference (GPU PC)
+├── docker-compose.mockdist.yml    # Mock CycloneDDS discovery test
+├── .env.example                   # Environment template
+├── model_zoo/                     # Trained model weights (gitignored)
+├── scripts/                       # Utility scripts
+└── docs/                          # Documentation
 ```
 
 ## CLI Tools

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- CycloneDDS config for Docker bridge network testing.
+     Uses autodetermine for interface + multicast — works on docker-compose bridge networks. -->
+<CycloneDDS xmlns="https://cdds.io/config">
+    <Domain id="any">
+        <General>
+            <Interfaces>
+                <NetworkInterface autodetermine="true"/>
+            </Interfaces>
+            <AllowMulticast>true</AllowMulticast>
+        </General>
+    </Domain>
+</CycloneDDS>

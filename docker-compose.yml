@@ -1,0 +1,29 @@
+services:
+  inference:
+    build:
+      context: .
+      dockerfile: docker/inference/Dockerfile
+    container_name: lerobot-inference
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}
+      - CYCLONEDDS_URI=${CYCLONEDDS_URI:-}
+      - MODEL_PATH=${MODEL_PATH:-/workspace/model_zoo/my_model}
+      - CONFIG_FILE=${CONFIG_FILE:-/workspace/configs/lerobot_control/inference_default.yaml}
+      - MONITOR_ONLY=${MONITOR_ONLY:-false}
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ./model_zoo:/workspace/model_zoo:ro
+      - ./configs:/workspace/configs:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: bash -c "ros2 launch lerobot_control inference.launch.py model_path:=$$MODEL_PATH config_file:=$$CONFIG_FILE monitor_only:=$$MONITOR_ONLY"

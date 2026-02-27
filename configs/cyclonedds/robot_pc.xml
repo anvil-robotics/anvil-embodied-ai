@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- CycloneDDS config for Robot PC (192.168.0.128) -->
+<!-- Copy to Robot PC and update NetworkInterface name if different -->
+<CycloneDDS xmlns="https://cdds.io/config">
+    <Domain id="any">
+        <General>
+            <Interfaces>
+                <!-- Robot PC ethernet interface - UPDATE THIS if different -->
+                <NetworkInterface autodetermine="true"/>
+            </Interfaces>
+            <AllowMulticast>true</AllowMulticast>
+            <MaxMessageSize>65535B</MaxMessageSize>
+            <FragmentSize>4000B</FragmentSize>
+        </General>
+        <Discovery>
+            <Peers>
+                <!-- GPU PC IP -->
+                <Peer address="192.168.0.146"/>
+            </Peers>
+        </Discovery>
+        <Internal>
+            <SocketReceiveBufferSize min="128MB"/>
+            <Watermarks>
+                <WhcHigh>8MB</WhcHigh>
+            </Watermarks>
+        </Internal>
+    </Domain>
+</CycloneDDS>

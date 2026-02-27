@@ -102,7 +102,11 @@ Thumbs.db
 # Secrets and credentials
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 credentials.json
 secrets.yaml
+
+# Local Claude configuration
+CLAUDE.md
