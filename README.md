@@ -14,12 +14,12 @@ Anvil-Embodied-AI provides a pipeline for imitation learning on Anvil robots:
 ## Architecture
 
 ```
- Robot PC (anvil-workcell)              GPU PC (this repo)
-┌──────────────────────┐    ethernet   ┌──────────────────────┐
-│  ros2_control        │◄────────────►│  lerobot_control     │
-│  joint_states (500Hz)│  CycloneDDS  │  inference (30Hz)    │
-│  cameras (4x 30Hz)   │              │  action commands     │
-└──────────────────────┘              └──────────────────────┘
+   Robot PC (anvil-workcell)        CycloneDDS          GPU PC (anvil-embodied-ai)
+┌───────────────────────────┐   ┌────────────────┐   ┌───────────────────────────┐
+│  ros2_control             │   │                │   │  lerobot_control          │
+│  joint_states (500 Hz)    │◄──┤ Gigabit Switch ├──►│  inference (30 Hz)        │
+│  cameras (4x 30 Hz)       │   │                │   │  action commands          │
+└───────────────────────────┘   └────────────────┘   └───────────────────────────┘
 ```
 
 ## Quick Start
@@ -97,14 +97,14 @@ anvil-embodied-ai/
 
 ## CLI Tools
 
-| Command | Description |
-|---------|-------------|
-| `mcap-convert` | Convert MCAP recordings to LeRobot datasets |
-| `mcap-inspect` | Inspect MCAP file structure and topics |
-| `mcap-to-video` | Extract MCAP image topics to MP4 videos |
-| `dataset-validate` | Validate a converted LeRobot dataset |
-| `mcap-upload` | Upload datasets to HuggingFace Hub |
-| `lerobot-train` | Train imitation learning models |
+| Command              | Description                                 |
+| -------------------- | ------------------------------------------- |
+| `mcap-convert`     | Convert MCAP recordings to LeRobot datasets |
+| `mcap-inspect`     | Inspect MCAP file structure and topics      |
+| `mcap-to-video`    | Extract MCAP image topics to MP4 videos     |
+| `dataset-validate` | Validate a converted LeRobot dataset        |
+| `mcap-upload`      | Upload datasets to HuggingFace Hub          |
+| `lerobot-train`    | Train imitation learning models             |
 
 ## Documentation
 
