@@ -301,7 +301,7 @@ class DataExtractor:
         """
         ros_msg = message.ros_msg
         # Float64MultiArray has no header; use MCAP recording timestamp
-        time_s = message.log_time / 1e9
+        time_s = message.log_time.timestamp()
 
         # Map topic to arm identifier (e.g., "left" or "right")
         robot = self.config.action_topics[topic]
@@ -954,7 +954,7 @@ class BufferedStreamExtractor:
         """
         ros_msg = message.ros_msg
         # Float64MultiArray has no header; use MCAP recording timestamp
-        timestamp = message.log_time / 1e9
+        timestamp = message.log_time.timestamp()
 
         # Map topic to arm identifier (e.g., "left" or "right")
         robot = self.config.action_topics[topic]
