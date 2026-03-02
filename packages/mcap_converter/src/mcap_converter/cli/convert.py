@@ -94,6 +94,10 @@ def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
 
     Only reads the first message, so memory-efficient for large files.
 
+    In leader-follower mode: parses joint names to find observation (follower) joints.
+    In quest teleop mode: all joints in the JointState topic are observations,
+    so we group by arm without filtering by source/role prefix.
+
     Returns:
         Dictionary mapping robot prefix to joint names:
         - {"right": ["joint1", ...], "left": [...]} for multi-robot
@@ -103,6 +107,7 @@ def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
     reader = McapReader(mcap_path)
     joint_pattern = config.joint_name_pattern
     sep = joint_pattern.separator
+    quest_mode = bool(config.action_topics)
 
     for message in reader.read_messages(topics=[config.robot_state_topic]):
         ros_msg = message.ros_msg
@@ -111,32 +116,59 @@ def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
         robot_joints: dict = {}  # {robot_prefix: [joint_ids]}
 
         for joint_name in ros_msg.name:
-            # Find role prefix
-            role = None
-            robot = ""
-            remaining = ""
-
-            for prefix, role_name in joint_pattern.role_prefix.items():
-                if joint_name.startswith(prefix + sep):
-                    role = role_name
-                    remaining = joint_name[len(prefix) + len(sep) :]
-                    break
-
-            if role != "observation":
-                continue
-
-            # Extract robot prefix and joint_id
-            parts = remaining.split(sep, 1)
-            if parts and parts[0] in joint_pattern.robot_prefix:
-                robot = joint_pattern.robot_prefix[parts[0]]
-                joint_id = parts[1] if len(parts) > 1 else parts[0]
-            else:
+            if quest_mode:
+                # Quest teleop mode: all joints are observations (no leader prefix).
+                # Parse arm identifier and joint_id directly.
+                # Joint names are like "follower_l_joint1" — still use source
+                # prefix to strip it, then extract arm and joint_id.
+                remaining = joint_name
                 robot = ""
-                joint_id = remaining
 
-            if robot not in robot_joints:
-                robot_joints[robot] = []
-            robot_joints[robot].append(joint_id)
+                # Try to strip known source prefixes
+                for prefix in joint_pattern.role_prefix.keys():
+                    if joint_name.startswith(prefix + sep):
+                        remaining = joint_name[len(prefix) + len(sep) :]
+                        break
+
+                # Extract robot prefix and joint_id
+                parts = remaining.split(sep, 1)
+                if parts and parts[0] in joint_pattern.robot_prefix:
+                    robot = joint_pattern.robot_prefix[parts[0]]
+                    joint_id = parts[1] if len(parts) > 1 else parts[0]
+                else:
+                    robot = ""
+                    joint_id = remaining
+
+                if robot not in robot_joints:
+                    robot_joints[robot] = []
+                robot_joints[robot].append(joint_id)
+            else:
+                # Leader-follower mode: only extract observation (follower) joints
+                role = None
+                robot = ""
+                remaining = ""
+
+                for prefix, role_name in joint_pattern.role_prefix.items():
+                    if joint_name.startswith(prefix + sep):
+                        role = role_name
+                        remaining = joint_name[len(prefix) + len(sep) :]
+                        break
+
+                if role != "observation":
+                    continue
+
+                # Extract robot prefix and joint_id
+                parts = remaining.split(sep, 1)
+                if parts and parts[0] in joint_pattern.robot_prefix:
+                    robot = joint_pattern.robot_prefix[parts[0]]
+                    joint_id = parts[1] if len(parts) > 1 else parts[0]
+                else:
+                    robot = ""
+                    joint_id = remaining
+
+                if robot not in robot_joints:
+                    robot_joints[robot] = []
+                robot_joints[robot].append(joint_id)
 
         if robot_joints:
             return robot_joints
@@ -206,14 +238,19 @@ def convert_session(
     # Log detected robot mode
     robots = [r for r in joint_names.keys() if r]
     total_joints = sum(len(v) for v in joint_names.values())
+    quest_mode = bool(config.action_topics)
+    teleop_label = "[bold magenta]quest teleop[/bold magenta]" if quest_mode else "[bold cyan]leader-follower[/bold cyan]"
     if robots:
-        log(f"Detected [bold cyan]bimanual[/bold cyan] robot: {robots}")
+        log(f"Detected [bold cyan]bimanual[/bold cyan] robot ({teleop_label}): {robots}")
         for robot in sorted(robots):
             log(f"  {robot}: {joint_names[robot]}")
     else:
-        log("Detected [bold cyan]single-arm[/bold cyan] robot")
+        log(f"Detected [bold cyan]single-arm[/bold cyan] robot ({teleop_label})")
         log(f"  joints: {joint_names.get('', [])}")
     log(f"Total joints: [bold]{total_joints}[/bold] (observation + action)")
+    if quest_mode:
+        for topic, arm in config.action_topics.items():
+            log(f"  Action topic ({arm}): [dim]{topic}[/dim]")
 
     # Get camera names
     camera_names = list(config.camera_topic_mapping.values())
@@ -236,17 +273,21 @@ def convert_session(
         # Save config from DataConfig object
         import yaml
 
+        config_to_save = {
+            "robot_state_topic": config.robot_state_topic,
+            "joint_names": {
+                "separator": config.joint_name_pattern.separator,
+                "source": config.joint_name_pattern.source,
+                "arms": config.joint_name_pattern.arms,
+            },
+            "camera_topic_mapping": config.camera_topic_mapping,
+        }
+        if config.action_topics:
+            config_to_save["action_topics"] = config.action_topics
+
         with open(conversion_config_dest, "w") as f:
             yaml.dump(
-                {
-                    "robot_state_topic": config.robot_state_topic,
-                    "joint_names": {
-                        "separator": config.joint_name_pattern.separator,
-                        "source": config.joint_name_pattern.source,
-                        "arms": config.joint_name_pattern.arms,
-                    },
-                    "camera_topic_mapping": config.camera_topic_mapping,
-                },
+                config_to_save,
                 f,
                 default_flow_style=False,
             )

@@ -204,6 +204,7 @@ class ConfigLoader:
             # New fields
             robot_state_topic=config_dict.get("robot_state_topic", defaults.robot_state_topic),
             joint_name_pattern=joint_name_pattern,
+            action_topics=config_dict.get("action_topics", defaults.action_topics),
             observation_feature_mapping=observation_feature_mapping,
             action_feature_mapping=action_feature_mapping,
             # Camera config

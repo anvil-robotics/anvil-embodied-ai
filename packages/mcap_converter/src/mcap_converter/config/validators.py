@@ -1,7 +1,7 @@
 """Configuration validation for mcap_converter package."""
 
 import warnings
-from typing import List
+from typing import Dict, List
 
 from .schema import DataConfig, FeatureMapping, JointNamePattern
 
@@ -12,12 +12,16 @@ class ConfigurationError(Exception):
     pass
 
 
-def validate_joint_name_pattern(pattern: JointNamePattern) -> List[str]:
+def validate_joint_name_pattern(
+    pattern: JointNamePattern, quest_mode: bool = False
+) -> List[str]:
     """
     Validate joint name pattern configuration.
 
     Args:
         pattern: JointNamePattern instance to validate
+        quest_mode: If True, 'action' role mapping is not required
+                    (actions come from separate command topics)
 
     Returns:
         List of error messages (empty if valid)
@@ -37,16 +41,41 @@ def validate_joint_name_pattern(pattern: JointNamePattern) -> List[str]:
                     f"Must be 'observation' or 'action'"
                 )
 
-        # Should have both observation and action roles
+        # Should have observation role
         roles = set(pattern.role_prefix.values())
         if "observation" not in roles:
             errors.append("joint_name_pattern.role_prefix must include an 'observation' mapping")
-        if "action" not in roles:
-            errors.append("joint_name_pattern.role_prefix must include an 'action' mapping")
+        # Action role only required in leader-follower mode
+        if not quest_mode and "action" not in roles:
+            errors.append(
+                "joint_name_pattern.role_prefix must include an 'action' mapping "
+                "(or set action_topics for quest teleop mode)"
+            )
 
     # Separator should not be empty
     if not pattern.separator:
         errors.append("joint_name_pattern.separator cannot be empty")
+
+    return errors
+
+
+def validate_action_topics(action_topics: Dict[str, str]) -> List[str]:
+    """
+    Validate action_topics configuration for quest teleop mode.
+
+    Args:
+        action_topics: Dict mapping ROS2 command topics to arm identifiers
+
+    Returns:
+        List of error messages (empty if valid)
+    """
+    errors = []
+
+    for topic, arm in action_topics.items():
+        if not topic:
+            errors.append("action_topics: topic name cannot be empty")
+        if not arm:
+            errors.append(f"action_topics: arm identifier for '{topic}' cannot be empty")
 
     return errors
 
@@ -112,8 +141,17 @@ def validate_config(config: DataConfig) -> None:
     if not config.robot_state_topic:
         errors.append("robot_state_topic cannot be empty")
 
-    # Validate joint_name_pattern
-    errors.extend(validate_joint_name_pattern(config.joint_name_pattern))
+    # Determine teleop mode
+    quest_mode = bool(config.action_topics)
+
+    # Validate joint_name_pattern (relaxed for quest mode)
+    errors.extend(
+        validate_joint_name_pattern(config.joint_name_pattern, quest_mode=quest_mode)
+    )
+
+    # Validate action_topics if set (quest teleop mode)
+    if quest_mode:
+        errors.extend(validate_action_topics(config.action_topics))
 
     # Validate feature mappings
     errors.extend(
@@ -166,6 +204,12 @@ def validate_topics_exist(config: DataConfig, available_topics: List[str]) -> No
         for topic in config.robot_state_topics:
             if topic not in available_topics:
                 missing.append(f"robot_state_topic: {topic}")
+
+    # Check action topics (quest teleop mode)
+    if config.action_topics:
+        for topic in config.action_topics:
+            if topic not in available_topics:
+                missing.append(f"action_topic: {topic}")
 
     # Check camera topics
     for topic in config.camera_topics:

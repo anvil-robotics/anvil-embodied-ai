@@ -1,44 +1,59 @@
 # =============================================================================
 # OpenArm MCAP to LeRobot Conversion Configuration
 # =============================================================================
-# Teleop Mode: Leader-Follower
+# Teleop Mode: Quest (VR Controller)
 #
-# In this mode, both leader (action) and follower (observation) joints
-# are published on a single /joint_states topic. The converter uses
-# joint name prefixes ("leader_"/"follower_") to separate them.
+# In this mode, actions are sent as position commands via separate ROS2
+# command topics (std_msgs/Float64MultiArray) — one per arm. The
+# /joint_states topic contains ONLY follower (observation) joints.
 #
-# For Quest teleop mode, see: openarm_bimanual_quest.yaml
+# For leader-follower teleop mode, see: openarm_bimanual.yaml
 # =============================================================================
 
-# ROS2 Topic containing all joint states (sensor_msgs/JointState)
+# ROS2 Topic containing follower joint states (sensor_msgs/JointState)
+# In quest mode, this topic only has observation data (no leader joints)
 robot_state_topic: "/joint_states"
 
 
 # =============================================================================
 # Joint Name Parsing
 # =============================================================================
-# Your joint names look like: "leader_r_joint1", "follower_l_finger_joint1"
-# Pattern: {source}_{arm}_{joint_id}
+# In quest mode, the /joint_states topic only has follower joints:
+#   "follower_r_joint1", "follower_l_finger_joint1", etc.
 #
-# Example parsing:
-#   "leader_r_joint1"       -> action, right arm, joint1
-#   "follower_l_finger_joint1" -> observation, left arm, finger_joint1
+# The source mapping is still used to strip the "follower_" prefix and
+# extract the arm identifier. A "leader" source is optional here since
+# actions come from action_topics instead.
 
 joint_names:
   separator: "_"
 
-  # First part: data source -> determines observation vs action
-  #   leader/master joints   = action (target positions to reach)
-  #   follower/puppet joints = observation (current robot state)
+  # Source prefix -> role mapping
+  # Only "follower" -> "observation" is required in quest mode
   source:
-    leader: action
     follower: observation
 
-  # Second part: arm identifier -> for bimanual robots
-  # Set to {} for single-arm robots
+  # Arm identifiers (same as leader-follower mode)
   arms:
     r: right
     l: left
+
+
+# =============================================================================
+# Action Topics (Quest Teleop)
+# =============================================================================
+# In quest mode, actions come from separate command topics instead of
+# from leader joints in the joint_states topic.
+#
+# These topics publish std_msgs/Float64MultiArray with joint position
+# commands. Each topic is mapped to an arm identifier.
+#
+# The joint ordering in the Float64MultiArray.data array must match
+# the observation joint ordering for the corresponding arm.
+
+action_topics:
+  "/follower_l_forward_position_controller/commands": "left"
+  "/follower_r_forward_position_controller/commands": "right"
 
 
 # =============================================================================
@@ -75,7 +90,9 @@ observation_feature_mapping:
     - "velocity"         # -> observation.velocity
     - "effort"           # -> observation.effort
 
-# What to extract from action joints (leader)
+# What to extract from action commands
+# Note: Float64MultiArray only contains position commands,
+# so 'others' should remain empty for quest mode.
 action_feature_mapping:
   state: "position"      # Primary feature -> action
   others: []             # No additional action features
@@ -85,17 +102,24 @@ action_feature_mapping:
 # Quick Reference
 # =============================================================================
 #
-# Input (ROS JointState message):
-#   name: ["leader_r_joint1", "leader_r_joint2", ..., "follower_l_joint1", ...]
-#   position: [0.1, 0.2, ..., 0.3, ...]
-#   velocity: [0.01, 0.02, ..., 0.03, ...]
-#   effort: [1.0, 2.0, ..., 3.0, ...]
+# Input (ROS topics):
+#   /joint_states (sensor_msgs/JointState):
+#     name: ["follower_r_joint1", ..., "follower_l_joint1", ...]
+#     position: [0.1, 0.2, ..., 0.3, ...]
+#     velocity: [0.01, 0.02, ..., 0.03, ...]
+#     effort: [1.0, 2.0, ..., 3.0, ...]
+#
+#   /follower_l_forward_position_controller/commands (Float64MultiArray):
+#     data: [0.1, 0.2, ..., 0.8]     # left arm target positions
+#
+#   /follower_r_forward_position_controller/commands (Float64MultiArray):
+#     data: [0.3, 0.4, ..., 0.9]     # right arm target positions
 #
 # Output (LeRobot dataset):
 #   observation.state     [16]  = [left_joints..., right_joints...]  (from follower)
 #   observation.velocity  [16]  = [left_joints..., right_joints...]  (from follower)
 #   observation.effort    [16]  = [left_joints..., right_joints...]  (from follower)
-#   action                [16]  = [left_joints..., right_joints...]  (from leader)
+#   action                [16]  = [left_joints..., right_joints...]  (from command topics)
 #   observation.images.waist    = camera0 frames
 #   observation.images.chest    = camera2 frames
 #   observation.images.wrist_r  = camera1 frames

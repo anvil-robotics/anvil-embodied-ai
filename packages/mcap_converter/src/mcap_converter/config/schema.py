@@ -92,6 +92,18 @@ class DataConfig:
     # Joint name parsing configuration
     joint_name_pattern: JointNamePattern = field(default_factory=JointNamePattern)
 
+    # ====== Quest Teleop Mode ======
+    # When set, actions are read from separate command topics instead of
+    # from leader joints in the robot_state_topic.
+    #
+    # Maps ROS2 command topic (std_msgs/Float64MultiArray) -> arm identifier.
+    # Example: {"/follower_l_forward_position_controller/commands": "left",
+    #           "/follower_r_forward_position_controller/commands": "right"}
+    #
+    # If empty (default), leader-follower mode is used: actions come from
+    # leader joints parsed from robot_state_topic via joint_name_pattern.
+    action_topics: Dict[str, str] = field(default_factory=dict)
+
     # Separate feature mappings for observation vs action
     # This allows different features for input (observation) and output (action)
     observation_feature_mapping: FeatureMapping = field(
