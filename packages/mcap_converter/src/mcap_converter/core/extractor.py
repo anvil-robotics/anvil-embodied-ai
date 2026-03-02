@@ -197,12 +197,12 @@ class DataExtractor:
             # Handle legacy multi-topic architecture
             elif self.config.robot_state_topics and topic in self.config.robot_state_topics:
                 self._extract_joint_state_legacy(message, extracted_data)
-            # Handle camera topics (raw images)
-            elif topic in self.config.camera_topics:
-                self._extract_image(message, extracted_data)
-            # Handle compressed image topics
-            elif topic in self._compressed_topic_mapping:
-                self._extract_compressed_image(message, extracted_data)
+            # Handle camera topics (detect CompressedImage vs Image by attribute)
+            elif topic in self.config.camera_topics or topic in self._compressed_topic_mapping:
+                if hasattr(message.ros_msg, 'format'):
+                    self._extract_compressed_image(message, extracted_data)
+                else:
+                    self._extract_image(message, extracted_data)
 
         # Convert lists to numpy arrays
         self._convert_to_arrays(extracted_data)
@@ -387,7 +387,12 @@ class DataExtractor:
         ros_msg = message.ros_msg
         time_ns = (ros_msg.header.stamp.sec * 1e9 + ros_msg.header.stamp.nanosec) / 1e9
 
-        cam_name = self._compressed_topic_mapping[message.channel.topic]
+        topic = message.channel.topic
+        # Look up camera name from either the main mapping or the auto-generated compressed mapping
+        if topic in self.config.camera_topic_mapping:
+            cam_name = self.config.camera_topic_mapping[topic]
+        else:
+            cam_name = self._compressed_topic_mapping[topic]
         extracted_data[cam_name]["timestamp"].append(time_ns)
 
         # Decode compressed image
@@ -616,11 +621,11 @@ class BufferedStreamExtractor:
             if first_ts is None:
                 first_ts = time_ns
 
-            # Decode image
-            if topic in camera_topics:
-                img = decode_image(ros_msg.data, ros_msg.encoding, ros_msg.height, ros_msg.width)
-            else:
+            # Decode image — detect CompressedImage vs Image by attribute
+            if hasattr(ros_msg, 'format'):
                 img = decode_compressed_image(ros_msg.data, ros_msg.format)
+            else:
+                img = decode_image(ros_msg.data, ros_msg.encoding, ros_msg.height, ros_msg.width)
 
             # Add to buffer
             camera_buffers[cam_name].append((time_ns, img))
