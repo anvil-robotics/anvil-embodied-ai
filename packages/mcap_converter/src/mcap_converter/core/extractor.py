@@ -675,6 +675,32 @@ class BufferedStreamExtractor:
         if not self.quiet:
             print(f"[BufferedStream] [OK] Extracted {frames_yielded} frames total")
 
+        if frames_yielded == 0:
+            # Diagnostic: show why no frames were produced
+            cam_counts = {cam: len(buf) for cam, buf in camera_buffers.items()}
+            joint_keys = {
+                f"{role}:{robot or 'default'}": len(d["buffer"])
+                for (role, robot), d in joint_buffers.items()
+            }
+            print(f"[BufferedStream] WARNING: 0 frames produced — diagnostics:")
+            print(f"  Camera buffers: {cam_counts}")
+            print(f"  Joint buffers:  {joint_keys if joint_keys else '(empty — no joint data received)'}")
+            if not cam_counts or all(c == 0 for c in cam_counts.values()):
+                print(f"  -> No camera images found. Check that these topics exist in the MCAP:")
+                for t in self.config.camera_topics:
+                    print(f"       {t}")
+            if not joint_keys:
+                print(f"  -> No joint state data. Check robot_state_topic: {self.config.robot_state_topic}")
+                if self.config.action_topics:
+                    print(f"  -> No action data. Check action_topics: {list(self.config.action_topics.keys())}")
+            elif not any(k.startswith("action:") for k in joint_keys):
+                if self.config.action_topics:
+                    print(f"  -> No action data received from action_topics:")
+                    for t in self.config.action_topics:
+                        print(f"       {t}")
+                else:
+                    print(f"  -> No action data parsed from joint_states (no leader prefix matched).")
+
     def _align_frame_at_cursor(
         self,
         camera_buffers: Dict[str, deque],

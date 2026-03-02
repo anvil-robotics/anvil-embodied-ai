@@ -347,6 +347,23 @@ def convert_session(
             for frame in stream_extractor.extract_frames(str(mcap_path), task=task):
                 dataset.add_frame(frame)
 
+            if frame_count == 0:
+                # Skip empty episodes — don't call save_episode on an empty buffer
+                progress.update(
+                    episode_task,
+                    total=1,
+                    completed=1,
+                    status="[yellow]skipped (0 frames)[/yellow]",
+                )
+                progress.advance(overall_task)
+                progress.update(
+                    overall_task,
+                    status=f"{episode_idx + 1}/{len(mcap_files)} episodes",
+                )
+                episode_frame_counts.append(0)
+                episode_times.append(time.time() - episode_start_time)
+                continue
+
             # Save episode — suppress ffmpeg/libx264 noise
             progress.update(
                 episode_task,
@@ -373,6 +390,19 @@ def convert_session(
                 overall_task,
                 status=f"{episode_idx + 1}/{len(mcap_files)} episodes",
             )
+
+    # Check for all-empty conversion
+    if total_frames == 0:
+        console.print(
+            "\n[bold red]ERROR: All episodes produced 0 frames.[/bold red]\n"
+            "The extractor printed diagnostics above (scroll up).\n"
+            "Common causes:\n"
+            "  1. Camera topics in config don't match MCAP topics\n"
+            "  2. Action topics don't exist in MCAP (quest mode)\n"
+            "  3. Joint name prefixes don't match config source mapping\n"
+            "  Run [bold]mcap-inspect[/bold] on your MCAP to see available topics.\n"
+        )
+        return dataset
 
     # Finalize dataset
     with console.status("[bold]Finalizing dataset (metadata & cleanup)..."):
