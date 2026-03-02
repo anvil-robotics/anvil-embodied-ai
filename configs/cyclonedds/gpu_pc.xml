@@ -13,7 +13,7 @@
         <Discovery>
             <Peers>
                 <!-- Robot PC IP -->
-                <Peer address="192.168.100.117"/>
+                <Peer address="192.168.0.128"/>
             </Peers>
         </Discovery>
         <Internal>

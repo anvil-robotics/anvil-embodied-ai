@@ -1,7 +1,7 @@
 """Data extraction from MCAP files"""
 
 from collections import deque
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import numpy as np
 
@@ -451,6 +451,8 @@ class BufferedStreamExtractor:
         config: DataConfig,
         buffer_seconds: float = 5.0,
         fps: int = 30,
+        quiet: bool = False,
+        progress_callback: Optional[Callable[[int], None]] = None,
     ):
         """
         Initialize buffered stream extractor.
@@ -459,6 +461,8 @@ class BufferedStreamExtractor:
             config: Data configuration specifying topics and camera mapping
             buffer_seconds: Total buffer window size in seconds (default: 5.0)
             fps: Frame rate for buffer size calculation (default: 30)
+            quiet: If True, suppress all print output (default: False)
+            progress_callback: Called with frames_yielded count after each frame
         """
         self.config = config
         self.fps = fps
@@ -466,6 +470,8 @@ class BufferedStreamExtractor:
         self.half_buffer = int(buffer_seconds * fps / 2)  # 75 frames for 5s @ 30fps
         self.full_buffer = self.half_buffer * 2  # 150 frames
         self.target_size = tuple(config.image_resolution)  # (width, height)
+        self.quiet = quiet
+        self.progress_callback = progress_callback
 
         # Joint name pattern for parsing (reuse from DataExtractor)
         self._joint_pattern = config.joint_name_pattern
@@ -495,8 +501,9 @@ class BufferedStreamExtractor:
         """
         from ..utils.image_utils import resize_image
 
-        print(f"[BufferedStream] Reading MCAP: {mcap_path}")
-        print(f"[BufferedStream] Buffer: {self.full_buffer} frames ({self.half_buffer}x2)")
+        if not self.quiet:
+            print(f"[BufferedStream] Reading MCAP: {mcap_path}")
+            print(f"[BufferedStream] Buffer: {self.full_buffer} frames ({self.half_buffer}x2)")
 
         reader = McapReader(mcap_path)
 
@@ -572,7 +579,9 @@ class BufferedStreamExtractor:
                     frames_yielded += 1
 
                     # Progress reporting
-                    if frames_yielded % 100 == 0:
+                    if self.progress_callback:
+                        self.progress_callback(frames_yielded)
+                    elif not self.quiet and frames_yielded % 100 == 0:
                         print(f"[BufferedStream] Processed {frames_yielded} frames...")
 
                 cursor += 1
@@ -591,7 +600,8 @@ class BufferedStreamExtractor:
                     cursor -= 1  # Adjust cursor after removal
 
         # Flush: process remaining frames in buffer
-        print("[BufferedStream] Flushing remaining buffer...")
+        if not self.quiet:
+            print("[BufferedStream] Flushing remaining buffer...")
         while cursor < len(camera_buffers[main_cam]):
             frame = self._align_frame_at_cursor(
                 camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
@@ -599,9 +609,12 @@ class BufferedStreamExtractor:
             if frame is not None:
                 yield frame
                 frames_yielded += 1
+                if self.progress_callback:
+                    self.progress_callback(frames_yielded)
             cursor += 1
 
-        print(f"[BufferedStream] [OK] Extracted {frames_yielded} frames total")
+        if not self.quiet:
+            print(f"[BufferedStream] [OK] Extracted {frames_yielded} frames total")
 
     def _align_frame_at_cursor(
         self,
