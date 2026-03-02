@@ -813,11 +813,19 @@ class BufferedStreamExtractor:
         robots = sorted([r for r in set(obs_data.keys()) | set(action_data.keys()) if r])
 
         if robots:
+            # Multi-robot: require ALL robots to have both observation and action data
+            # to ensure consistent output shape (e.g., 16 = 8 left + 8 right)
+            for r in robots:
+                if r not in obs_data:
+                    return None  # Observation data not yet available for this arm
+                if r not in action_data:
+                    return None  # Action data not yet available for this arm
+
             # Multi-robot: concatenate in sorted order (left, right)
             result = {}
 
             # Concatenate observation state
-            obs_positions = [obs_data[r]["pos"] for r in robots if r in obs_data]
+            obs_positions = [obs_data[r]["pos"] for r in robots]
             if obs_positions:
                 result["observation.state"] = np.concatenate(obs_positions)
 
@@ -825,7 +833,7 @@ class BufferedStreamExtractor:
             obs_velocities = [
                 obs_data[r]["vel"]
                 for r in robots
-                if r in obs_data and obs_data[r]["vel"] is not None
+                if obs_data[r]["vel"] is not None
             ]
             if obs_velocities:
                 result["observation.velocity"] = np.concatenate(obs_velocities)
@@ -834,13 +842,13 @@ class BufferedStreamExtractor:
             obs_efforts = [
                 obs_data[r]["eff"]
                 for r in robots
-                if r in obs_data and obs_data[r]["eff"] is not None
+                if obs_data[r]["eff"] is not None
             ]
             if obs_efforts:
                 result["observation.effort"] = np.concatenate(obs_efforts)
 
             # Concatenate action
-            action_positions = [action_data[r]["pos"] for r in robots if r in action_data]
+            action_positions = [action_data[r]["pos"] for r in robots]
             if action_positions:
                 result["action"] = np.concatenate(action_positions)
 
