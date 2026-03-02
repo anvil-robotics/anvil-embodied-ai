@@ -4,7 +4,7 @@
         <General>
             <Interfaces>
                 <!-- GPU PC ethernet interface -->
-                <NetworkInterface name="enp109s0"/>
+                <NetworkInterface name="eno1"/>
             </Interfaces>
             <AllowMulticast>true</AllowMulticast>
             <MaxMessageSize>65535B</MaxMessageSize>
