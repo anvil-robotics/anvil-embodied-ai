@@ -1,7 +1,7 @@
 # =============================================================================
 # LeRobot Inference Configuration - 4 Camera Setup
 # =============================================================================
-# Must match training config (openarm.yaml) for correct mapping
+# Must match data conversion config (configs/mcap_converter/) for correct mapping
 #
 # Parameters NOT in this file are set via ROS2 parameters:
 #   - model_path, device, control_frequency, image_height/width, mode

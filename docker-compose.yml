@@ -1,5 +1,6 @@
 services:
   inference:
+    image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: docker/inference/Dockerfile
