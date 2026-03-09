@@ -1,0 +1,51 @@
+# =============================================================================
+# Fake Hardware Test Configuration
+# =============================================================================
+# Used by docker-compose.fake-hardware.yml for testing without real hardware.
+# Mirrors inference_default.yaml but omits model/safety sections (uses defaults).
+
+joint_state_topic: "/joint_states"
+
+joint_names:
+  # Joint suffixes as output by ML model (must match training dataset)
+  model_joint_order:
+    - finger_joint1
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - joint7
+
+  # Joint order expected by ROS2 controller (reordered for forward_position_controller)
+  controller_joint_order:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - joint7
+    - finger_joint1
+
+# -----------------------------------------------------------------------------
+# Arm Configuration
+# -----------------------------------------------------------------------------
+arms:
+  left:
+    ros_prefix: "follower_l"
+    command_topic: "/follower_l_forward_position_controller/commands"
+    action_start: 0
+    action_end: 8
+  right:
+    ros_prefix: "follower_r"
+    command_topic: "/follower_r_forward_position_controller/commands"
+    action_start: 8
+    action_end: 16
+
+camera_mapping:
+  "/cam_waist/image_raw/compressed": "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed": "chest"
+  "/cam_wrist_l/image_raw/compressed": "wrist_l"

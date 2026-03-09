@@ -11,7 +11,11 @@ End-to-end workflow for training imitation learning models.
 ## Step 1: Convert MCAP to LeRobot Format
 
 ```bash
+# Leader-follower teleop
 uv run mcap-convert -i data/raw/my-session -o data/datasets/my-dataset --config configs/mcap_converter/openarm_bimanual.yaml
+
+# Quest VR teleop
+uv run mcap-convert -i data/raw/my-session -o data/datasets/my-dataset --config configs/mcap_converter/openarm_bimanual_quest.yaml
 ```
 
 See [mcap_converter CLI reference](../packages/mcap_converter/README.md#cli-tools) for all options.
@@ -48,6 +52,7 @@ uv run lerobot-train \
   --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
+  --policy.repo_id=my-policy \
   --training.batch_size=8 \
   --training.steps=100000 \
   --wandb.enable=true \
@@ -61,6 +66,7 @@ LEROBOT_TASK_OVERRIDE="Pick up the red cube" uv run lerobot-train \
   --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=smolvla \
+  --policy.repo_id=my-policy \
   --training.batch_size=4 \
   --training.steps=50000
 ```
@@ -71,7 +77,8 @@ LEROBOT_TASK_OVERRIDE="Pick up the red cube" uv run lerobot-train \
 LEROBOT_CAMERA_FILTER="waist,wrist_r" uv run lerobot-train \
   --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
-  --policy.type=act
+  --policy.type=act \
+  --policy.repo_id=my-policy
 ```
 
 ### With Delta Actions
@@ -81,6 +88,7 @@ uv run lerobot-train \
   --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
+  --policy.repo_id=my-policy \
   --use-delta-actions
 ```
 

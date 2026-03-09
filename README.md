@@ -28,6 +28,7 @@ Anvil-Embodied-AI provides a pipeline for imitation learning on Anvil robots:
 
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv) for package management
+- Docker & Docker Compose (for inference tests)
 
 ### Installation
 
@@ -37,40 +38,82 @@ cd anvil-embodied-ai
 uv sync --all-packages
 ```
 
-### Convert Data
+### 1. Convert Data (ETL)
+
+Convert MCAP recordings from teleoperation sessions into LeRobot v3.0 datasets.
+
+Two teleop modes are supported — pick the config that matches your recording:
 
 ```bash
+# Leader-follower teleop (actions derived from leader joints)
 uv run mcap-convert -i data/raw/my-session -o /tmp/my-dataset --config configs/mcap_converter/openarm_bimanual.yaml
+
+# Quest VR teleop (actions from position command topics)
+uv run mcap-convert -i data/raw/my-session -o /tmp/my-dataset --config configs/mcap_converter/openarm_bimanual_quest.yaml
 ```
 
-### Validate Dataset
+Then validate the converted dataset:
 
 ```bash
 uv run dataset-validate --root /tmp/my-dataset
 ```
 
-### Train a Model
+Expected output: 5 checks (load, info, features, read, batch) all showing `[OK]`.
+
+### 2. Train a Model
+
+Train an ACT policy on the converted dataset:
 
 ```bash
-uv run lerobot-train --dataset.repo_id=local --dataset.root=/tmp/my-dataset --policy.type=act
+uv run lerobot-train \
+  --dataset.repo_id=local \
+  --dataset.root=/tmp/my-dataset \
+  --policy.type=act \
+  --policy.repo_id=my-policy \
+  --output_dir=/tmp/my-training-output
 ```
 
-### Run Inference (Docker)
+Optional flags:
+- `--steps=100000` — total training steps (default 100k)
+- `--batch_size=8` — adjust based on GPU memory
+- `--save_freq=10000` — checkpoint frequency
+- `LEROBOT_CAMERA_FILTER=chest,waist` — train with a subset of cameras
+- `--use-delta-actions` — convert actions to relative (action - state)
+
+Checkpoints are saved to `--output_dir`. The trained model can be used for inference.
+
+### 3. Run Inference
+
+#### Production (GPU PC + Robot PC)
 
 ```bash
-cp .env.example .env              # configure model path, ROS_DOMAIN_ID, CycloneDDS
+cp .env.example .env              # configure MODEL_PATH, ROS_DOMAIN_ID, CycloneDDS
 docker compose up                  # run inference on GPU PC
 ```
 
-### Test Distributed Connectivity
+#### Monitor-only (no model, verify data streams)
 
 ```bash
-# Monitor-only mode: verify DDS data streams without loading a model
 MONITOR_ONLY=true docker compose up
-
-# Mock distributed test: CycloneDDS discovery on Docker bridge (no hardware needed)
-docker compose -f docker-compose.mockdist.yml up --build --abort-on-container-exit
 ```
+
+### 4. Test Without Hardware
+
+No robot needed. Uses a fake hardware node that publishes dummy camera images and joint states over CycloneDDS.
+
+```bash
+# Monitor-only: verify data streams without a model (no GPU needed)
+MONITOR_ONLY=true docker compose -f docker-compose.fake-hardware.yml up --build --abort-on-container-exit
+
+# Full inference: load a trained model and verify action output (model_zoo/ is mounted)
+MODEL_PATH=/workspace/model_zoo/test/pretrained_model docker compose -f docker-compose.fake-hardware.yml up --build --abort-on-container-exit
+```
+
+Expected output:
+- `fake_hardware` publishes 4 cameras at ~30 Hz and joint states at ~500 Hz
+- `inference-node` receives and logs matching rates in 5-second stat intervals
+- With `MODEL_PATH`: inference node also publishes actions to per-arm controller topics, and the fake hardware node validates them
+- `discovery-check` prints `=== Discovery check PASSED ===`
 
 ## Project Structure
 
@@ -88,7 +131,7 @@ anvil-embodied-ai/
 ├── docker/
 │   └── inference/                 # Dockerfile + entrypoint
 ├── docker-compose.yml             # Production inference (GPU PC)
-├── docker-compose.mockdist.yml    # Mock CycloneDDS discovery test
+├── docker-compose.fake-hardware.yml # Fake hardware test (no real hardware needed)
 ├── .env.example                   # Environment template
 ├── model_zoo/                     # Trained model weights (gitignored)
 ├── scripts/                       # Utility scripts
