@@ -7,7 +7,7 @@ name = "mcap-converter"
 version = "0.1.0"
 description = "MCAP to LeRobot Dataset Converter - A modular conversion pipeline for transforming ROS2 MCAP recordings into LeRobot v3.0 format datasets"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 authors = [
     { name = "Anvil Robotics" }
@@ -17,7 +17,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
