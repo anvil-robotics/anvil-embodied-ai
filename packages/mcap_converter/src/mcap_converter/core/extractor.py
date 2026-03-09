@@ -177,6 +177,10 @@ class DataExtractor:
             for t in self.config.camera_topics
         }
 
+        # Include action command topics if configured (quest teleop mode)
+        if self.config.action_topics:
+            interested_topics.extend(self.config.action_topics.keys())
+
         # Also include legacy topics if configured
         if self.config.robot_state_topics:
             interested_topics.extend(self.config.robot_state_topics)
@@ -187,15 +191,18 @@ class DataExtractor:
             # Handle single robot state topic (new architecture)
             if topic == self.config.robot_state_topic:
                 self._extract_joint_state_single_topic(message, extracted_data)
+            # Handle action command topics (quest teleop mode)
+            elif self.config.action_topics and topic in self.config.action_topics:
+                self._extract_action_command(message, topic, extracted_data)
             # Handle legacy multi-topic architecture
             elif self.config.robot_state_topics and topic in self.config.robot_state_topics:
                 self._extract_joint_state_legacy(message, extracted_data)
-            # Handle camera topics (raw images)
-            elif topic in self.config.camera_topics:
-                self._extract_image(message, extracted_data)
-            # Handle compressed image topics
-            elif topic in self._compressed_topic_mapping:
-                self._extract_compressed_image(message, extracted_data)
+            # Handle camera topics (detect CompressedImage vs Image by attribute)
+            elif topic in self.config.camera_topics or topic in self._compressed_topic_mapping:
+                if hasattr(message.ros_msg, 'format'):
+                    self._extract_compressed_image(message, extracted_data)
+                else:
+                    self._extract_image(message, extracted_data)
 
         # Convert lists to numpy arrays
         self._convert_to_arrays(extracted_data)
@@ -280,6 +287,47 @@ class DataExtractor:
             extracted_data[key]["velocity"].append(data["velocity"])
             extracted_data[key]["effort"].append(data["effort"])
 
+    def _extract_action_command(self, message, topic: str, extracted_data: Dict):
+        """
+        Extract action from a command topic (quest teleop mode).
+
+        Command topics publish std_msgs/Float64MultiArray with joint positions.
+        These messages have no header, so we use MCAP log_time for timestamps.
+
+        Args:
+            message: MCAP message (Float64MultiArray)
+            topic: The ROS topic name
+            extracted_data: Data dictionary to populate
+        """
+        ros_msg = message.ros_msg
+        # Float64MultiArray has no header; use MCAP recording timestamp
+        time_s = message.log_time.timestamp()
+
+        # Map topic to arm identifier (e.g., "left" or "right")
+        robot = self.config.action_topics[topic]
+        key = self._get_joint_state_key("action", robot)
+
+        # Extract position data from Float64MultiArray.data
+        positions = list(ros_msg.data)
+
+        if key not in extracted_data:
+            # Generate joint names as positional indices (j0, j1, ...)
+            # These will be replaced by observation joint names during alignment
+            joint_names = [f"joint{i}" for i in range(len(positions))]
+            extracted_data[key] = {
+                "timestamp": [],
+                "joint_names": joint_names,
+                "position": [],
+                "velocity": [],
+                "effort": [],
+            }
+
+        extracted_data[key]["timestamp"].append(time_s)
+        extracted_data[key]["position"].append(positions)
+        # Float64MultiArray only contains position commands
+        extracted_data[key]["velocity"].append([0.0] * len(positions))
+        extracted_data[key]["effort"].append([0.0] * len(positions))
+
     def _extract_joint_state_legacy(self, message, extracted_data: Dict):
         """
         Extract joint state from legacy multi-topic architecture.
@@ -339,7 +387,12 @@ class DataExtractor:
         ros_msg = message.ros_msg
         time_ns = (ros_msg.header.stamp.sec * 1e9 + ros_msg.header.stamp.nanosec) / 1e9
 
-        cam_name = self._compressed_topic_mapping[message.channel.topic]
+        topic = message.channel.topic
+        # Look up camera name from either the main mapping or the auto-generated compressed mapping
+        if topic in self.config.camera_topic_mapping:
+            cam_name = self.config.camera_topic_mapping[topic]
+        else:
+            cam_name = self._compressed_topic_mapping[topic]
         extracted_data[cam_name]["timestamp"].append(time_ns)
 
         # Decode compressed image
@@ -525,9 +578,15 @@ class BufferedStreamExtractor:
         # Joint state buffers: {(role, robot): {'buffer': deque, 'joint_names': list}}
         joint_buffers: Dict[Tuple[str, str], Dict] = {}
 
-        # Build topic list for reading (cameras + joint states)
+        # Build topic list for reading (cameras + joint states + action commands)
         all_topics = list(all_camera_topics)
         all_topics.append(self.config.robot_state_topic)
+
+        # Include action command topics if configured (quest teleop mode)
+        action_topic_set = set()
+        if self.config.action_topics:
+            action_topic_set = set(self.config.action_topics.keys())
+            all_topics.extend(action_topic_set)
 
         # Get main camera (first one in config)
         main_cam = list(self.config.camera_topic_mapping.values())[0]
@@ -544,6 +603,11 @@ class BufferedStreamExtractor:
                 self._buffer_joint_state(message, joint_buffers)
                 continue
 
+            # Handle action command messages (quest teleop mode)
+            if topic in action_topic_set:
+                self._buffer_action_command(message, topic, joint_buffers)
+                continue
+
             # Handle camera messages
             if topic not in topic_to_cam:
                 continue
@@ -557,11 +621,11 @@ class BufferedStreamExtractor:
             if first_ts is None:
                 first_ts = time_ns
 
-            # Decode image
-            if topic in camera_topics:
-                img = decode_image(ros_msg.data, ros_msg.encoding, ros_msg.height, ros_msg.width)
-            else:
+            # Decode image — detect CompressedImage vs Image by attribute
+            if hasattr(ros_msg, 'format'):
                 img = decode_compressed_image(ros_msg.data, ros_msg.format)
+            else:
+                img = decode_image(ros_msg.data, ros_msg.encoding, ros_msg.height, ros_msg.width)
 
             # Add to buffer
             camera_buffers[cam_name].append((time_ns, img))
@@ -615,6 +679,32 @@ class BufferedStreamExtractor:
 
         if not self.quiet:
             print(f"[BufferedStream] [OK] Extracted {frames_yielded} frames total")
+
+        if frames_yielded == 0:
+            # Diagnostic: show why no frames were produced
+            cam_counts = {cam: len(buf) for cam, buf in camera_buffers.items()}
+            joint_keys = {
+                f"{role}:{robot or 'default'}": len(d["buffer"])
+                for (role, robot), d in joint_buffers.items()
+            }
+            print(f"[BufferedStream] WARNING: 0 frames produced — diagnostics:")
+            print(f"  Camera buffers: {cam_counts}")
+            print(f"  Joint buffers:  {joint_keys if joint_keys else '(empty — no joint data received)'}")
+            if not cam_counts or all(c == 0 for c in cam_counts.values()):
+                print(f"  -> No camera images found. Check that these topics exist in the MCAP:")
+                for t in self.config.camera_topics:
+                    print(f"       {t}")
+            if not joint_keys:
+                print(f"  -> No joint state data. Check robot_state_topic: {self.config.robot_state_topic}")
+                if self.config.action_topics:
+                    print(f"  -> No action data. Check action_topics: {list(self.config.action_topics.keys())}")
+            elif not any(k.startswith("action:") for k in joint_keys):
+                if self.config.action_topics:
+                    print(f"  -> No action data received from action_topics:")
+                    for t in self.config.action_topics:
+                        print(f"       {t}")
+                else:
+                    print(f"  -> No action data parsed from joint_states (no leader prefix matched).")
 
     def _align_frame_at_cursor(
         self,
@@ -723,11 +813,19 @@ class BufferedStreamExtractor:
         robots = sorted([r for r in set(obs_data.keys()) | set(action_data.keys()) if r])
 
         if robots:
+            # Multi-robot: require ALL robots to have both observation and action data
+            # to ensure consistent output shape (e.g., 16 = 8 left + 8 right)
+            for r in robots:
+                if r not in obs_data:
+                    return None  # Observation data not yet available for this arm
+                if r not in action_data:
+                    return None  # Action data not yet available for this arm
+
             # Multi-robot: concatenate in sorted order (left, right)
             result = {}
 
             # Concatenate observation state
-            obs_positions = [obs_data[r]["pos"] for r in robots if r in obs_data]
+            obs_positions = [obs_data[r]["pos"] for r in robots]
             if obs_positions:
                 result["observation.state"] = np.concatenate(obs_positions)
 
@@ -735,7 +833,7 @@ class BufferedStreamExtractor:
             obs_velocities = [
                 obs_data[r]["vel"]
                 for r in robots
-                if r in obs_data and obs_data[r]["vel"] is not None
+                if obs_data[r]["vel"] is not None
             ]
             if obs_velocities:
                 result["observation.velocity"] = np.concatenate(obs_velocities)
@@ -744,13 +842,13 @@ class BufferedStreamExtractor:
             obs_efforts = [
                 obs_data[r]["eff"]
                 for r in robots
-                if r in obs_data and obs_data[r]["eff"] is not None
+                if obs_data[r]["eff"] is not None
             ]
             if obs_efforts:
                 result["observation.effort"] = np.concatenate(obs_efforts)
 
             # Concatenate action
-            action_positions = [action_data[r]["pos"] for r in robots if r in action_data]
+            action_positions = [action_data[r]["pos"] for r in robots]
             if action_positions:
                 result["action"] = np.concatenate(action_positions)
 
@@ -875,6 +973,47 @@ class BufferedStreamExtractor:
 
             # Append as tuple: (timestamp, position, velocity, effort)
             joint_buffers[key]["buffer"].append((timestamp, pos, vel, eff))
+
+    def _buffer_action_command(
+        self,
+        message,
+        topic: str,
+        joint_buffers: Dict[Tuple[str, str], Dict],
+    ) -> None:
+        """
+        Parse action command message (Float64MultiArray) and add to joint buffers.
+
+        Used in quest teleop mode where actions come from separate command topics
+        instead of from leader joints in the JointState topic.
+
+        Args:
+            message: MCAP message with Float64MultiArray
+            topic: The ROS topic name
+            joint_buffers: Dict keyed by (role, robot) containing buffer and metadata
+        """
+        ros_msg = message.ros_msg
+        # Float64MultiArray has no header; use MCAP recording timestamp
+        timestamp = message.log_time.timestamp()
+
+        # Map topic to arm identifier (e.g., "left" or "right")
+        robot = self.config.action_topics[topic]
+        key = ("action", robot)
+
+        # Extract position data from Float64MultiArray.data
+        positions = list(ros_msg.data)
+
+        if key not in joint_buffers:
+            joint_buffers[key] = {
+                "buffer": deque(),
+                "joint_names": [f"joint{i}" for i in range(len(positions))],
+            }
+
+        pos = np.array(positions, dtype=np.float32)
+        vel = np.array([], dtype=np.float32)
+        eff = np.array([], dtype=np.float32)
+
+        # Append as tuple: (timestamp, position, velocity, effort)
+        joint_buffers[key]["buffer"].append((timestamp, pos, vel, eff))
 
     def _sync_joint_buffers(
         self,
