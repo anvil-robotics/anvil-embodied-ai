@@ -110,3 +110,5 @@ secrets.yaml
 
 # Local Claude configuration
 CLAUDE.md
+CLAUDE_GLOBAL.md
+docs/claude_journal/

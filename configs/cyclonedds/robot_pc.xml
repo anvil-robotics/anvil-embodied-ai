@@ -14,7 +14,7 @@
         </General>
         <Discovery>
             <Peers>
-                <!-- GPU PC IP -->
+                <!-- GPU PC IP (example — replace with your GPU PC's address) -->
                 <Peer address="192.168.0.146"/>
             </Peers>
         </Discovery>
