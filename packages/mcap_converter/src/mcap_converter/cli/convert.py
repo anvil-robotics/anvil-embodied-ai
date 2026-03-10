@@ -171,6 +171,9 @@ def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
                 robot_joints[robot].append(joint_id)
 
         if robot_joints:
+            # Sort each arm's joint list for canonical ordering
+            for robot in robot_joints:
+                robot_joints[robot] = sorted(robot_joints[robot])
             return robot_joints
 
     return {}
@@ -249,8 +252,8 @@ def convert_session(
         log(f"  joints: {joint_names.get('', [])}")
     log(f"Total joints: [bold]{total_joints}[/bold] (observation + action)")
     if quest_mode:
-        for topic, arm in config.action_topics.items():
-            log(f"  Action topic ({arm}): [dim]{topic}[/dim]")
+        for topic, topic_cfg in config.action_topics.items():
+            log(f"  Action topic ({topic_cfg.arm}): [dim]{topic}[/dim]")
 
     # Get camera names
     camera_names = list(config.camera_topic_mapping.values())

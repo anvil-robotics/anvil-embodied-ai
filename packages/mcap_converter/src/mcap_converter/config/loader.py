@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-from .schema import DataConfig, FeatureMapping, JointNamePattern
+from .schema import ActionTopicConfig, DataConfig, FeatureMapping, JointNamePattern
 
 
 class ConfigLoader:
@@ -65,6 +65,45 @@ class ConfigLoader:
             arms=arms,
             separator=separator,
         )
+
+    @staticmethod
+    def _parse_action_topics(topics_dict: Optional[Dict]) -> Dict[str, ActionTopicConfig]:
+        """Parse action_topics from dictionary.
+
+        Supports both new format (nested dict with arm/joint_order) and
+        legacy format (plain string arm identifier).
+
+        Args:
+            topics_dict: Dictionary mapping topic names to config
+
+        Returns:
+            Dictionary mapping topic names to ActionTopicConfig instances
+        """
+        if not topics_dict:
+            return {}
+
+        result = {}
+        for topic, value in topics_dict.items():
+            if isinstance(value, str):
+                # Legacy format: {topic: "arm_id"}
+                warnings.warn(
+                    f"action_topics: plain string format for '{topic}' is deprecated. "
+                    "Use nested format with 'arm' and 'joint_order' keys instead.",
+                    DeprecationWarning,
+                    stacklevel=4,
+                )
+                result[topic] = ActionTopicConfig(arm=value, joint_order=[])
+            elif isinstance(value, dict):
+                # New format: {topic: {arm: "...", joint_order: [...]}}
+                result[topic] = ActionTopicConfig(
+                    arm=value.get("arm", ""),
+                    joint_order=value.get("joint_order", []),
+                )
+            else:
+                raise ValueError(
+                    f"action_topics: invalid value type for '{topic}': {type(value)}"
+                )
+        return result
 
     @staticmethod
     def _parse_feature_mapping(
@@ -204,7 +243,9 @@ class ConfigLoader:
             # New fields
             robot_state_topic=config_dict.get("robot_state_topic", defaults.robot_state_topic),
             joint_name_pattern=joint_name_pattern,
-            action_topics=config_dict.get("action_topics", defaults.action_topics),
+            action_topics=ConfigLoader._parse_action_topics(
+                config_dict.get("action_topics")
+            ),
             observation_feature_mapping=observation_feature_mapping,
             action_feature_mapping=action_feature_mapping,
             # Camera config

@@ -61,6 +61,32 @@ class JointNamePattern:
 
 
 @dataclass
+class ActionTopicConfig:
+    """
+    Configuration for a single action command topic (quest teleop mode).
+
+    Specifies which arm the topic controls and the explicit joint ordering
+    of the Float64MultiArray.data values.
+
+    Example:
+        ActionTopicConfig(
+            arm="left",
+            joint_order=["joint1", "joint2", ..., "joint7", "finger_joint1"]
+        )
+    """
+
+    # Arm identifier (e.g., "left", "right")
+    arm: str = ""
+
+    # Explicit joint ordering for the Float64MultiArray.data array.
+    # Maps each index position to a joint_id name.
+    # Example: ["joint1", "joint2", ..., "joint7", "finger_joint1"]
+    #   -> data[0] = joint1, data[7] = finger_joint1
+    # These names must match the joint_ids parsed from /joint_states.
+    joint_order: List[str] = field(default_factory=list)
+
+
+@dataclass
 class FeatureMapping:
     """
     Configuration for extracting features from JointState.
@@ -96,13 +122,17 @@ class DataConfig:
     # When set, actions are read from separate command topics instead of
     # from leader joints in the robot_state_topic.
     #
-    # Maps ROS2 command topic (std_msgs/Float64MultiArray) -> arm identifier.
-    # Example: {"/follower_l_forward_position_controller/commands": "left",
-    #           "/follower_r_forward_position_controller/commands": "right"}
+    # Maps ROS2 command topic -> ActionTopicConfig with arm identifier
+    # and explicit joint ordering for the Float64MultiArray.data array.
+    #
+    # Example:
+    #   {"/follower_l_forward_position_controller/commands":
+    #       ActionTopicConfig(arm="left",
+    #           joint_order=["joint1", ..., "joint7", "finger_joint1"])}
     #
     # If empty (default), leader-follower mode is used: actions come from
     # leader joints parsed from robot_state_topic via joint_name_pattern.
-    action_topics: Dict[str, str] = field(default_factory=dict)
+    action_topics: Dict[str, "ActionTopicConfig"] = field(default_factory=dict)
 
     # Separate feature mappings for observation vs action
     # This allows different features for input (observation) and output (action)

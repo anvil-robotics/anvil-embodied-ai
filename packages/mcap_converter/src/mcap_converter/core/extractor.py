@@ -106,6 +106,8 @@ class DataExtractor:
             config: Data configuration specifying topics and features
         """
         self.config = config
+        # Cache for action topic reorder permutations: {topic: np.ndarray}
+        self._action_reorder_cache: Dict[str, np.ndarray] = {}
 
     def _parse_joint_name(self, joint_name: str) -> Tuple[str, str, str]:
         """Parse joint name using shared utility."""
@@ -237,9 +239,11 @@ class DataExtractor:
         Extract joint state from single JointState message containing all joints.
 
         Parses joint names to determine role and robot, then groups data accordingly.
+        Joints are sorted by joint_id for deterministic canonical ordering.
         """
         ros_msg = message.ros_msg
-        time_ns = (ros_msg.header.stamp.sec * 1e9 + ros_msg.header.stamp.nanosec) / 1e9
+        # Use MCAP log_time for consistent time domain across all streams
+        time_s = message.log_time.timestamp()
 
         # Group joints by (role, robot)
         grouped_data: Dict[Tuple[str, str], Dict] = {}
@@ -269,6 +273,17 @@ class DataExtractor:
             if ros_msg.effort and i < len(ros_msg.effort):
                 grouped_data[key]["effort"].append(ros_msg.effort[i])
 
+        # Sort each group by joint_id for canonical ordering
+        for key, data in grouped_data.items():
+            sort_indices = sorted(
+                range(len(data["joint_names"])),
+                key=lambda idx: data["joint_names"][idx],
+            )
+            data["joint_names"] = [data["joint_names"][idx] for idx in sort_indices]
+            data["position"] = [data["position"][idx] for idx in sort_indices]
+            data["velocity"] = [data["velocity"][idx] for idx in sort_indices]
+            data["effort"] = [data["effort"][idx] for idx in sort_indices]
+
         # Store in extracted_data with structured keys
         for (role, robot), data in grouped_data.items():
             key = self._get_joint_state_key(role, robot)
@@ -282,7 +297,7 @@ class DataExtractor:
                     "effort": [],
                 }
 
-            extracted_data[key]["timestamp"].append(time_ns)
+            extracted_data[key]["timestamp"].append(time_s)
             extracted_data[key]["position"].append(data["position"])
             extracted_data[key]["velocity"].append(data["velocity"])
             extracted_data[key]["effort"].append(data["effort"])
@@ -293,6 +308,8 @@ class DataExtractor:
 
         Command topics publish std_msgs/Float64MultiArray with joint positions.
         These messages have no header, so we use MCAP log_time for timestamps.
+        Positions are reordered to canonical (sorted) joint order using joint_order
+        from the ActionTopicConfig.
 
         Args:
             message: MCAP message (Float64MultiArray)
@@ -303,17 +320,39 @@ class DataExtractor:
         # Float64MultiArray has no header; use MCAP recording timestamp
         time_s = message.log_time.timestamp()
 
-        # Map topic to arm identifier (e.g., "left" or "right")
-        robot = self.config.action_topics[topic]
+        # Get action topic config
+        topic_cfg = self.config.action_topics[topic]
+        robot = topic_cfg.arm
         key = self._get_joint_state_key("action", robot)
 
         # Extract position data from Float64MultiArray.data
         positions = list(ros_msg.data)
 
+        # Compute reorder permutation on first message (cached per topic)
+        if topic not in self._action_reorder_cache:
+            if topic_cfg.joint_order:
+                # Sort joint_order alphabetically to match canonical observation order
+                self._action_reorder_cache[topic] = np.array(
+                    sorted(
+                        range(len(topic_cfg.joint_order)),
+                        key=lambda idx: topic_cfg.joint_order[idx],
+                    ),
+                    dtype=np.intp,
+                )
+            else:
+                # No joint_order specified — identity permutation (no reorder)
+                self._action_reorder_cache[topic] = np.arange(
+                    len(positions), dtype=np.intp
+                )
+
+        reorder = self._action_reorder_cache[topic]
+
         if key not in extracted_data:
-            # Generate joint names as positional indices (j0, j1, ...)
-            # These will be replaced by observation joint names during alignment
-            joint_names = [f"joint{i}" for i in range(len(positions))]
+            # Use canonical (sorted) joint names
+            if topic_cfg.joint_order:
+                joint_names = sorted(topic_cfg.joint_order)
+            else:
+                joint_names = [f"joint{i}" for i in range(len(positions))]
             extracted_data[key] = {
                 "timestamp": [],
                 "joint_names": joint_names,
@@ -322,8 +361,10 @@ class DataExtractor:
                 "effort": [],
             }
 
+        # Reorder positions to canonical order
+        pos_array = np.array(positions, dtype=np.float64)
         extracted_data[key]["timestamp"].append(time_s)
-        extracted_data[key]["position"].append(positions)
+        extracted_data[key]["position"].append(pos_array[reorder].tolist())
         # Float64MultiArray only contains position commands
         extracted_data[key]["velocity"].append([0.0] * len(positions))
         extracted_data[key]["effort"].append([0.0] * len(positions))
@@ -367,10 +408,11 @@ class DataExtractor:
     def _extract_image(self, message, extracted_data: Dict):
         """Extract image from ROS Image message"""
         ros_msg = message.ros_msg
-        time_ns = (ros_msg.header.stamp.sec * 1e9 + ros_msg.header.stamp.nanosec) / 1e9
+        # Use MCAP log_time for consistent time domain across all streams
+        time_s = message.log_time.timestamp()
 
         cam_name = self.config.camera_topic_mapping[message.channel.topic]
-        extracted_data[cam_name]["timestamp"].append(time_ns)
+        extracted_data[cam_name]["timestamp"].append(time_s)
 
         # Decode image
         img_data = decode_image(ros_msg.data, ros_msg.encoding, ros_msg.height, ros_msg.width)
@@ -385,7 +427,8 @@ class DataExtractor:
     def _extract_compressed_image(self, message, extracted_data: Dict):
         """Extract image from ROS CompressedImage message"""
         ros_msg = message.ros_msg
-        time_ns = (ros_msg.header.stamp.sec * 1e9 + ros_msg.header.stamp.nanosec) / 1e9
+        # Use MCAP log_time for consistent time domain across all streams
+        time_s = message.log_time.timestamp()
 
         topic = message.channel.topic
         # Look up camera name from either the main mapping or the auto-generated compressed mapping
@@ -393,7 +436,7 @@ class DataExtractor:
             cam_name = self.config.camera_topic_mapping[topic]
         else:
             cam_name = self._compressed_topic_mapping[topic]
-        extracted_data[cam_name]["timestamp"].append(time_ns)
+        extracted_data[cam_name]["timestamp"].append(time_s)
 
         # Decode compressed image
         # CompressedImage format field contains the compression format (e.g., "jpeg", "png")
@@ -529,6 +572,9 @@ class BufferedStreamExtractor:
         # Joint name pattern for parsing (reuse from DataExtractor)
         self._joint_pattern = config.joint_name_pattern
 
+        # Cache for action topic reorder permutations: {topic: np.ndarray}
+        self._action_reorder_cache: Dict[str, np.ndarray] = {}
+
     def extract_frames(
         self,
         mcap_path: str,
@@ -613,22 +659,22 @@ class BufferedStreamExtractor:
                 continue
             cam_name = topic_to_cam[topic]
 
-            # Get timestamp
-            ros_msg = message.ros_msg
-            time_ns = (ros_msg.header.stamp.sec * 1e9 + ros_msg.header.stamp.nanosec) / 1e9
+            # Use MCAP log_time for consistent time domain across all streams
+            time_s = message.log_time.timestamp()
 
             # Track first timestamp for relative timing
             if first_ts is None:
-                first_ts = time_ns
+                first_ts = time_s
 
             # Decode image — detect CompressedImage vs Image by attribute
+            ros_msg = message.ros_msg
             if hasattr(ros_msg, 'format'):
                 img = decode_compressed_image(ros_msg.data, ros_msg.format)
             else:
                 img = decode_image(ros_msg.data, ros_msg.encoding, ros_msg.height, ros_msg.width)
 
             # Add to buffer
-            camera_buffers[cam_name].append((time_ns, img))
+            camera_buffers[cam_name].append((time_s, img))
 
             # Start processing when main camera buffer reaches threshold
             main_buffer_len = len(camera_buffers[main_cam])
@@ -912,12 +958,15 @@ class BufferedStreamExtractor:
         """
         Parse joint state message and add to appropriate buffers.
 
+        Joints are sorted by joint_id for deterministic canonical ordering.
+
         Args:
             message: MCAP message with ROS JointState
             joint_buffers: Dict keyed by (role, robot) containing buffer and metadata
         """
         ros_msg = message.ros_msg
-        timestamp = ros_msg.header.stamp.sec + ros_msg.header.stamp.nanosec / 1e9
+        # Use MCAP log_time for consistent time domain across all streams
+        timestamp = message.log_time.timestamp()
 
         # Group joints by (role, robot)
         grouped: Dict[Tuple[str, str], Dict] = {}
@@ -946,12 +995,23 @@ class BufferedStreamExtractor:
             if ros_msg.effort and i < len(ros_msg.effort):
                 grouped[key]["effort"].append(ros_msg.effort[i])
 
+        # Sort each group by joint_id for canonical ordering
+        for key, data in grouped.items():
+            sort_indices = sorted(
+                range(len(data["joint_ids"])),
+                key=lambda idx: data["joint_ids"][idx],
+            )
+            data["joint_ids"] = [data["joint_ids"][idx] for idx in sort_indices]
+            data["position"] = [data["position"][idx] for idx in sort_indices]
+            data["velocity"] = [data["velocity"][idx] for idx in sort_indices]
+            data["effort"] = [data["effort"][idx] for idx in sort_indices]
+
         # Add to buffers
         for key, data in grouped.items():
             if key not in joint_buffers:
                 joint_buffers[key] = {
                     "buffer": deque(),
-                    "joint_names": data["joint_ids"],  # Store joint names once
+                    "joint_names": data["joint_ids"],  # Store sorted joint names once
                 }
 
             # Create arrays
@@ -985,6 +1045,8 @@ class BufferedStreamExtractor:
 
         Used in quest teleop mode where actions come from separate command topics
         instead of from leader joints in the JointState topic.
+        Positions are reordered to canonical (sorted) joint order using joint_order
+        from the ActionTopicConfig.
 
         Args:
             message: MCAP message with Float64MultiArray
@@ -995,20 +1057,46 @@ class BufferedStreamExtractor:
         # Float64MultiArray has no header; use MCAP recording timestamp
         timestamp = message.log_time.timestamp()
 
-        # Map topic to arm identifier (e.g., "left" or "right")
-        robot = self.config.action_topics[topic]
+        # Get action topic config
+        topic_cfg = self.config.action_topics[topic]
+        robot = topic_cfg.arm
         key = ("action", robot)
 
         # Extract position data from Float64MultiArray.data
         positions = list(ros_msg.data)
 
+        # Compute reorder permutation on first message (cached per topic)
+        if topic not in self._action_reorder_cache:
+            if topic_cfg.joint_order:
+                # Sort joint_order alphabetically to match canonical observation order
+                self._action_reorder_cache[topic] = np.array(
+                    sorted(
+                        range(len(topic_cfg.joint_order)),
+                        key=lambda idx: topic_cfg.joint_order[idx],
+                    ),
+                    dtype=np.intp,
+                )
+            else:
+                # No joint_order specified — identity permutation (no reorder)
+                self._action_reorder_cache[topic] = np.arange(
+                    len(positions), dtype=np.intp
+                )
+
+        reorder = self._action_reorder_cache[topic]
+
         if key not in joint_buffers:
+            # Use canonical (sorted) joint names
+            if topic_cfg.joint_order:
+                joint_names = sorted(topic_cfg.joint_order)
+            else:
+                joint_names = [f"joint{i}" for i in range(len(positions))]
             joint_buffers[key] = {
                 "buffer": deque(),
-                "joint_names": [f"joint{i}" for i in range(len(positions))],
+                "joint_names": joint_names,
             }
 
-        pos = np.array(positions, dtype=np.float32)
+        # Reorder positions to canonical order
+        pos = np.array(positions, dtype=np.float32)[reorder]
         vel = np.array([], dtype=np.float32)
         eff = np.array([], dtype=np.float32)
 
