@@ -52,8 +52,12 @@ joint_names:
 # the observation joint ordering for the corresponding arm.
 
 action_topics:
-  "/follower_l_forward_position_controller/commands": "left"
-  "/follower_r_forward_position_controller/commands": "right"
+  "/follower_l_forward_position_controller/commands":
+    arm: "left"
+    joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
+  "/follower_r_forward_position_controller/commands":
+    arm: "right"
+    joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
 
 
 # =============================================================================

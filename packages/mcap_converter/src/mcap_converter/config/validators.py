@@ -3,7 +3,7 @@
 import warnings
 from typing import Dict, List
 
-from .schema import DataConfig, FeatureMapping, JointNamePattern
+from .schema import ActionTopicConfig, DataConfig, FeatureMapping, JointNamePattern
 
 
 class ConfigurationError(Exception):
@@ -59,23 +59,29 @@ def validate_joint_name_pattern(
     return errors
 
 
-def validate_action_topics(action_topics: Dict[str, str]) -> List[str]:
+def validate_action_topics(action_topics: Dict[str, "ActionTopicConfig"]) -> List[str]:
     """
     Validate action_topics configuration for quest teleop mode.
 
     Args:
-        action_topics: Dict mapping ROS2 command topics to arm identifiers
+        action_topics: Dict mapping ROS2 command topics to ActionTopicConfig
 
     Returns:
         List of error messages (empty if valid)
     """
     errors = []
 
-    for topic, arm in action_topics.items():
+    for topic, topic_cfg in action_topics.items():
         if not topic:
             errors.append("action_topics: topic name cannot be empty")
-        if not arm:
+        if not topic_cfg.arm:
             errors.append(f"action_topics: arm identifier for '{topic}' cannot be empty")
+        if not topic_cfg.joint_order:
+            errors.append(
+                f"action_topics: joint_order for '{topic}' cannot be empty. "
+                "Specify the ordered list of joint names matching the "
+                "Float64MultiArray.data indices."
+            )
 
     return errors
 
