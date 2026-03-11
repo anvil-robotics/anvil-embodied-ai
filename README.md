@@ -1,15 +1,47 @@
-# Anvil-Embodied-AI
+<p align="center">
+  <a href="https://anvil.bot/">
+    <img src="anvil.png" alt="Anvil" width="120" />
+  </a>
+</p>
 
-Infrastructure for training ML models and deploying them on Anvil robot platforms.
+<h1 align="center">Anvil-Embodied-AI</h1>
+
+<p align="center">
+  <a href="https://anvil.bot/"><img src="https://img.shields.io/badge/Website-anvil.bot-blue?style=for-the-badge" alt="Website" /></a>
+  <a href="https://docs.anvil.bot/"><img src="https://img.shields.io/badge/Documentation-docs.anvil.bot-green?style=for-the-badge" alt="Docs" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-orange?style=for-the-badge" alt="License" /></a>
+</p>
+
+<p align="center">
+  <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.12+-yellow?style=flat-square&logo=python&logoColor=white" alt="Python" /></a>
+  <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-22314E?style=flat-square&logo=ros&logoColor=white" alt="ROS2" /></a>
+  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.4.2-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
+</p>
+
+---
 
 ## Overview
 
-Anvil-Embodied-AI provides a pipeline for training and deploying ML models on Anvil robots:
+This repository is the embodied AI stack for the Anvil platform — data conversion, model training, and real-time inference for robot manipulation policies.
 
-1. **Data Collection**: Record teleoperation demonstrations as ROS2 MCAP files
-2. **Data Conversion**: Convert MCAP recordings to LeRobot v3.0 dataset format
-3. **Model Training**: Train policies via LeRobot
-4. **Inference**: Deploy trained models on a GPU PC communicating with the Robot PC via CycloneDDS
+```
+  Anvil Devbox (Data collection)          This repo (anvil-embodied-ai)
+┌──────────────────────────────┐    ┌────────────────────────────────────────────────────┐
+│  Teleoperation + Recording   │───>│  Convert      ───>  Train         ───>  Deploy     │
+│  MCAP files                  │    │  mcap-convert       lerobot-train       ROS2       │
+└──────────────────────────────┘    └────────────────────────────────────────────────────┘
+```
+
+### The Full Pipeline
+
+| Stage                        | Description                                                                                                      |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **0. Data Collection** | Record teleoperation demos as ROS2 MCAP files through[ Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). |
+| **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets                                                                 |
+| **2. Model Training**  | Train ACT, SmolVLA, or other policies via LeRobot                                                                |
+| **3. Deploy**          | Deploy trained models on a GPU PC via ROS2 CycloneDDS                                                            |
+
+> **Don't have data yet?** The [Anvil OpenARM Quest Teleop Kit](https://shop.anvil.bot/products/openarm-quest-teleop-kit) gives you everything you need to start collecting teleoperation demonstrations out of the box — robot hardware, cameras, control software, and recording tools included. See our [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
 
 ## Quick Start
 
@@ -18,6 +50,7 @@ Anvil-Embodied-AI provides a pipeline for training and deploying ML models on An
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv)
 - Docker
+- Collected MCAP dataset recordings from an [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox)
 
 ### Installation
 
@@ -27,7 +60,7 @@ cd anvil-embodied-ai
 uv sync --all-packages
 ```
 
-### 1. Convert Data (ETL)
+### 1. Convert Data
 
 Convert MCAP recordings from teleoperation sessions into LeRobot v3.0 datasets.
 
@@ -63,6 +96,7 @@ uv run lerobot-train \
 ```
 
 Optional flags:
+
 - `--steps=100000` — total training steps (default 100k)
 - `--batch_size=8` — adjust based on GPU memory
 - `--save_freq=10000` — checkpoint frequency
