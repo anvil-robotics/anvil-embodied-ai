@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://anvil.bot/">
-    <img src="anvil.png" alt="Anvil" width="120" />
+    <img src="material/anvil.png" alt="Anvil" width="120" />
   </a>
 </p>
 
@@ -26,10 +26,10 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 
 ```
   Anvil Devbox (Data collection)          This repo (anvil-embodied-ai)
-┌──────────────────────────────┐    ┌────────────────────────────────────────────────────┐
-│  Teleoperation + Recording   │───>│  Convert      ───>  Train         ───>  Deploy     │
-│  MCAP files                  │    │  mcap-convert       lerobot-train       ROS2       │
-└──────────────────────────────┘    └────────────────────────────────────────────────────┘
+┌──────────────────────────────┐    ┌──────────────────────────────────────────────────────────┐
+│  Teleoperation + Recording   │───>│  Convert      ───>  Train         ───>  Run Inference    │
+│  MCAP files                  │    │  mcap-convert       lerobot-train       ROS2 CycloneDDS  │
+└──────────────────────────────┘    └──────────────────────────────────────────────────────────┘
 ```
 
 ### The Full Pipeline
@@ -39,7 +39,7 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 | **0. Data Collection** | Record teleoperation demos as ROS2 MCAP files through[ Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). |
 | **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets                                                                 |
 | **2. Model Training**  | Train ACT, SmolVLA, or other policies via LeRobot                                                                |
-| **3. Deploy**          | Deploy trained models on a GPU PC via ROS2 CycloneDDS                                                            |
+| **3. Run Inference**   | Deploy trained models on a GPU PC via ROS2 CycloneDDS                                                            |
 
 > **Don't have data yet?** The [Anvil OpenARM Quest Teleop Kit](https://shop.anvil.bot/products/openarm-quest-teleop-kit) gives you everything you need to start collecting teleoperation demonstrations out of the box — robot hardware, cameras, control software, and recording tools included. See our [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
 
@@ -60,7 +60,11 @@ cd anvil-embodied-ai
 uv sync --all-packages
 ```
 
-### 1. Convert Data
+### 0. Data Collection
+
+Record teleoperation demos as ROS2 MCAP files through an [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). See the [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
+
+### 1. Data Conversion
 
 Convert MCAP recordings from teleoperation sessions into LeRobot v3.0 datasets.
 
@@ -82,7 +86,7 @@ uv run dataset-validate --root data/datasets/my-dataset
 
 Expected output: 5 checks (load, info, features, read, batch) all showing `[OK]`.
 
-### 2. Train a Model
+### 2. Model Training
 
 Train a policy on the converted dataset:
 
@@ -112,6 +116,19 @@ cp .env.example .env              # configure MODEL_PATH, ROS_DOMAIN_ID, Cyclone
 docker compose up                  # run inference on GPU PC
 ```
 
+#### Distributed Inference Architecture
+
+```
+  Anvil Devbox (anvil-loader)             CycloneDDS              GPU PC (anvil-embodied-ai)
+┌─────────────────────────────┐    ┌────────────────────┐    ┌─────────────────────────────┐
+│  ros2_control               │    │                    │    │  lerobot_control            │
+│  joint_states (500 Hz)      │◄───┤  Gigabit Switch    ├───►│  inference_node (30 Hz)     │
+│  cameras (4x 30 Hz)         │    │                    │    │  action commands            │
+└─────────────────────────────┘    └────────────────────┘    └─────────────────────────────┘
+```
+
+The Anvil Devbox runs [anvil-loader](https://docs.anvil.bot/software/starting-robot-operation) for real-time robot control, streaming joint states and camera feeds over CycloneDDS. This repo runs on a separate GPU PC, subscribing to those streams, running the trained policy, and publishing action commands back. See the [full documentation](https://docs.anvil.bot/) for setup details.
+
 ## Project Structure
 
 ```
@@ -129,6 +146,7 @@ anvil-embodied-ai/
 │   └── inference/                 # Dockerfile + entrypoint
 ├── docker-compose.yml             # Production inference (GPU PC)
 ├── docker-compose.fake-hardware.yml # Fake hardware test (no real hardware needed)
+├── material/                      # Logo and visual assets
 ├── .env.example                   # Environment template
 └── model_zoo/                     # Trained model weights (gitignored)
 ```
