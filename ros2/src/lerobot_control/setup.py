@@ -16,7 +16,7 @@ setup(
     python_requires=">=3.12",
     install_requires=[
         "setuptools",
-        "lerobot>=0.4.2",
+        "lerobot>=0.5.0",
         "numpy>=2.0,<2.3.0",
         "opencv-python-headless>=4.8.0,<5.0.0",
         "pyyaml>=6.0",
@@ -24,13 +24,13 @@ setup(
     zip_safe=True,
     maintainer="Patrick Hsu",
     maintainer_email="patrick.hsu@anvil.bot",
-    description="LeRobot model inference and control for YAM robot arms",
+    description="LeRobot model inference and control for Anvil robot arms",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             "inference_node = lerobot_control.inference_node:main",
-            "mock_controller_node = lerobot_control.test.mock_controller.mock_controller_node:main",
+            "mock_controller_node = lerobot_control.test.fake_hardware.fake_hardware_node:main",
         ],
     },
 )

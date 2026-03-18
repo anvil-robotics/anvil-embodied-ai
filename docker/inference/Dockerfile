@@ -22,8 +22,15 @@ WORKDIR /workspace
 
 # Install Python dependencies FIRST (rarely changes → cached)
 # lerobot pulls torch, opencv, etc. — use --ignore-installed to bypass Debian system pkgs
-RUN pip3 install --break-system-packages --no-cache-dir --ignore-installed numpy packaging && \
-    pip3 install --break-system-packages --no-cache-dir --ignore-installed "lerobot>=0.4.2" && \
+# Default: ACT + Diffusion. For VLA policies, set LEROBOT_EXTRAS build arg.
+# Examples: "pi" (Pi0/Pi0-Fast), "groot", "xvla", "smolvla", or "pi,groot,xvla,smolvla"
+ARG LEROBOT_EXTRAS=""
+RUN pip3 install --break-system-packages --no-cache-dir --ignore-installed "numpy>=2.0.0,<2.3.0" "packaging>=24.2,<26.0" && \
+    if [ -z "$LEROBOT_EXTRAS" ]; then \
+        pip3 install --break-system-packages --no-cache-dir --ignore-installed "lerobot>=0.5.0"; \
+    else \
+        pip3 install --break-system-packages --no-cache-dir --ignore-installed "lerobot[$LEROBOT_EXTRAS]>=0.5.0"; \
+    fi && \
     pip3 install --break-system-packages --no-cache-dir "setuptools<80"
 
 # Copy ROS2 package (changes often → late layer)

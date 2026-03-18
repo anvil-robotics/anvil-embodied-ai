@@ -307,8 +307,8 @@ class LeRobotInferenceNode(Node):
         try:
             # Preprocess observation
             if self.preprocessor:
-                if self.model_type == "smolvla" and self.task_description:
-                    # SmolVLA needs 'task' in complementary_data for tokenization
+                if self.model_type in ("smolvla", "pi0", "pi0_fast", "groot", "xvla") and self.task_description:
+                    # VLA-family policies need 'task' in complementary_data for tokenization
                     # Use full transition processing instead of just process_observation
                     from lerobot.processor.converters import create_transition
                     from lerobot.processor.core import TransitionKey

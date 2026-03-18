@@ -522,7 +522,6 @@ examples:
         choices=["h264", "hevc", "libsvtav1"],
         help="video codec (default: h264). h264 is widely viewable; libsvtav1 gives best compression",
     )
-
     args = parser.parse_args(args)
 
     # Normalize paths

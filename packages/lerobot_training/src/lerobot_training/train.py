@@ -395,6 +395,10 @@ def train(config: TrainingConfig | None = None) -> None:
     runner = TransformRunner(config)
     runner.log_config()
 
+    # Default push_to_hub=false unless user explicitly sets it
+    if not any(arg.startswith("--policy.push_to_hub") for arg in sys.argv):
+        sys.argv.append("--policy.push_to_hub=false")
+
     # Apply metadata patches BEFORE importing lerobot training
     # (required for camera filtering to affect policy input features)
     runner.apply_metadata_patches()

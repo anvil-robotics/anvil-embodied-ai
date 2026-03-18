@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.12+-yellow?style=flat-square&logo=python&logoColor=white" alt="Python" /></a>
   <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-22314E?style=flat-square&logo=ros&logoColor=white" alt="ROS2" /></a>
-  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.4.2-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
+  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.5.0-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
 </p>
 
 ---
@@ -28,7 +28,7 @@ This repository is the embodied AI stack for the Anvil platform — data convers
   Anvil Devbox (Data collection)          This repo (anvil-embodied-ai)
 ┌──────────────────────────────┐    ┌──────────────────────────────────────────────────────────┐
 │  Teleoperation + Recording   │───>│  Convert      ───>  Train         ───>  Run Inference    │
-│  MCAP files                  │    │  mcap-convert       lerobot-train       ROS2 CycloneDDS  │
+│  MCAP files                  │    │  mcap-convert       anvil-trainer       ROS2 CycloneDDS  │
 └──────────────────────────────┘    └──────────────────────────────────────────────────────────┘
 ```
 
@@ -91,12 +91,22 @@ Expected output: 5 checks (load, info, features, read, batch) all showing `[OK]`
 Train a policy on the converted dataset:
 
 ```bash
-uv run lerobot-train \
+uv run anvil-trainer \
   --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
-  --policy.repo_id=my-policy \
   --output_dir=data/training-output
+```
+
+Supported policy types: `act`, `diffusion`, `smolvla`, `pi0`, `pi0_fast`, `groot`, `xvla`
+
+VLA-family policies (Pi0, Pi0-Fast, GROOT, XVLA, SmolVLA) require extra dependencies:
+
+```bash
+uv sync --all-packages --extra pi        # Pi0, Pi0-Fast
+uv sync --all-packages --extra groot      # GROOT 1.5
+uv sync --all-packages --extra xvla       # XVLA
+uv sync --all-packages --extra smolvla    # SmolVLA
 ```
 
 Optional flags:
@@ -160,7 +170,7 @@ anvil-embodied-ai/
 | `mcap-to-video`    | Extract MCAP image topics to MP4 videos     |
 | `dataset-validate` | Validate a converted LeRobot dataset        |
 | `mcap-upload`      | Upload datasets to HuggingFace Hub          |
-| `lerobot-train`    | Train ML models                             |
+| `anvil-trainer`    | Train ML models                             |
 
 ## License
 
