@@ -65,8 +65,8 @@ Tested with: `data/datasets/test` (2 episodes, 4714 frames), `batch_size=1`, `st
 | `smolvla` | ✅ PASSED | 10 steps, requires `LEROBOT_TASK_OVERRIDE` |
 | `pi0` | ❌ BLOCKED | Requires HF gated access to `google/paligemma-3b-pt-224` + GPU >8GB |
 | `pi0_fast` | ❌ BLOCKED | Same PaliGemma backbone — same gated access required |
-| `xvla` | ❌ BLOCKED | Requires a pre-trained Florence2 checkpoint (`vision_config`) to initialize from scratch |
-| `groot` | ❌ UPSTREAM BUG | `RuntimeError: Tensor.item() cannot be called on meta tensors` during init — bug in lerobot v0.5.0 |
+| `xvla` | ✅ FIXED | Monkey-patched `XVLAConfig.get_florence_config` in `train.py` to inject default empty `vision_config`/`text_config` |
+| `groot` | ✅ FIXED | Monkey-patched `GR00TN15.from_pretrained` in `train.py` to pass `device_map=None`, bypassing meta tensor init |
 
 ---
 
@@ -74,8 +74,8 @@ Tested with: `data/datasets/test` (2 episodes, 4714 frames), `batch_size=1`, `st
 
 - [ ] `pi0` — request HF access to `google/paligemma-3b-pt-224`, test on GPU with >16GB VRAM
 - [ ] `pi0_fast` — same as pi0
-- [ ] `xvla` — investigate required pretrained Florence2 config, or test with an existing XVLA checkpoint
-- [ ] `groot` — wait for upstream lerobot fix for meta tensor bug, or test with an existing GROOT checkpoint
+- [ ] `xvla` — verify fix end-to-end (needs `xvla` extra installed)
+- [ ] `groot` — verify fix end-to-end (needs `groot` extra + `flash-attn` installed)
 
 ---
 
