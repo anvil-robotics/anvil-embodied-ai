@@ -126,15 +126,18 @@ class ActionLimiter:
         self,
         action: np.ndarray,
         current_positions: np.ndarray | None = None,
-        joint_order: list[str] | None = None,
+        reference_positions: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Process action: reorder and apply delta limiting.
 
         Args:
             action: Raw action from model (in model joint order)
-            current_positions: Current joint positions (in controller order)
-            joint_order: Joint order for delta action conversion
+            current_positions: Current joint positions (in controller order), used for
+                safety delta limiting
+            reference_positions: Joint positions at chunk start (in controller order),
+                used for delta-to-absolute conversion. Falls back to current_positions
+                if not provided.
 
         Returns:
             Processed action ready for publishing (in controller order, delta-limited)
@@ -145,11 +148,14 @@ class ActionLimiter:
         # Reorder from model order to controller order
         action = self.reorder(action)
 
-        # Convert delta actions to absolute if needed
-        if self.use_delta_actions and current_positions is not None:
-            action = current_positions + action
+        # Convert delta actions to absolute using the positions from when the chunk
+        # was computed, not the live position (which has drifted since chunk start).
+        if self.use_delta_actions:
+            ref = reference_positions if reference_positions is not None else current_positions
+            if ref is not None:
+                action = ref + action
 
-        # Apply delta limiting
+        # Apply delta limiting against live current position for safety
         if current_positions is not None:
             action = self.apply_delta_limit(action, current_positions)
 

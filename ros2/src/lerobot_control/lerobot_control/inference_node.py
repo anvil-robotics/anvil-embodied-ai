@@ -89,6 +89,11 @@ class LeRobotInferenceNode(Node):
                 logger=self.get_logger(),
             )
 
+            # Joint positions snapshotted at the start of each action chunk, so that
+            # all steps in the chunk reconstruct absolute positions relative to the
+            # same reference frame the training delta was computed against.
+            self._chunk_reference_positions: dict[str, float] | None = None
+
             # Setup publishers
             self._setup_publishers()
 
@@ -113,6 +118,8 @@ class LeRobotInferenceNode(Node):
         self._prev_control_count: int = 0
         self._prev_inference_count: int = 0
         self._prev_frame_counters: dict[str, int] = {}
+        self._last_missing_joint_warn_time: dict[str, float] = {}
+        self._joint_state_keys_validated: bool = False
 
         self.get_logger().info("=" * 50)
         if self.monitor_only:
@@ -295,6 +302,19 @@ class LeRobotInferenceNode(Node):
             self.arm_publishers[arm_name] = self.create_publisher(Float64MultiArray, cmd_topic, 10)
             self.get_logger().info(f"Publishing to: {cmd_topic}")
 
+    def _is_new_chunk(self) -> bool:
+        """Return True if the model is about to start a new action chunk.
+
+        Checks the model's internal queued-action buffer (present on ACT and similar
+        chunked-action policies). Returns True when the buffer is empty, meaning the
+        next select_action call will run a full forward pass and produce a fresh chunk.
+        Falls back to True for models that don't use buffering.
+        """
+        queued = getattr(self.model, "_queued_actions", None)
+        if queued is None:
+            return True
+        return len(queued) == 0
+
     def control_loop(self) -> None:
         """Main control loop - strategy-agnostic."""
         self.metrics.record_control_loop()
@@ -305,6 +325,13 @@ class LeRobotInferenceNode(Node):
             return
 
         try:
+            # Snapshot joint positions at the start of each new action chunk so that
+            # delta-to-absolute reconstruction inside _publish_action uses the same
+            # reference frame the training delta was computed against (state at chunk
+            # start), not the drifted live position mid-chunk.
+            if self._is_new_chunk():
+                self._chunk_reference_positions = self.strategy.get_current_joint_positions()
+
             # Preprocess observation
             if self.preprocessor:
                 if self.model_type == "smolvla" and self.task_description:
@@ -368,6 +395,12 @@ class LeRobotInferenceNode(Node):
             self.joint_names_config.get("joint_order", []),
         )
 
+        # One-time fail-fast validation against live joint state names
+        if current_positions and not self._joint_state_keys_validated:
+            if not self._validate_joint_state_keys(current_positions, joint_order, len(action)):
+                return
+            self._joint_state_keys_validated = True
+
         for arm_name, arm_config in self.arms_config.items():
             start_idx = arm_config.get("action_start", 0)
             end_idx = arm_config.get("action_end", len(action))
@@ -378,22 +411,102 @@ class LeRobotInferenceNode(Node):
 
             # Get current positions for this arm
             arm_current = None
+            arm_reference = None
             if current_positions:
-                arm_current = np.array(
-                    [
-                        current_positions.get(f"{ros_prefix}_{joint_order[i]}", 0.0)
-                        for i in range(len(arm_action))
-                    ]
-                )
+                if len(joint_order) < len(arm_action):
+                    now = time.time()
+                    last_warn = self._last_missing_joint_warn_time.get(arm_name, 0.0)
+                    if now - last_warn >= self.throttle_duration:
+                        self.get_logger().warn(
+                            f"Skipping publish for '{arm_name}': controller_joint_order has "
+                            f"{len(joint_order)} joints but action has {len(arm_action)} values"
+                        )
+                        self._last_missing_joint_warn_time[arm_name] = now
+                    continue
+
+                expected_joint_keys = [
+                    f"{ros_prefix}_{joint_order[i]}" for i in range(len(arm_action))
+                ]
+                missing_joint_keys = [
+                    key for key in expected_joint_keys if key not in current_positions
+                ]
+                if missing_joint_keys:
+                    now = time.time()
+                    last_warn = self._last_missing_joint_warn_time.get(arm_name, 0.0)
+                    if now - last_warn >= self.throttle_duration:
+                        preview = ", ".join(missing_joint_keys[:4])
+                        if len(missing_joint_keys) > 4:
+                            preview += ", ..."
+                        self.get_logger().warn(
+                            f"Skipping publish for '{arm_name}': missing joint states for "
+                            f"{len(missing_joint_keys)} joints [{preview}]"
+                        )
+                        self._last_missing_joint_warn_time[arm_name] = now
+                    continue
+
+                arm_current = np.array([current_positions[key] for key in expected_joint_keys])
+
+                # Build reference positions from chunk-start snapshot
+                arm_reference = None
+                if self._chunk_reference_positions and all(
+                    k in self._chunk_reference_positions for k in expected_joint_keys
+                ):
+                    arm_reference = np.array(
+                        [self._chunk_reference_positions[k] for k in expected_joint_keys]
+                    )
 
             # Process action (reorder + delta limit)
-            arm_action = self.action_limiter.process(arm_action, arm_current)
+            arm_action = self.action_limiter.process(arm_action, arm_current, reference_positions=arm_reference)
 
             # Publish
             msg = Float64MultiArray()
             msg.data = arm_action.tolist()
             if arm_name in self.arm_publishers:
                 self.arm_publishers[arm_name].publish(msg)
+
+    def _validate_joint_state_keys(
+        self,
+        current_positions: dict[str, float],
+        joint_order: list[str],
+        action_size: int,
+    ) -> bool:
+        """Validate expected joint-state keys once and fail fast if mismatched."""
+        expected_joint_keys: list[str] = []
+
+        for arm_name, arm_config in self.arms_config.items():
+            start_idx = arm_config.get("action_start", 0)
+            end_idx = arm_config.get("action_end", action_size)
+            ros_prefix = arm_config.get("ros_prefix", arm_name)
+            arm_action_size = max(0, end_idx - start_idx)
+
+            if len(joint_order) < arm_action_size:
+                self.get_logger().error(
+                    f"Joint state/config mismatch: arm '{arm_name}' expects "
+                    f"{arm_action_size} action values but controller_joint_order has "
+                    f"{len(joint_order)} entries. Shutting down."
+                )
+                rclpy.shutdown()
+                return False
+
+            expected_joint_keys.extend(
+                [f"{ros_prefix}_{joint_order[i]}" for i in range(arm_action_size)]
+            )
+
+        missing_joint_keys = [key for key in expected_joint_keys if key not in current_positions]
+        if missing_joint_keys:
+            preview = ", ".join(missing_joint_keys[:6])
+            if len(missing_joint_keys) > 6:
+                preview += ", ..."
+
+            self.get_logger().error(
+                f"Joint state/config mismatch: missing {len(missing_joint_keys)} expected joint "
+                f"names in /joint_states [{preview}]. Shutting down."
+            )
+            rclpy.shutdown()
+            return False
+
+        self.get_logger().info("Joint state/config validation passed")
+        return True
 
     def _log_input_stats(self) -> None:
         """Periodically log input reception statistics with windowed rates."""

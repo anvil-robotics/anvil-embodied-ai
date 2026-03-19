@@ -18,7 +18,7 @@ model:
   temporal_ensemble_coeff: null
 
   # Delta actions: true = model outputs delta positions, convert to absolute before publishing
-  use_delta_actions: false
+  use_delta_actions: true
 
   # Task description for VLA models (SmolVLA only, ignored for ACT/Diffusion)
   task_description: ""
