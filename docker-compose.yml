@@ -4,6 +4,9 @@ services:
     build:
       context: .
       dockerfile: docker/inference/Dockerfile
+      args:
+        LEROBOT_VERSION: ${LEROBOT_VERSION:-0.4.4}
+        LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-}
     container_name: lerobot-inference
     network_mode: host
     ipc: host

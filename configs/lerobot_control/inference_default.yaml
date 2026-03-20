@@ -1,27 +1,48 @@
 # =============================================================================
-# LeRobot Inference Configuration - 4 Camera Setup
+# LeRobot Inference Configuration
 # =============================================================================
-# Must match data conversion config (configs/mcap_converter/) for correct mapping
+# Parameters set via ROS2 launch args (not in this file):
+#   model_path, device, control_frequency, image_height/width, monitor_only
 #
-# Parameters NOT in this file are set via ROS2 parameters:
-#   - model_path, device, control_frequency, image_height/width, mode
+# Model type and training flags are auto-read from the checkpoint.
+# Only set fields here to override checkpoint values or provide runtime config.
 
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
 model:
-  type: "act"  # Model type: act, diffusion, smolvla
+  # VLA task prompt — SmolVLA only, ignored for ACT/Diffusion
+  task_description: "Grab the gray doll and put it in the bucket"
 
-  # Runtime config overrides (null = use model defaults from checkpoint)
-  chunk_size: null
+  # use_delta_actions: read automatically from anvil_config.json in the checkpoint.
+  # Set here only for checkpoints trained before anvil_config.json was introduced.
+  # use_delta_actions: false
+
+# -----------------------------------------------------------------------------
+# Inference Tuning
+# -----------------------------------------------------------------------------
+# Override checkpoint defaults. null = use the value the model was trained with.
+#
+# n_action_steps — steps to execute before re-running inference.
+#
+#   Example: chunk_size=100 (from checkpoint), n_action_steps=50
+#
+#     Inference → [a0, a1, ..., a49 | a50, ..., a99]
+#                  └── execute these ──┘  └─ discarded ─┘
+#     Inference again → [a0', a1', ...]
+#
+#   Tuning guide:
+#     jittery / oscillating  → raise, or enable temporal_ensemble_coeff
+#     hesitates / freezes    → lower
+#     slow to react          → lower
+#     GPU can't keep up      → lower (or reduce control_frequency)
+#
+# temporal_ensemble_coeff (ACT only) — re-infers every step and exponentially
+#   weights overlapping predictions. Use 0.01 (paper default). Forces n_action_steps=1.
+
+inference_tuning:
   n_action_steps: null
-
-  # Temporal ensemble (ACT only): smooths motion by averaging overlapping chunks
-  # When enabled, n_action_steps is forced to 1. Use 0.01 (paper default) or null to disable
   temporal_ensemble_coeff: null
-
-  # Delta actions: true = model outputs delta positions, convert to absolute before publishing
-  use_delta_actions: false
-
-  # Task description for VLA models (SmolVLA only, ignored for ACT/Diffusion)
-  task_description: ""
 
 # -----------------------------------------------------------------------------
 # Joint Configuration
@@ -84,4 +105,4 @@ camera_mapping:
 # Safety Parameters
 # -----------------------------------------------------------------------------
 safety:
-  max_position_delta: 0.1  # Maximum position change per step (radians)
+  max_position_delta: 0.2  # Maximum position change per step (radians)

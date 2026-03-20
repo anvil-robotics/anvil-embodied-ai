@@ -2,16 +2,64 @@
 
 ## MODEL_PATH — Point to a Specific Checkpoint
 
-After training, checkpoints are saved under `output_dir/checkpoints/<step>/pretrained_model/`.
+After training, checkpoints are saved under `model_zoo/<job_name>/checkpoints/<step>/pretrained_model/`.
 The `MODEL_PATH` in your `.env` must point all the way to the `pretrained_model` subdirectory:
 
 ```
 # Correct
-MODEL_PATH=/workspace/model_zoo/my-model/checkpoints/100000/pretrained_model
+MODEL_PATH=/workspace/model_zoo/grabbing-w1/checkpoints/100000/pretrained_model
 
 # Wrong — config.json not found
-MODEL_PATH=/workspace/model_zoo/my-model
+MODEL_PATH=/workspace/model_zoo/grabbing-w1
 ```
+
+---
+
+## Visualizing Training Progress (Weights & Biases)
+
+LeRobot uses [Weights & Biases](https://wandb.ai) for training monitoring. Enable it by passing `--wandb.enable=true`:
+
+```bash
+uv run wandb login   # one-time setup
+
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=act \
+  --job_name=grabbing-w1 \
+  --wandb.enable=true \
+  --wandb.project=my-project
+```
+
+Key metrics to watch on the W&B dashboard:
+
+| Metric | What it tells you |
+|---|---|
+| `train/loss` | Overall training loss — should decrease steadily |
+| `train/grad_norm` | Gradient norm — spikes indicate instability, try lowering LR |
+| `eval/avg_sum_rewards` | Task success (if eval env available) |
+
+If you don't want W&B, training still runs fine without it — logs are printed to console.
+
+---
+
+## save_freq and eval_freq
+
+### save_freq
+
+Controls how often a checkpoint is saved (in steps). Each checkpoint writes the full model to `model_zoo/<job_name>/checkpoints/<step>/pretrained_model/`.
+
+```bash
+--save_freq=10000   # save every 10k steps
+```
+
+**How to tune:**
+- Default `10000` is fine for most runs.
+- Lower (e.g. `5000`) if you want more recovery points for long runs or unstable training.
+- Higher (e.g. `25000`) to save disk space — each checkpoint can be several GB.
+
+Only the checkpoints you explicitly need should be kept. LeRobot also always writes a `last/` checkpoint at the end of training.
+
 
 ---
 
@@ -39,6 +87,13 @@ re-querying the model (default: both are 100 in this repo).
 --policy.chunk_size=50 --policy.n_action_steps=50
 ```
 
+At inference, `n_action_steps` can be tuned without retraining via `inference_tuning:` in the inference YAML:
+
+```yaml
+inference_tuning:
+  n_action_steps: 50   # override checkpoint default at runtime
+```
+
 ### kl_weight
 
 Controls the VAE regularization strength. The default `kl_weight=10.0` works
@@ -48,13 +103,13 @@ well in most cases. If actions are too jerky or erratic, try increasing it
 ### Temporal ensemble at inference
 
 Instead of re-querying every `n_action_steps`, temporal ensemble averages
-overlapping predictions for smoother execution. Enable it in your inference
+overlapping predictions for smoother execution. Enable it in the inference
 YAML — no retraining needed:
 
 ```yaml
-model:
+inference_tuning:
   temporal_ensemble_coeff: 0.01   # lower = more smoothing
-  n_action_steps: 1               # required when using temporal ensemble
+  # n_action_steps is forced to 1 automatically when temporal_ensemble_coeff is set
 ```
 
 ### Image augmentation
@@ -66,19 +121,28 @@ alongside every checkpoint in `train_config.json`.
 
 ### Camera selection
 
-More cameras help but slow training and inference. Use `LEROBOT_CAMERA_FILTER`
+More cameras help but slow training and inference. Use `--camera-filter`
 to ablate which cameras matter most for your task:
 
 ```bash
-LEROBOT_CAMERA_FILTER=chest,waist uv run lerobot-train ...
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=act \
+  --job_name=grabbing-w1 \
+  --camera-filter=chest,waist
 ```
 
 ### Delta actions
 
 For tasks where the robot needs to return to similar poses repeatedly,
 `--use-delta-actions` (action = target − current state) can make learning
-easier. Remember to enable `use_delta_actions: true` in your inference YAML
-as well so actions are applied correctly at runtime.
+easier. The flag is persisted to `anvil_config.json` in the checkpoint and
+auto-read at inference — no manual inference YAML change needed.
+
+```bash
+uv run anvil-trainer ... --use-delta-actions
+```
 
 ### Steps and batch size
 
@@ -102,13 +166,13 @@ SmolVLA has two weight sources:
 Always fine-tune from `lerobot/smolvla_base` rather than training from scratch:
 
 ```bash
-uv run lerobot-train \
+uv run anvil-trainer \
   --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=smolvla \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
-  --output_dir=data/training-output \
+  --job_name=grabbing-w1 \
   --eval_freq=0
 ```
 
@@ -119,19 +183,22 @@ starts from random weights.
 ### Task description
 
 SmolVLA is a language-conditioned policy. A clear, specific task description
-improves performance significantly. Set it via environment variable before
-training so every sample gets the same instruction:
+improves performance significantly. Set it via `--task-description` at training
+so every sample gets the same instruction:
 
 ```bash
-LEROBOT_TASK_OVERRIDE="pick up the red block and stack it on the blue block" \
-uv run lerobot-train ...
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=smolvla \
+  --job_name=grabbing-w1 \
+  --task-description="pick up the red block and stack it on the blue block"
 ```
 
-And mirror the same string in your inference YAML:
+Mirror the same string in the inference YAML:
 
 ```yaml
 model:
-  type: smolvla
   task_description: "pick up the red block and stack it on the blue block"
 ```
 

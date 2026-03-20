@@ -4,6 +4,7 @@ Simplified model loader that uses LeRobot's built-in PolicyProcessorPipeline
 for pre/post processing instead of custom implementations.
 """
 
+import json
 import random
 from pathlib import Path
 from typing import Any
@@ -69,7 +70,7 @@ class ModelLoader:
         self,
         model_path: str,
         device: str = "cuda",
-        model_type: str = "act",
+        model_type: str | None = None,
         logger=None,
         deterministic: bool = False,
         seed: int = 42,
@@ -81,7 +82,8 @@ class ModelLoader:
         Args:
             model_path: Path to model checkpoint directory
             device: Device for inference ("cuda" or "cpu")
-            model_type: Model type ("act", "diffusion", or "smolvla")
+            model_type: Model type ("act", "diffusion", or "smolvla"). None = auto-detect
+                        from config.json in the checkpoint.
             logger: Optional ROS2 logger
             deterministic: If True, enable deterministic mode
             seed: Random seed for deterministic mode
@@ -98,6 +100,7 @@ class ModelLoader:
         self._model = None
         self._pre_processor = None
         self._post_processor = None
+        self._orig_n_action_steps: int | None = None
 
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model path not found: {model_path}")
@@ -107,6 +110,13 @@ class ModelLoader:
         if pretrained_model_path.exists() and (pretrained_model_path / "config.json").exists():
             self._log("info", f"Found pretrained_model subdirectory: {pretrained_model_path}")
             self.model_path = pretrained_model_path
+
+        # Auto-detect model type from checkpoint if not provided
+        if self.model_type is None:
+            self.model_type = self._detect_model_type()
+
+        # Load anvil_config.json (custom training flags persisted by anvil-trainer)
+        self._anvil_config = self._load_anvil_config()
 
     def _log(self, level: str, msg: str):
         """Log message using ROS2 logger or print."""
@@ -118,6 +128,28 @@ class ModelLoader:
                 print(f"[{level.upper()}] {msg}")
         else:
             print(f"[{level.upper()}] {msg}")
+
+    def _detect_model_type(self) -> str | None:
+        """Read model type from config.json in the checkpoint directory."""
+        config_path = self.model_path / "config.json"
+        if config_path.exists():
+            return json.loads(config_path.read_text()).get("type")
+        return None
+
+    def _load_anvil_config(self) -> dict:
+        """Read anvil_config.json written by anvil-trainer, if present."""
+        path = self.model_path / "anvil_config.json"
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    @property
+    def anvil_config(self) -> dict:
+        """Custom training flags persisted by anvil-trainer (e.g. use_delta_actions)."""
+        return self._anvil_config
+
+    @property
+    def checkpoint_n_action_steps(self) -> int | None:
+        """Original n_action_steps from checkpoint before any overrides were applied."""
+        return self._orig_n_action_steps
 
     @property
     def chunk_size(self) -> int | None:
@@ -174,6 +206,10 @@ class ModelLoader:
             model.eval()
             self._model = model
             self._log("info", f"Model loaded successfully on {self.device}")
+
+            # Snapshot checkpoint n_action_steps before any overrides
+            if hasattr(model, "config"):
+                self._orig_n_action_steps = getattr(model.config, "n_action_steps", None)
 
             # Apply config overrides after loading
             self._apply_config_overrides(model)

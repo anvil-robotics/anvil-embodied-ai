@@ -22,7 +22,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "lerobot~=0.4.2",
+    "lerobot~=0.4.4",
     "torch>=2.0.0",             # version depends on user's CUDA setup
     "numpy~=2.4",
     "wandb~=0.24",
@@ -42,8 +42,22 @@ dev = [
     "ruff>=0.4.0",
 ]
 
+# =============================================================================
+# Policy extras — pass-through to lerobot's optional-dependencies.
+#
+# ACT and Diffusion are included in the base install (no extra needed).
+#
+# Usage:
+#   uv sync --all-packages --extra smolvla
+#   uv sync --all-packages --extra smolvla --extra pi0
+# =============================================================================
+smolvla = ["lerobot[smolvla]~=0.4.4"]   # SmolVLA
+pi      = ["lerobot[pi]~=0.4.4"]          # Pi0 / Pi0.5 / Pi0Fast
+groot   = ["lerobot[groot]~=0.4.4"]      # GROOT 1.5 (flash-attn, Linux/CUDA only)
+xvla    = ["lerobot[xvla]~=0.4.4"]       # X-VLA
+
 [project.scripts]
-lerobot-train = "lerobot_training.train:main"
+anvil-trainer = "lerobot_training.train:main"
 
 [build-system]
 requires = ["hatchling"]
