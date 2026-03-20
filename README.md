@@ -151,6 +151,30 @@ anvil-embodied-ai/
 └── model_zoo/                     # Trained model weights (gitignored)
 ```
 
+## Training Tips
+
+> Full guide: [docs/training-tips.md](docs/training-tips.md)
+
+**ACT (TL;DR)**
+- Match `chunk_size` and `n_action_steps` to your task speed (50 for precise, 100 for sweeping)
+- Enable temporal ensemble at inference for smoother execution — no retraining needed
+- Use `LEROBOT_CAMERA_FILTER` to drop cameras that don't add signal
+- 100k steps / batch 16 is a solid default; drop to 50k for small datasets
+
+**SmolVLA (TL;DR)**
+- Always fine-tune from `lerobot/smolvla_base` with `--policy.load_vlm_weights=true`
+- Set a specific task description via `LEROBOT_TASK_OVERRIDE` — it matters
+- Set `--eval_freq=0` (no live env available)
+- 30k–50k steps is usually enough from a pretrained base
+
+**MODEL_PATH gotcha**
+
+Point to the `pretrained_model` subdirectory inside a specific checkpoint, not the top-level model folder:
+```
+# Correct
+MODEL_PATH=/workspace/model_zoo/my-model/checkpoints/100000/pretrained_model
+```
+
 ## CLI Tools
 
 | Command              | Description                                 |

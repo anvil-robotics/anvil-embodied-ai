@@ -97,6 +97,10 @@ class TrainingConfig:
         if use_delta_actions:
             sys.argv.remove("--use-delta-actions")
 
+        # Default push_to_hub=false unless explicitly set
+        if not any(arg.startswith("--policy.push_to_hub") for arg in sys.argv):
+            sys.argv.append("--policy.push_to_hub=false")
+
         # Try to extract dataset root from args for validation
         dataset_root = None
         for arg in sys.argv:
