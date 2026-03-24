@@ -162,9 +162,10 @@ class LeRobotInferenceNode(Node):
         self.device = self.get_parameter("device").value
         self.throttle_duration = self.get_parameter("throttle_duration").value
 
-        # Model type: config file takes precedence, ROS2 param as fallback
+        # Model type: config file takes precedence, None triggers auto-detect in ModelLoader
         model_config = self.config.get("model", {})
-        self.model_type = model_config.get("type", self.get_parameter("model_type").value)
+        self._model_config = model_config  # stored for use after model load
+        self.model_type = model_config.get("type", None)
 
         # Image dimensions
         self.image_height = self.get_parameter("image_height").value
@@ -175,7 +176,8 @@ class LeRobotInferenceNode(Node):
         safety_config = self.config.get("safety", {})
         self.max_position_delta = safety_config.get("max_position_delta", 0.1)
 
-        # Model parameters (use_delta_actions, task_description)
+        # Model parameters (use_delta_actions may be overridden after model load
+        # by anvil_config.json from the checkpoint; task_description is runtime-only)
         self.use_delta_actions = model_config.get("use_delta_actions", False)
         self.task_description = model_config.get("task_description", "")
 
@@ -186,10 +188,10 @@ class LeRobotInferenceNode(Node):
         self.arms_config = self.config.get("arms", {})
         self.joint_names_config = self.config.get("joint_names", {})
 
-        # Model runtime config overrides (model_config already read above)
-        self.chunk_size_override = model_config.get("chunk_size", None)
-        self.n_action_steps_override = model_config.get("n_action_steps", None)
-        self.temporal_ensemble_coeff = model_config.get("temporal_ensemble_coeff", None)
+        # Inference tuning knobs (inference_tuning: section; null = use checkpoint defaults)
+        tuning_config = self.config.get("inference_tuning", {})
+        self.n_action_steps_override = tuning_config.get("n_action_steps", None)
+        self.temporal_ensemble_coeff = tuning_config.get("temporal_ensemble_coeff", None)
 
     def _log_config(self) -> None:
         """Log configuration summary."""
@@ -216,11 +218,8 @@ class LeRobotInferenceNode(Node):
         return MultiProcessStrategy()
 
     def _build_config_overrides(self) -> dict:
-        """Build config overrides dict from yaml config."""
+        """Build config overrides dict from inference_tuning config."""
         overrides = {}
-
-        if self.chunk_size_override is not None:
-            overrides["chunk_size"] = self.chunk_size_override
 
         if self.n_action_steps_override is not None:
             overrides["n_action_steps"] = self.n_action_steps_override
@@ -256,7 +255,21 @@ class LeRobotInferenceNode(Node):
             logger=self.get_logger(),
         )
         self.model, self.preprocessor, self.postprocessor = loader.load_with_processors()
+        self._loader = loader
         self.get_logger().info("Model loaded with processors")
+
+        # Update model_type in case it was auto-detected from the checkpoint
+        if self.model_type is None:
+            self.model_type = loader.model_type
+
+        # use_delta_actions: read from anvil_config.json (written at training time).
+        # Falls back to YAML model.use_delta_actions for checkpoints trained before
+        # anvil_config.json was introduced.
+        anvil_cfg = loader.anvil_config
+        self.use_delta_actions = anvil_cfg.get(
+            "use_delta_actions",
+            self._model_config.get("use_delta_actions", False),
+        )
 
         # Log effective config
         self._log_effective_model_config()
@@ -266,16 +279,34 @@ class LeRobotInferenceNode(Node):
             self.get_logger().info(f"Task description: '{self.task_description}'")
 
     def _log_effective_model_config(self) -> None:
-        """Log the effective model configuration after overrides."""
+        """Log effective inference tuning values with actionable hints."""
         if not hasattr(self.model, "config"):
             return
 
         config = self.model.config
-        self.get_logger().info(
-            f"Effective model config: chunk_size={getattr(config, 'chunk_size', 'N/A')}, "
-            f"n_action_steps={getattr(config, 'n_action_steps', 'N/A')}, "
-            f"temporal_ensemble_coeff={getattr(config, 'temporal_ensemble_coeff', 'N/A')}"
-        )
+        chunk_size = getattr(config, "chunk_size", None)
+        n_action_steps = getattr(config, "n_action_steps", None)
+        cs = str(chunk_size) if chunk_size is not None else "N/A"
+        nas = str(n_action_steps) if n_action_steps is not None else "N/A"
+
+        self.get_logger().info("┌─ Inference tuning ──────────────────────────────────────┐")
+        self.get_logger().info(f"│  chunk_size      = {cs:<4} (fixed at training, read-only)   │")
+        self.get_logger().info(f"│  n_action_steps  = {nas:<4} (override in inference_tuning:)  │")
+        self.get_logger().info( "│    → jittery / oscillating?  raise n_action_steps       │")
+        self.get_logger().info( "│    → hesitates / freezes?    lower n_action_steps       │")
+        self.get_logger().info( "└─────────────────────────────────────────────────────────┘")
+
+        # Report override if n_action_steps was changed from checkpoint default
+        orig = getattr(self._loader, "checkpoint_n_action_steps", None)
+        if (
+            orig is not None
+            and n_action_steps is not None
+            and orig != n_action_steps
+            and self.n_action_steps_override is not None
+        ):
+            self.get_logger().info(
+                f"  (overridden from checkpoint default: {orig} → {n_action_steps})"
+            )
 
         # Verify temporal ensembler was created if coeff is set
         if getattr(config, "temporal_ensemble_coeff", None) is not None:

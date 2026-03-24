@@ -29,7 +29,7 @@ Adding new dataset transforms:
 
 Usage:
     # CLI
-    lerobot-train [lerobot args] [--use-delta-actions]
+    anvil-trainer [lerobot args] [--use-delta-actions] [--task-description="..."] [--camera-filter=chest,waist]
 
     # Python
     from lerobot_training import train, TrainingConfig
@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +73,7 @@ class TrainingConfig:
     task_override: str | None = None
     use_delta_actions: bool = False
     dataset_root: str | None = None
+    output_dir: str | None = None
 
     @classmethod
     def from_env_and_args(cls) -> TrainingConfig:
@@ -85,17 +87,37 @@ class TrainingConfig:
         Command line args:
             --use-delta-actions: Enable delta action transform
         """
-        # Camera filter from environment
-        camera_env = os.environ.get("LEROBOT_CAMERA_FILTER", "")
-        cameras = [c.strip() for c in camera_env.split(",") if c.strip()] or None
+        # Camera filter from --camera-filter arg (takes precedence over env var)
+        camera_str = None
+        for arg in sys.argv:
+            if arg.startswith("--camera-filter="):
+                camera_str = arg.split("=", 1)[1]
+                sys.argv.remove(arg)
+                break
+        # Fall back to environment variable
+        if camera_str is None:
+            camera_str = os.environ.get("LEROBOT_CAMERA_FILTER", "")
+        cameras = [c.strip() for c in camera_str.split(",") if c.strip()] or None
 
-        # Task override from environment
-        task_override = os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
+        # Task description from --task-description arg (takes precedence over env var)
+        task_override = None
+        for arg in sys.argv:
+            if arg.startswith("--task-description="):
+                task_override = arg.split("=", 1)[1]
+                sys.argv.remove(arg)
+                break
+        # Fall back to environment variable
+        if task_override is None:
+            task_override = os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
 
         # Delta actions from command line (remove to avoid lerobot arg parsing error)
         use_delta_actions = "--use-delta-actions" in sys.argv
         if use_delta_actions:
             sys.argv.remove("--use-delta-actions")
+
+        # Default push_to_hub=false unless explicitly set
+        if not any(arg.startswith("--policy.push_to_hub") for arg in sys.argv):
+            sys.argv.append("--policy.push_to_hub=false")
 
         # Try to extract dataset root from args for validation
         dataset_root = None
@@ -104,11 +126,42 @@ class TrainingConfig:
                 dataset_root = arg.split("=", 1)[1]
                 break
 
+        # Extract job_name if provided (passed through to lerobot as-is)
+        job_name = None
+        for arg in sys.argv:
+            if arg.startswith("--job_name="):
+                job_name = arg.split("=", 1)[1]
+                break
+
+        # Resolve output_dir:
+        #   explicit --output_dir  → use as-is
+        #   --job_name             → model_zoo/<job_name>
+        #   neither                → model_zoo/<policy_type>_<YYYYMMDD_HHMMSS>
+        output_dir = None
+        for arg in sys.argv:
+            if arg.startswith("--output_dir="):
+                output_dir = arg.split("=", 1)[1]
+                break
+        if output_dir is None:
+            if job_name:
+                output_dir = f"model_zoo/{job_name}"
+            else:
+                dataset_name = Path(dataset_root).name if dataset_root else "dataset"
+                policy_type = "run"
+                for arg in sys.argv:
+                    if arg.startswith("--policy.type="):
+                        policy_type = arg.split("=", 1)[1]
+                        break
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_dir = f"model_zoo/{dataset_name}_{policy_type}_{timestamp}"
+            sys.argv.append(f"--output_dir={output_dir}")
+
         return cls(
             cameras=cameras,
             task_override=task_override,
             use_delta_actions=use_delta_actions,
             dataset_root=dataset_root,
+            output_dir=output_dir,
         )
 
     @classmethod
@@ -364,6 +417,26 @@ class TransformRunner:
         LeRobotDataset.__getitem__ = patched_getitem
         print(f"[lerobot_training] Patched LeRobotDataset with {len(transforms)} transform(s)")
 
+    def apply_checkpoint_patch(self) -> None:
+        """Monkey-patch lerobot save_checkpoint to write anvil_config.json at each checkpoint save."""
+        import lerobot.scripts.lerobot_train as lerobot_train_mod
+        import lerobot.utils.train_utils as train_utils_mod
+        from lerobot.utils.train_utils import save_checkpoint as original_save_checkpoint
+
+        anvil_cfg_content = json.dumps({"use_delta_actions": self.config.use_delta_actions}, indent=2)
+
+        def patched_save_checkpoint(checkpoint_dir, **kwargs):
+            original_save_checkpoint(checkpoint_dir, **kwargs)
+            pretrained_dir = checkpoint_dir / "pretrained_model"
+            if pretrained_dir.exists():
+                (pretrained_dir / "anvil_config.json").write_text(anvil_cfg_content)
+                print(f"[lerobot_training] Saved anvil_config.json to {pretrained_dir}")
+
+        # Patch both the module and the already-imported reference in lerobot_train
+        train_utils_mod.save_checkpoint = patched_save_checkpoint
+        lerobot_train_mod.save_checkpoint = patched_save_checkpoint
+        print("[lerobot_training] Patched save_checkpoint to write anvil_config.json per checkpoint")
+
 
 # =============================================================================
 # Training Functions
@@ -405,12 +478,97 @@ def train(config: TrainingConfig | None = None) -> None:
     # Apply dataset transforms
     runner.apply_dataset_patches()
 
+    # Monkey-patch save_checkpoint to write anvil_config.json at each checkpoint save
+    runner.apply_checkpoint_patch()
+
     # Run training
     lerobot_train()
 
 
+_ANVIL_HELP = """\
+anvil-trainer — LeRobot training with Anvil customizations
+===========================================================
+
+Examples:
+
+  # Train ACT (basic)
+  anvil-trainer --dataset.repo_id=local --dataset.root=data/datasets/my-dataset \\
+    --policy.type=act --job_name=grabbing-w1
+
+  # Train SmolVLA with task description
+  anvil-trainer --dataset.repo_id=local --dataset.root=data/datasets/my-dataset \\
+    --policy.type=smolvla --job_name=grabbing-w1 \\
+    --task-description="Grab the gray doll and put it in the bucket"
+
+  # Train with delta actions and camera subset
+  anvil-trainer --dataset.repo_id=local --dataset.root=data/datasets/my-dataset \\
+    --policy.type=act --job_name=grabbing-w1 \\
+    --camera-filter=chest,waist --use-delta-actions
+
+  # Resume a stopped run
+  anvil-trainer --resume=true --output_dir=model_zoo/grabbing-w1
+
+===============================================================================
+
+Anvil-specific flags (stripped before passing to LeRobot):
+
+  --use-delta-actions
+      Convert actions to delta form (action - observation.state).
+      Persisted to anvil_config.json in each checkpoint so inference
+      can read it automatically.
+
+  --task-description=TEXT
+      Task prompt for SmolVLA. Overrides LEROBOT_TASK_OVERRIDE env var.
+      Example: --task-description="Grab the gray doll and put it in the bucket"
+
+  --camera-filter=CAM1,CAM2,...
+      Train using only the specified cameras. Overrides LEROBOT_CAMERA_FILTER.
+      Example: --camera-filter=chest,waist
+
+  --job_name=NAME
+      Human-readable run name. Checkpoints saved to model_zoo/<name>/.
+      Auto-generated from policy type + timestamp if omitted.
+
+  --output_dir=PATH
+      Override the default checkpoint directory (default: model_zoo/).
+
+Output:
+  Checkpoints  →  model_zoo/<job_name>/checkpoints/<step>/pretrained_model/
+  anvil_config →  model_zoo/<job_name>/checkpoints/<step>/pretrained_model/anvil_config.json
+
+===============================================================================
+LeRobot flags (passed through):
+===============================================================================
+"""
+
+
+def _capture_lerobot_help() -> str:
+    """Capture lerobot's help output without exiting."""
+    import io
+    from contextlib import redirect_stdout, redirect_stderr
+
+    buf = io.StringIO()
+    saved_argv = sys.argv[:]
+    sys.argv = [sys.argv[0], "--help"]
+    try:
+        with redirect_stdout(buf), redirect_stderr(buf):
+            from lerobot.scripts.lerobot_train import train as lerobot_train
+            lerobot_train()
+    except SystemExit:
+        pass
+    finally:
+        sys.argv = saved_argv
+    return buf.getvalue()
+
+
 def main() -> None:
-    """CLI entry point for lerobot-train."""
+    """CLI entry point for anvil-trainer."""
+    import pydoc
+
+    if "-h" in sys.argv or "--help" in sys.argv:
+        lerobot_help = _capture_lerobot_help()
+        pydoc.pager(_ANVIL_HELP + lerobot_help)
+        sys.exit(0)
     train()
 
 

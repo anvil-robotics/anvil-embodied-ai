@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.12+-yellow?style=flat-square&logo=python&logoColor=white" alt="Python" /></a>
   <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-22314E?style=flat-square&logo=ros&logoColor=white" alt="ROS2" /></a>
-  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.4.2-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
+  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.4.4-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
 </p>
 
 ---
@@ -28,7 +28,7 @@ This repository is the embodied AI stack for the Anvil platform — data convers
   Anvil Devbox (Data collection)          This repo (anvil-embodied-ai)
 ┌──────────────────────────────┐    ┌──────────────────────────────────────────────────────────┐
 │  Teleoperation + Recording   │───>│  Convert      ───>  Train         ───>  Run Inference    │
-│  MCAP files                  │    │  mcap-convert       lerobot-train       ROS2 CycloneDDS  │
+│  MCAP files                  │    │  mcap-convert       anvil-trainer       ROS2 CycloneDDS  │
 └──────────────────────────────┘    └──────────────────────────────────────────────────────────┘
 ```
 
@@ -58,6 +58,20 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 git clone https://github.com/anvil-robotics/anvil-embodied-ai.git
 cd anvil-embodied-ai
 uv sync --all-packages
+```
+
+ACT and Diffusion are included in the base install. For other policies:
+
+| Extra | Policy |
+|---|---|
+| `smolvla` | SmolVLA |
+| `pi` | Pi0 / Pi0.5 / Pi0Fast |
+| `groot` | GROOT 1.5 (Linux/CUDA only) |
+| `xvla` | X-VLA |
+
+```bash
+uv sync --all-packages --extra smolvla
+uv sync --all-packages --extra smolvla --extra pi   # multiple
 ```
 
 ### 0. Data Collection
@@ -91,29 +105,110 @@ Expected output: 5 checks (load, info, features, read, batch) all showing `[OK]`
 Train a policy on the converted dataset:
 
 ```bash
-uv run lerobot-train \
+uv run anvil-trainer \
   --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
-  --policy.repo_id=my-policy \
-  --output_dir=data/training-output
+  --job_name=pick-and-place
 ```
+
+Checkpoints are saved to `model_zoo/<job_name>/` by default. Run `anvil-trainer --help` for the full flag reference.
 
 Optional flags:
 
+- `--job_name=NAME` — run name; auto-generated from policy + timestamp if omitted
+- `--task-description="..."` — task prompt for SmolVLA (see below)
+- `--camera-filter=chest,waist` — train with a subset of cameras
+- `--use-delta-actions` — convert actions to relative (action - state)
 - `--steps=100000` — total training steps (default 100k)
 - `--batch_size=8` — adjust based on GPU memory
-- `--save_freq=10000` — checkpoint frequency
-- `LEROBOT_CAMERA_FILTER=chest,waist` — train with a subset of cameras
-- `--use-delta-actions` — convert actions to relative (action - state)
+- `--save_freq=10000` — save a checkpoint every N steps
 
-Checkpoints are saved to `--output_dir`.
+**Training SmolVLA with a task description:**
+
+SmolVLA is language-conditioned — it requires a task description to understand what the robot should do. Pass the same string at both training and inference:
+
+```bash
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=smolvla \
+  --policy.pretrained_path=lerobot/smolvla_base \
+  --policy.load_vlm_weights=true \
+  --job_name=grabbing-w1 \
+  --task-description="Grab the gray doll and put it in the bucket" \
+  --eval_freq=0
+```
+
+Then mirror the same string in `configs/lerobot_control/inference_default.yaml`:
+
+```yaml
+model:
+  task_description: "Grab the gray doll and put it in the bucket"
+```
+
+
+**Visualizing training progress with Weights & Biases:**
+
+```bash
+# Login once
+uv run wandb login
+
+# Train with W&B enabled
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=act \
+  --job_name=grabbing-w1 \
+  --wandb.enable=true \
+  --wandb.project=my-project
+```
+
+Loss curves, action prediction visualizations, and eval metrics are streamed live to [wandb.ai](https://wandb.ai).
+
+To resume a stopped or interrupted run:
+
+```bash
+uv run anvil-trainer --resume=true --output_dir=model_zoo/pick-and-place
+```
+
+LeRobot will pick up from the latest checkpoint. Only pass `--resume=true` and `--output_dir` — all other settings are restored from the saved `train_config.json`.
 
 ### 3. Run Inference
 
 ```bash
 cp .env.example .env              # configure MODEL_PATH, ROS_DOMAIN_ID, CycloneDDS
 docker compose up                  # run inference on GPU PC
+```
+
+Before running, review `configs/lerobot_control/inference_default.yaml`:
+
+**Model**
+```yaml
+model:
+  # Task prompt for SmolVLA — must match what was used during training.
+  task_description: "Grab the gray doll and put it in the bucket"
+```
+
+**Inference Tuning**
+```yaml
+# null = use the value the model was trained with (recommended starting point)
+inference_tuning:
+  # Number of predicted actions to execute before running inference again.
+  # The model predicts a full chunk (e.g. 100 steps) but only executes n_action_steps of them.
+  n_action_steps: null
+
+  # ACT only — re-infers every step and blends overlapping predictions with exponential weighting.
+  # Smoother motion than raising n_action_steps. Use 0.01 (paper default) will forces n_action_steps=1.
+  temporal_ensemble_coeff: null
+```
+
+**Safety**
+```yaml
+safety:
+  # Maximum joint position change allowed per control step (radians). (lower = safer)
+  # But may limit fast motions. Raise cautiously if the robot feels that require quick joint travel.
+  max_position_delta: 0.2
 ```
 
 #### Distributed Inference Architecture
@@ -151,16 +246,40 @@ anvil-embodied-ai/
 └── model_zoo/                     # Trained model weights (gitignored)
 ```
 
+## Training Tips
+
+> Full guide: [docs/training-tips.md](docs/training-tips.md)
+
+**ACT (TL;DR)**
+- Match `chunk_size` and `n_action_steps` to your task speed (50 for precise, 100 for sweeping)
+- Enable temporal ensemble at inference for smoother execution — no retraining needed
+- Use `--camera-filter` to drop cameras that don't add signal
+- 100k steps / batch 16 is a solid default; drop to 50k for small datasets
+
+**SmolVLA (TL;DR)**
+- Always fine-tune from `lerobot/smolvla_base` with `--policy.load_vlm_weights=true`
+- Set a specific task description via `--task-description` — it matters
+- Set `--eval_freq=0` (no live env available)
+- 30k–50k steps is usually enough from a pretrained base
+
+**MODEL_PATH gotcha**
+
+Point to the `pretrained_model` subdirectory inside a specific checkpoint, not the top-level model folder:
+```
+# Correct
+MODEL_PATH=model_zoo/pick-and-place/checkpoints/100000/pretrained_model
+```
+
 ## CLI Tools
 
 | Command              | Description                                 |
 | -------------------- | ------------------------------------------- |
+| `anvil-trainer`    | Train ML models                             |
 | `mcap-convert`     | Convert MCAP recordings to LeRobot datasets |
 | `mcap-inspect`     | Inspect MCAP file structure and topics      |
 | `mcap-to-video`    | Extract MCAP image topics to MP4 videos     |
 | `dataset-validate` | Validate a converted LeRobot dataset        |
 | `mcap-upload`      | Upload datasets to HuggingFace Hub          |
-| `lerobot-train`    | Train ML models                             |
 
 ## License
 
