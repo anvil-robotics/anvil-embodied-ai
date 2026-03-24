@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -125,16 +126,35 @@ class TrainingConfig:
                 dataset_root = arg.split("=", 1)[1]
                 break
 
-        # Extract or default output dir (used for anvil_config.json post-training write
-        # and injected into lerobot args so checkpoints land in model_zoo by default)
+        # Extract job_name if provided (passed through to lerobot as-is)
+        job_name = None
+        for arg in sys.argv:
+            if arg.startswith("--job_name="):
+                job_name = arg.split("=", 1)[1]
+                break
+
+        # Resolve output_dir:
+        #   explicit --output_dir  → use as-is
+        #   --job_name             → model_zoo/<job_name>
+        #   neither                → model_zoo/<policy_type>_<YYYYMMDD_HHMMSS>
         output_dir = None
         for arg in sys.argv:
-            if arg.startswith("--training.output_dir=") or arg.startswith("--output_dir="):
+            if arg.startswith("--output_dir="):
                 output_dir = arg.split("=", 1)[1]
                 break
         if output_dir is None:
-            output_dir = "model_zoo"
-            sys.argv.append(f"--training.output_dir={output_dir}")
+            if job_name:
+                output_dir = f"model_zoo/{job_name}"
+            else:
+                dataset_name = Path(dataset_root).name if dataset_root else "dataset"
+                policy_type = "run"
+                for arg in sys.argv:
+                    if arg.startswith("--policy.type="):
+                        policy_type = arg.split("=", 1)[1]
+                        break
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_dir = f"model_zoo/{dataset_name}_{policy_type}_{timestamp}"
+            sys.argv.append(f"--output_dir={output_dir}")
 
         return cls(
             cameras=cameras,
@@ -397,18 +417,30 @@ class TransformRunner:
         LeRobotDataset.__getitem__ = patched_getitem
         print(f"[lerobot_training] Patched LeRobotDataset with {len(transforms)} transform(s)")
 
+    def apply_checkpoint_patch(self) -> None:
+        """Monkey-patch lerobot save_checkpoint to write anvil_config.json at each checkpoint save."""
+        import lerobot.scripts.lerobot_train as lerobot_train_mod
+        import lerobot.utils.train_utils as train_utils_mod
+        from lerobot.utils.train_utils import save_checkpoint as original_save_checkpoint
+
+        anvil_cfg_content = json.dumps({"use_delta_actions": self.config.use_delta_actions}, indent=2)
+
+        def patched_save_checkpoint(checkpoint_dir, **kwargs):
+            original_save_checkpoint(checkpoint_dir, **kwargs)
+            pretrained_dir = checkpoint_dir / "pretrained_model"
+            if pretrained_dir.exists():
+                (pretrained_dir / "anvil_config.json").write_text(anvil_cfg_content)
+                print(f"[lerobot_training] Saved anvil_config.json to {pretrained_dir}")
+
+        # Patch both the module and the already-imported reference in lerobot_train
+        train_utils_mod.save_checkpoint = patched_save_checkpoint
+        lerobot_train_mod.save_checkpoint = patched_save_checkpoint
+        print("[lerobot_training] Patched save_checkpoint to write anvil_config.json per checkpoint")
+
 
 # =============================================================================
 # Training Functions
 # =============================================================================
-
-
-def save_anvil_config(output_dir: str, cfg: TrainingConfig) -> None:
-    """Write anvil_config.json to each pretrained_model directory under output_dir."""
-    anvil_cfg = {"use_delta_actions": cfg.use_delta_actions}
-    for ckpt_dir in Path(output_dir).rglob("pretrained_model"):
-        (ckpt_dir / "anvil_config.json").write_text(json.dumps(anvil_cfg, indent=2))
-        print(f"[lerobot_training] Saved anvil_config.json to {ckpt_dir}")
 
 
 def train(config: TrainingConfig | None = None) -> None:
@@ -446,14 +478,11 @@ def train(config: TrainingConfig | None = None) -> None:
     # Apply dataset transforms
     runner.apply_dataset_patches()
 
+    # Monkey-patch save_checkpoint to write anvil_config.json at each checkpoint save
+    runner.apply_checkpoint_patch()
+
     # Run training
     lerobot_train()
-
-    # Persist custom training flags alongside checkpoint for inference-time auto-read
-    if config.output_dir:
-        save_anvil_config(config.output_dir, config)
-    else:
-        print("[lerobot_training] output_dir not found in args — skipping anvil_config.json write")
 
 
 _ANVIL_HELP = """\
@@ -477,7 +506,7 @@ Examples:
     --camera-filter=chest,waist --use-delta-actions
 
   # Resume a stopped run
-  anvil-trainer --resume=true --training.output_dir=model_zoo/grabbing-w1
+  anvil-trainer --resume=true --output_dir=model_zoo/grabbing-w1
 
 ===============================================================================
 
@@ -500,7 +529,7 @@ Anvil-specific flags (stripped before passing to LeRobot):
       Human-readable run name. Checkpoints saved to model_zoo/<name>/.
       Auto-generated from policy type + timestamp if omitted.
 
-  --training.output_dir=PATH
+  --output_dir=PATH
       Override the default checkpoint directory (default: model_zoo/).
 
 Output:
