@@ -49,7 +49,7 @@ services:
       mock-robot:
         condition: service_healthy
     command: >
-      ros2 launch lerobot_control inference.launch.py monitor_only:=true config_file:=/workspace/configs/lerobot_control/test_mockdist.yaml
+      ros2 launch lerobot_control inference.launch.py monitor_only:=true config_file:=/workspace/configs/lerobot_control/test_fake_hardware.yaml
 
   # Lightweight discovery check — verifies both nodes see each other via CycloneDDS
   discovery-check:

@@ -16,6 +16,7 @@ Publishes:
     - Forward position controller command topics (std_msgs/Float64MultiArray)
 """
 
+import json
 from pathlib import Path
 
 import time
@@ -45,25 +46,12 @@ class LeRobotInferenceNode(Node):
     def __init__(self, parameter_overrides: list = None):
         super().__init__("lerobot_inference_node", parameter_overrides=parameter_overrides or [])
 
-        # Declare parameters
-        self._declare_parameters()
-
-        # Callback groups: separate control loop from subscriptions so
-        # MultiThreadedExecutor can process joint state concurrently
         self._control_callback_group = MutuallyExclusiveCallbackGroup()
         self._subscription_callback_group = ReentrantCallbackGroup()
 
-        # Load configuration
-        self.config = self._load_config(self.get_parameter("config_file").value)
-        self._apply_config()
+        self._setup_config()
 
-        # Log configuration
-        self._log_config()
-
-        # Initialize metrics
         self.metrics = MetricsTracker()
-
-        # Create strategy based on mode parameter
         self.strategy = self._create_strategy()
         self.strategy.setup(
             node=self,
@@ -77,10 +65,8 @@ class LeRobotInferenceNode(Node):
         )
 
         if not self.monitor_only:
-            # Load model with processors
-            self._load_model()
+            self._setup_model()
 
-            # Setup action limiter
             self.action_limiter = ActionLimiter(
                 max_delta=self.max_position_delta,
                 model_joint_order=self.joint_names_config.get("model_joint_order", []),
@@ -89,17 +75,17 @@ class LeRobotInferenceNode(Node):
                 logger=self.get_logger(),
             )
 
-            # Setup publishers
             self._setup_publishers()
 
-            # Control timer
             self.control_timer = self.create_timer(
                 1.0 / self.control_freq,
                 self.control_loop,
                 callback_group=self._control_callback_group,
             )
 
-        # Stats logging timer (always active — used for monitor_only mode)
+        self._log_startup()
+
+        # Stats logging timer (always active — used for monitor_only mode too)
         self._stats_log_interval = 5.0
         self._stats_timer = self.create_timer(
             self._stats_log_interval,
@@ -114,31 +100,64 @@ class LeRobotInferenceNode(Node):
         self._prev_inference_count: int = 0
         self._prev_frame_counters: dict[str, int] = {}
 
-        self.get_logger().info("=" * 50)
-        if self.monitor_only:
-            self.get_logger().info("Node initialized - MONITOR ONLY (no model, no publishing)")
-        else:
-            self.get_logger().info("Node initialized - Ready for inference")
-        self.get_logger().info(f"Target frequency: {self.control_freq} Hz")
-        self.get_logger().info("=" * 50)
-
-    def _declare_parameters(self) -> None:
-        """Declare ROS2 parameters."""
+    def _setup_config(self) -> None:
+        """Declare ROS2 params, load YAML, and read all checkpoint metadata."""
         self.declare_parameter("model_path", "")
         self.declare_parameter("config_file", "")
         self.declare_parameter("control_frequency", 30.0)
         self.declare_parameter("device", "cuda")
-        self.declare_parameter("model_type", "act")
-        self.declare_parameter("max_position_delta", 0.1)
         self.declare_parameter("deterministic", False)
         self.declare_parameter("deterministic_seed", 42)
-        self.declare_parameter("throttle_duration", 1.0)
-        self.declare_parameter("image_height", 480)
-        self.declare_parameter("image_width", 640)
-        # Monitor-only mode: subscribe + log FPS, no model/inference/publishing
         self.declare_parameter("monitor_only", False)
 
-    def _load_config(self, config_file: str) -> dict:
+        # Static fields from ROS2 params
+        self.monitor_only = self.get_parameter("monitor_only").value
+        self.model_path = self.get_parameter("model_path").value
+        if not self.model_path and not self.monitor_only:
+            raise ValueError("model_path parameter is required")
+
+        self.control_freq = self.get_parameter("control_frequency").value
+        self.device = self.get_parameter("device").value
+
+        # Load YAML config
+        config_file = self.get_parameter("config_file").value
+        self.config = self._load_yaml_config(config_file)
+
+        # Fields from YAML config
+        safety_config = self.config.get("safety", {})
+        self.max_position_delta = safety_config.get("max_position_delta", 0.1)
+
+        self.joint_state_topic = self.config.get("joint_state_topic", "/joint_states")
+        self.camera_mapping = self.config.get("camera_mapping", {})
+        self.camera_names = list(self.camera_mapping.values())
+        self.arms_config = self.config.get("arms", {})
+        self.joint_names_config = self.config.get("joint_names", {})
+
+        # Inference tuning knobs (null = use checkpoint defaults)
+        tuning_config = self.config.get("inference_tuning", {})
+        self.n_action_steps_override = tuning_config.get("n_action_steps", None)
+        self.temporal_ensemble_coeff = tuning_config.get("temporal_ensemble_coeff", None)
+
+        # --- Checkpoint metadata (lightweight JSON reads, no tensor loading) ---
+        meta = self._read_checkpoint_metadata()
+
+        # image_shape: from config.json input_features — must match training
+        # Default (480, 640, 3) is used only in monitor_only mode with no checkpoint
+        self.image_shape = meta.get("image_shape", (480, 640, 3))
+
+        # model_type: from config.json, YAML overrides if explicitly set
+        model_cfg = self.config.get("model", {})
+        self.model_type = model_cfg.get("type") or meta.get("model_type")
+
+        # use_delta_actions: from anvil_config.json — must match training, no YAML override
+        self.use_delta_actions = meta.get("use_delta_actions", False)
+
+        # task_description: anvil_config.json first, YAML overrides if explicitly set
+        self.task_description = meta.get("task_description", "")
+        if model_cfg.get("task_description"):
+            self.task_description = model_cfg["task_description"]
+
+    def _load_yaml_config(self, config_file: str) -> dict:
         """Load configuration from YAML file."""
         if not config_file:
             self.get_logger().warn("No config_file specified, using defaults")
@@ -151,65 +170,52 @@ class LeRobotInferenceNode(Node):
         with open(config_path) as f:
             return yaml.safe_load(f)
 
-    def _apply_config(self) -> None:
-        """Apply configuration from parameters and config file."""
-        self.monitor_only = self.get_parameter("monitor_only").value
-        self.model_path = self.get_parameter("model_path").value
-        if not self.model_path and not self.monitor_only:
-            raise ValueError("model_path parameter is required")
+    def _read_checkpoint_metadata(self) -> dict:
+        """
+        Read checkpoint metadata from config.json and anvil_config.json.
+        Lightweight — JSON only, no tensor loading.
+        Raises RuntimeError if model_path is set but config.json is missing/unreadable.
+        """
+        if not self.model_path:
+            return {}
 
-        self.control_freq = self.get_parameter("control_frequency").value
-        self.device = self.get_parameter("device").value
-        self.throttle_duration = self.get_parameter("throttle_duration").value
+        checkpoint = Path(self.model_path)
 
-        # Model type: config file takes precedence, None triggers auto-detect in ModelLoader
-        model_config = self.config.get("model", {})
-        self._model_config = model_config  # stored for use after model load
-        self.model_type = model_config.get("type", None)
+        # Auto-detect pretrained_model subdirectory (mirrors ModelLoader logic)
+        pretrained = checkpoint / "pretrained_model"
+        if pretrained.exists() and (pretrained / "config.json").exists():
+            checkpoint = pretrained
 
-        # Image dimensions
-        self.image_height = self.get_parameter("image_height").value
-        self.image_width = self.get_parameter("image_width").value
-        self.image_shape = (self.image_height, self.image_width, 3)
+        # config.json — required
+        config_path = checkpoint / "config.json"
+        if not config_path.exists():
+            raise RuntimeError(f"config.json not found in {checkpoint}")
+        cfg = json.loads(config_path.read_text())
 
-        # Safety parameters from config file
-        safety_config = self.config.get("safety", {})
-        self.max_position_delta = safety_config.get("max_position_delta", 0.1)
+        # image shape from input_features (first VISUAL entry)
+        image_shape = None
+        for feat in cfg.get("input_features", {}).values():
+            if feat.get("type") == "VISUAL":
+                c, h, w = feat["shape"]   # stored as [C, H, W]
+                image_shape = (h, w, c)   # return as (H, W, C) for cv2
+                break
+        if image_shape is None:
+            raise RuntimeError(f"No VISUAL input feature found in {config_path}")
 
-        # Model parameters (use_delta_actions may be overridden after model load
-        # by anvil_config.json from the checkpoint; task_description is runtime-only)
-        self.use_delta_actions = model_config.get("use_delta_actions", False)
-        self.task_description = model_config.get("task_description", "")
+        meta = {
+            "image_shape": image_shape,
+            "model_type":  cfg.get("type"),
+        }
 
-        # Topics and mapping
-        self.joint_state_topic = self.config.get("joint_state_topic", "/joint_states")
-        self.camera_mapping = self.config.get("camera_mapping", {})
-        self.camera_names = list(self.camera_mapping.values())
-        self.arms_config = self.config.get("arms", {})
-        self.joint_names_config = self.config.get("joint_names", {})
+        # anvil_config.json — optional (absent for checkpoints pre-anvil_config)
+        anvil_path = checkpoint / "anvil_config.json"
+        if anvil_path.exists():
+            anvil = json.loads(anvil_path.read_text())
+            meta["use_delta_actions"] = anvil.get("use_delta_actions", False)
+            if "task_description" in anvil:
+                meta["task_description"] = anvil["task_description"]
 
-        # Inference tuning knobs (inference_tuning: section; null = use checkpoint defaults)
-        tuning_config = self.config.get("inference_tuning", {})
-        self.n_action_steps_override = tuning_config.get("n_action_steps", None)
-        self.temporal_ensemble_coeff = tuning_config.get("temporal_ensemble_coeff", None)
-
-    def _log_config(self) -> None:
-        """Log configuration summary."""
-        self.get_logger().info("=" * 50)
-        self.get_logger().info("LeRobot Inference Node")
-        self.get_logger().info("=" * 50)
-        self.get_logger().info(f"Model: {self.model_path}")
-        self.get_logger().info(f"Device: {self.device}")
-        self.get_logger().info(f"Frequency: {self.control_freq} Hz")
-        self.get_logger().info(f"Max delta: {self.max_position_delta} rad")
-        self.get_logger().info(f"Resolution: {self.image_width}x{self.image_height} ({self._resolution_label()})")
-        self.get_logger().info(f"Cameras: {self.camera_names}")
-        self.get_logger().info(f"Arms: {list(self.arms_config.keys())}")
-
-    def _resolution_label(self) -> str:
-        """Return human-readable resolution label (e.g. '480p', '720p', '1080p')."""
-        labels = {480: "480p", 720: "720p", 1080: "1080p"}
-        return labels.get(self.image_height, f"{self.image_height}p")
+        return meta
 
     def _create_strategy(self):
         """Create multi-process inference strategy."""
@@ -217,36 +223,25 @@ class LeRobotInferenceNode(Node):
 
         return MultiProcessStrategy()
 
-    def _build_config_overrides(self) -> dict:
-        """Build config overrides dict from inference_tuning config."""
-        overrides = {}
-
-        if self.n_action_steps_override is not None:
-            overrides["n_action_steps"] = self.n_action_steps_override
-
-        if self.temporal_ensemble_coeff is not None:
-            overrides["temporal_ensemble_coeff"] = self.temporal_ensemble_coeff
-            # Temporal ensemble requires n_action_steps=1
-            if self.n_action_steps_override is None or self.n_action_steps_override > 1:
-                self.get_logger().warn(
-                    "temporal_ensemble requires n_action_steps=1, forcing override"
-                )
-                overrides["n_action_steps"] = 1
-
-        return overrides
-
-    def _load_model(self) -> None:
-        """Load model and processors."""
-        # Enable deterministic mode if requested
+    def _setup_model(self) -> None:
+        """Load model weights and processors. All config fields must be set by _setup_config()."""
         if self.get_parameter("deterministic").value:
             seed = self.get_parameter("deterministic_seed").value
             set_deterministic_mode(seed)
             self.get_logger().info(f"Deterministic mode enabled with seed={seed}")
 
-        # Build config overrides
-        config_overrides = self._build_config_overrides()
+        # Build inference tuning overrides
+        config_overrides = {}
+        if self.n_action_steps_override is not None:
+            config_overrides["n_action_steps"] = self.n_action_steps_override
+        if self.temporal_ensemble_coeff is not None:
+            config_overrides["temporal_ensemble_coeff"] = self.temporal_ensemble_coeff
+            if self.n_action_steps_override is None or self.n_action_steps_override > 1:
+                self.get_logger().warn(
+                    "temporal_ensemble requires n_action_steps=1, forcing override"
+                )
+                config_overrides["n_action_steps"] = 1
 
-        # Load model - overrides are applied after loading in ModelLoader
         loader = ModelLoader(
             self.model_path,
             self.device,
@@ -256,64 +251,70 @@ class LeRobotInferenceNode(Node):
         )
         self.model, self.preprocessor, self.postprocessor = loader.load_with_processors()
         self._loader = loader
-        self.get_logger().info("Model loaded with processors")
 
-        # Update model_type in case it was auto-detected from the checkpoint
-        if self.model_type is None:
-            self.model_type = loader.model_type
+        # Confirm final model_type (ModelLoader auto-detects if None was passed)
+        self.model_type = loader.model_type
 
-        # use_delta_actions: read from anvil_config.json (written at training time).
-        # Falls back to YAML model.use_delta_actions for checkpoints trained before
-        # anvil_config.json was introduced.
-        anvil_cfg = loader.anvil_config
-        self.use_delta_actions = anvil_cfg.get(
-            "use_delta_actions",
-            self._model_config.get("use_delta_actions", False),
-        )
-
-        # Log effective config
-        self._log_effective_model_config()
-
-        # Log SmolVLA language instruction (preprocessor handles tokenization)
-        if self.model_type == "smolvla" and self.task_description:
-            self.get_logger().info(f"Task description: '{self.task_description}'")
-
-    def _log_effective_model_config(self) -> None:
-        """Log effective inference tuning values with actionable hints."""
-        if not hasattr(self.model, "config"):
-            return
-
-        config = self.model.config
-        chunk_size = getattr(config, "chunk_size", None)
-        n_action_steps = getattr(config, "n_action_steps", None)
-        cs = str(chunk_size) if chunk_size is not None else "N/A"
-        nas = str(n_action_steps) if n_action_steps is not None else "N/A"
-
-        self.get_logger().info("┌─ Inference tuning ──────────────────────────────────────┐")
-        self.get_logger().info(f"│  chunk_size      = {cs:<4} (fixed at training, read-only)   │")
-        self.get_logger().info(f"│  n_action_steps  = {nas:<4} (override in inference_tuning:)  │")
-        self.get_logger().info( "│    → jittery / oscillating?  raise n_action_steps       │")
-        self.get_logger().info( "│    → hesitates / freezes?    lower n_action_steps       │")
-        self.get_logger().info( "└─────────────────────────────────────────────────────────┘")
-
-        # Report override if n_action_steps was changed from checkpoint default
-        orig = getattr(self._loader, "checkpoint_n_action_steps", None)
-        if (
-            orig is not None
-            and n_action_steps is not None
-            and orig != n_action_steps
-            and self.n_action_steps_override is not None
-        ):
-            self.get_logger().info(
-                f"  (overridden from checkpoint default: {orig} → {n_action_steps})"
+        if self.model_type in {"smolvla", "pi0", "pi0_fast", "groot", "xvla"} and not self.task_description:
+            self.get_logger().warn(
+                f"{self.model_type} has no task_description — re-train with --task-description "
+                "or set model.task_description in the inference YAML."
             )
 
-        # Verify temporal ensembler was created if coeff is set
-        if getattr(config, "temporal_ensemble_coeff", None) is not None:
-            if hasattr(self.model, "temporal_ensembler"):
-                self.get_logger().info("Temporal ensembler initialized successfully")
-            else:
-                self.get_logger().error("temporal_ensemble_coeff is set but ensembler not created!")
+    def _log_startup(self) -> None:
+        """Log unified startup summary after all setup is complete."""
+        logger = self.get_logger()
+        logger.info("=" * 50)
+        logger.info("LeRobot Inference Node")
+        logger.info("=" * 50)
+        if self.monitor_only:
+            logger.info("Mode:       Monitor Only (no model, no publishing)")
+        else:
+            logger.info(f"Model:      {self.model_path}")
+            logger.info(f"Type:       {self.model_type or 'unknown'}")
+            logger.info(f"Delta acts: {self.use_delta_actions}")
+            if self.model_type in {"smolvla", "pi0", "pi0_fast", "groot", "xvla"}:
+                logger.info(f"Task:       '{self.task_description}'")
+        logger.info(f"Device:     {self.device}")
+        logger.info(f"Frequency:  {self.control_freq} Hz")
+        if not self.monitor_only:
+            logger.info(f"Max delta:  {self.max_position_delta} rad")
+
+        h, w, _ = self.image_shape
+        res_note = "auto-detected from checkpoint" if self.model_path else "default"
+        logger.info(f"Resolution: {w}x{h}  ({res_note})")
+
+        logger.info(f"Cameras:    {self.camera_names}")
+        logger.info(f"Arms:       {list(self.arms_config.keys())}")
+
+        if not self.monitor_only and hasattr(self, "model") and hasattr(self.model, "config"):
+            config = self.model.config
+            chunk_size = getattr(config, "chunk_size", None)
+            n_action_steps = getattr(config, "n_action_steps", None)
+            cs = str(chunk_size) if chunk_size is not None else "N/A"
+            nas = str(n_action_steps) if n_action_steps is not None else "N/A"
+
+            logger.info("┌─ Inference tuning ──────────────────────────────────────┐")
+            logger.info(f"│  chunk_size      = {cs:<4} (fixed at training, read-only)   │")
+            logger.info(f"│  n_action_steps  = {nas:<4} (override in inference_tuning:)  │")
+            logger.info( "│    → jittery / oscillating?  raise n_action_steps       │")
+            logger.info( "│    → hesitates / freezes?    lower n_action_steps       │")
+            logger.info( "└─────────────────────────────────────────────────────────┘")
+
+            orig = getattr(self._loader, "checkpoint_n_action_steps", None)
+            if (
+                orig is not None
+                and n_action_steps is not None
+                and orig != n_action_steps
+                and self.n_action_steps_override is not None
+            ):
+                logger.info(f"  (overridden from checkpoint default: {orig} → {n_action_steps})")
+
+            if getattr(config, "temporal_ensemble_coeff", None) is not None:
+                if hasattr(self.model, "temporal_ensembler"):
+                    logger.info("Temporal ensembler initialized successfully")
+                else:
+                    logger.error("temporal_ensemble_coeff is set but ensembler not created!")
 
     def _setup_publishers(self) -> None:
         """Setup action publishers."""
@@ -338,8 +339,8 @@ class LeRobotInferenceNode(Node):
         try:
             # Preprocess observation
             if self.preprocessor:
-                if self.model_type == "smolvla" and self.task_description:
-                    # SmolVLA needs 'task' in complementary_data for tokenization
+                if self.model_type in {"smolvla", "pi0", "pi0_fast", "groot", "xvla"} and self.task_description:
+                    # VLA-family policies need 'task' in complementary_data for tokenization
                     # Use full transition processing instead of just process_observation
                     from lerobot.processor.converters import create_transition
                     from lerobot.processor.core import TransitionKey
@@ -502,6 +503,8 @@ class LeRobotInferenceNode(Node):
 
     def reset_policy(self) -> None:
         """Reset policy state."""
+        if not hasattr(self, "model"):
+            return
         self.get_logger().info("Resetting policy state...")
         if hasattr(self.model, "reset"):
             self.model.reset()
@@ -512,7 +515,11 @@ class LeRobotInferenceNode(Node):
         return self.metrics.get_stats()
 
     def destroy_node(self) -> None:
-        """Cleanup strategy and destroy node."""
+        """Cleanup timers, strategy, and destroy node."""
+        if hasattr(self, "control_timer"):
+            self.control_timer.cancel()
+        if hasattr(self, "_stats_timer"):
+            self._stats_timer.cancel()
         self.strategy.cleanup()
         super().destroy_node()
 

@@ -1,7 +1,7 @@
 # Use ROS2 Jazzy as base
 FROM ros:jazzy-ros-base
 
-ARG LEROBOT_VERSION=0.4.4
+ARG LEROBOT_VERSION=0.5.0
 ARG LEROBOT_EXTRAS=""
 
 # Set environment
