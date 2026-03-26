@@ -64,6 +64,10 @@ class ModelLoader:
     - ACT (Action Chunking Transformer)
     - Diffusion Policy
     - SmolVLA (Small Vision-Language-Action)
+    - Pi0 (Physical Intelligence)
+    - Pi0-Fast (Physical Intelligence - Fast)
+    - GROOT 1.5 (Generalist Robot Operation)
+    - XVLA (Cross-modal Vision-Language-Action)
     """
 
     def __init__(
@@ -82,8 +86,8 @@ class ModelLoader:
         Args:
             model_path: Path to model checkpoint directory
             device: Device for inference ("cuda" or "cpu")
-            model_type: Model type ("act", "diffusion", or "smolvla"). None = auto-detect
-                        from config.json in the checkpoint.
+            model_type: Model type ("act", "diffusion", "smolvla", "pi0", "pi0_fast",
+                        "groot", "xvla"). None = auto-detect from config.json.
             logger: Optional ROS2 logger
             deterministic: If True, enable deterministic mode
             seed: Random seed for deterministic mode
@@ -115,9 +119,6 @@ class ModelLoader:
         if self.model_type is None:
             self.model_type = self._detect_model_type()
 
-        # Load anvil_config.json (custom training flags persisted by anvil-trainer)
-        self._anvil_config = self._load_anvil_config()
-
     def _log(self, level: str, msg: str):
         """Log message using ROS2 logger or print."""
         if self.logger:
@@ -135,16 +136,6 @@ class ModelLoader:
         if config_path.exists():
             return json.loads(config_path.read_text()).get("type")
         return None
-
-    def _load_anvil_config(self) -> dict:
-        """Read anvil_config.json written by anvil-trainer, if present."""
-        path = self.model_path / "anvil_config.json"
-        return json.loads(path.read_text()) if path.exists() else {}
-
-    @property
-    def anvil_config(self) -> dict:
-        """Custom training flags persisted by anvil-trainer (e.g. use_delta_actions)."""
-        return self._anvil_config
 
     @property
     def checkpoint_n_action_steps(self) -> int | None:
@@ -199,6 +190,22 @@ class ModelLoader:
                 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
                 model = SmolVLAPolicy.from_pretrained(str(self.model_path))
+            elif self.model_type == "pi0":
+                from lerobot.policies.pi0.modeling_pi0 import PI0Policy
+
+                model = PI0Policy.from_pretrained(str(self.model_path))
+            elif self.model_type == "pi0_fast":
+                from lerobot.policies.pi0_fast.modeling_pi0_fast import PI0FastPolicy
+
+                model = PI0FastPolicy.from_pretrained(str(self.model_path))
+            elif self.model_type == "groot":
+                from lerobot.policies.groot.modeling_groot import GrootPolicy
+
+                model = GrootPolicy.from_pretrained(str(self.model_path))
+            elif self.model_type == "xvla":
+                from lerobot.policies.xvla.modeling_xvla import XVLAPolicy
+
+                model = XVLAPolicy.from_pretrained(str(self.model_path))
             else:
                 raise ValueError(f"Unsupported model type: {self.model_type}")
 
