@@ -345,68 +345,6 @@ class DeltaActionTransform(Transform):
         return item
 
 
-class GrootMetaDevicePatch(Transform):
-    """Patch GR00TN15.from_pretrained to disable meta device initialization.
-
-    lerobot v0.5.0 bug: transformers initializes GROOT on meta device, causing
-    FlowmatchingActionHead to call Beta(...).item() which fails on meta tensors.
-    Fix: force device_map=None to skip meta device init entirely.
-    """
-
-    @property
-    def name(self) -> str:
-        return "groot_meta_device_patch"
-
-    def is_enabled(self, config: TrainingConfig) -> bool:
-        return "--policy.type=groot" in sys.argv
-
-    def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
-        return item
-
-    def patch_metadata(self, config: TrainingConfig) -> None:
-        from lerobot.policies.groot import groot_n1
-
-        _orig = groot_n1.GR00TN15.from_pretrained.__func__
-
-        @classmethod  # type: ignore[misc]
-        def _patched(cls, *args, **kwargs):
-            kwargs.setdefault("device_map", None)
-            return _orig(cls, *args, **kwargs)
-
-        groot_n1.GR00TN15.from_pretrained = _patched
-        print(f"[{self.name}] Patched GR00TN15.from_pretrained (device_map=None)")
-
-
-class XVLAConfigPatch(Transform):
-    """Patch XVLAConfig.get_florence_config to inject default empty sub-configs.
-
-    lerobot v0.5.0 bug: XVLAConfig.florence_config defaults to {}, but
-    get_florence_config() raises ValueError if vision_config is absent.
-    Fix: setdefault vision_config and text_config to {} before delegating.
-    """
-
-    @property
-    def name(self) -> str:
-        return "xvla_config_patch"
-
-    def is_enabled(self, config: TrainingConfig) -> bool:
-        return "--policy.type=xvla" in sys.argv
-
-    def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
-        return item
-
-    def patch_metadata(self, config: TrainingConfig) -> None:
-        from lerobot.policies.xvla.configuration_xvla import XVLAConfig
-
-        _orig = XVLAConfig.get_florence_config
-
-        def _patched(self):
-            self.florence_config.setdefault("vision_config", {})
-            self.florence_config.setdefault("text_config", {})
-            return _orig(self)
-
-        XVLAConfig.get_florence_config = _patched
-        print(f"[{self.name}] Patched XVLAConfig.get_florence_config (default sub-configs)")
 
 
 # =============================================================================
@@ -429,8 +367,6 @@ class TransformRunner:
         CameraFilterTransform(),
         TaskOverrideTransform(),
         DeltaActionTransform(),
-        GrootMetaDevicePatch(),
-        XVLAConfigPatch(),
     ]
 
     def __init__(self, config: TrainingConfig):
