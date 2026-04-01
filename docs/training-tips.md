@@ -1,5 +1,20 @@
 # Training Tips
 
+## anvil-trainer Defaults
+
+`anvil-trainer` is a thin wrapper around LeRobot's `lerobot-train` CLI. In addition to Anvil-specific flags (`--task-description`, `--camera-filter`, `--use-delta-actions`), it injects the following LeRobot defaults automatically so you don't have to repeat them in every command:
+
+| Injected flag | Value | Reason |
+|---|---|---|
+| `--dataset.repo_id` | `local` | Anvil datasets are always local; HuggingFace Hub upload is not needed for training |
+| `--policy.push_to_hub` | `false` | Prevents accidental upload of checkpoints to HuggingFace Hub |
+| `--eval_freq` | `0` | LeRobot's default (20 000 steps) would attempt to launch a gym simulation environment, which doesn't exist for Anvil MCAP datasets |
+| `--output_dir` | `model_zoo/<job_name>` | Resolved from `--job_name`; auto-generated from policy type + timestamp if omitted |
+
+Any of these can be overridden by passing the flag explicitly.
+
+---
+
 ## MODEL_PATH — Point to a Specific Checkpoint
 
 After training, checkpoints are saved under `model_zoo/<job_name>/checkpoints/<step>/pretrained_model/`.
@@ -42,9 +57,7 @@ If you don't want W&B, training still runs fine without it — logs are printed 
 
 ---
 
-## save_freq and eval_freq
-
-### save_freq
+## save_freq
 
 Controls how often a checkpoint is saved (in steps). Each checkpoint writes the full model to `model_zoo/<job_name>/checkpoints/<step>/pretrained_model/`.
 
@@ -194,8 +207,7 @@ uv run anvil-trainer \
   --policy.type=smolvla \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
-  --job_name=grabbing-w1 \
-  --eval_freq=0
+  --job_name=grabbing-w1
 ```
 
 `--policy.load_vlm_weights=true` is required when loading from a SmolVLA
@@ -221,15 +233,6 @@ Mirror the same string in the inference YAML:
 ```yaml
 model:
   task_description: "pick up the red block and stack it on the blue block"
-```
-
-### Disable eval
-
-SmolVLA evaluation requires a live robot or simulator. Set `eval_freq=0`
-to skip it entirely:
-
-```bash
---eval_freq=0
 ```
 
 ### Frozen layers (defaults are good)

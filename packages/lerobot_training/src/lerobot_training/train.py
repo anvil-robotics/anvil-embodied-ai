@@ -123,6 +123,10 @@ class TrainingConfig:
         if not any(arg.startswith("--dataset.repo_id") for arg in sys.argv):
             sys.argv.append("--dataset.repo_id=local")
 
+        # Disable eval by default — no gym env available for Anvil datasets
+        if not any(arg.startswith("--eval_freq") for arg in sys.argv):
+            sys.argv.append("--eval_freq=0")
+
         # Try to extract dataset root from args for validation
         dataset_root = None
         for arg in sys.argv:

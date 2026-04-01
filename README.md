@@ -164,8 +164,7 @@ uv run anvil-trainer \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
   --job_name=grabbing-smolvla \
-  --task-description="Grab the gray doll and put it in the bucket" \
-  --eval_freq=0
+  --task-description="Grab the gray doll and put it in the bucket"
 ```
 
 #### [Pi0](docs/training-tips.md#pi0)
@@ -316,7 +315,6 @@ anvil-embodied-ai/
 **SmolVLA (TL;DR)**
 - Always fine-tune from `lerobot/smolvla_base` with `--policy.load_vlm_weights=true`
 - Set a specific task description via `--task-description` — it matters
-- Set `--eval_freq=0` (no live env available)
 - 30k–50k steps is usually enough from a pretrained base
 
 **Pi0 (TL;DR)**
