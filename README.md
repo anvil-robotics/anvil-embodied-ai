@@ -146,6 +146,8 @@ uv run anvil-trainer \
 
 #### [Diffusion](docs/training-tips.md#diffusion-policy)
 
+Good at tasks with multimodal action distributions (e.g. the robot can complete a task via multiple valid paths). Produces smooth motions and requires no chunk tuning — at the cost of slower inference than ACT due to the denoising loop.
+
 ```bash
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
@@ -313,6 +315,12 @@ anvil-embodied-ai/
 - Enable temporal ensemble at inference for smoother execution — no retraining needed
 - Use `--camera-filter` to drop cameras that don't add signal
 - 100k steps / batch 16 is a solid default; drop to 50k for small datasets
+
+**Diffusion (TL;DR)**
+- Best for tasks with multiple valid completion paths — handles multimodal action distributions naturally
+- Slower inference than ACT (denoising loop); consider ACT first if latency is critical
+- 100k steps / batch 64 is a solid default; larger batch reduces score-matching variance
+- Tune `n_action_steps` at inference if motion feels jerky — no retraining needed
 
 **SmolVLA (TL;DR)**
 - Always fine-tune from `lerobot/smolvla_base` with `--policy.load_vlm_weights=true`

@@ -165,9 +165,11 @@ batch size if GPU memory allows — it stabilizes training.
 
 ## Diffusion Policy
 
-### Overview
+### When to use Diffusion vs ACT
 
-Diffusion Policy models the action distribution as a denoising diffusion process. It handles multimodal action distributions well and produces smooth, natural motions without explicit chunking tuning.
+Diffusion Policy models the action distribution as a denoising diffusion process rather than a deterministic regression. This makes it naturally suited for tasks where multiple valid trajectories exist (e.g. the robot can approach an object from several angles). It produces smooth, natural motions without explicit chunk tuning.
+
+Trade-off: inference is slower than ACT because each step requires running a denoising loop (default 100 DDPM steps or 10 DDIM steps). If real-time latency is tight, try ACT first.
 
 ### Training command
 
@@ -178,13 +180,37 @@ uv run anvil-trainer \
   --job_name=pick-and-place
 ```
 
-### Steps
+### Steps and batch size
 
-100k steps with batch size 64 is a solid default. Diffusion models generally benefit from larger batch sizes when GPU memory allows — this reduces the variance of the score-matching objective.
+100k steps with batch size 64 is a solid default. Diffusion models benefit more from larger batch sizes than ACT — this reduces the variance of the score-matching objective and stabilizes training. If GPU memory is limited, batch size 32 is acceptable.
+
+If your dataset is small (< 50 episodes), 50k steps is often enough.
 
 ### n_action_steps
 
-At inference, Diffusion Policy executes the full predicted chunk by default. If motion feels jerky, lower `n_action_steps` via the inference YAML — no retraining needed.
+Diffusion Policy predicts a full action chunk (default 16 steps) and executes all of them before re-running inference. If the resulting motion feels jerky or hesitant, tune `n_action_steps` at inference without retraining:
+
+```yaml
+# configs/lerobot_control/inference_default.yaml
+inference_tuning:
+  n_action_steps: 8   # execute fewer steps before re-querying
+```
+
+### num_inference_steps (DDPM vs DDIM)
+
+The denoising loop runs `num_inference_steps` iterations per inference call. The default is 100 (DDPM), which is accurate but slow. Switching to DDIM with 10 steps gives similar quality at ~10× the speed:
+
+```bash
+--policy.num_inference_steps=10
+```
+
+### Image augmentation and camera selection
+
+Same guidance as ACT applies — use `--dataset.image_transforms.enable=true` for color jitter and affine augmentation, and `--camera-filter` to drop cameras that don't contribute signal.
+
+### Delta actions
+
+`--use-delta-actions` is supported and can help for tasks requiring repeated returns to similar poses. See the [ACT section](#delta-actions) for details.
 
 ---
 
