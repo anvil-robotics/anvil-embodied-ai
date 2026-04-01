@@ -16,7 +16,7 @@ setup(
     python_requires=">=3.12",
     install_requires=[
         "setuptools",
-        "lerobot>=0.5.0",
+        "lerobot~=0.5.0",
         "numpy>=2.0,<2.3.0",
         "opencv-python-headless>=4.8.0,<5.0.0",
         "pyyaml>=6.0",

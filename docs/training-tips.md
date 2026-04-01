@@ -252,6 +252,8 @@ so every sample gets the same instruction:
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=smolvla \
+  --policy.pretrained_path=lerobot/smolvla_base \
+  --policy.load_vlm_weights=true \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=grabbing-w1 \
   --task-description="pick up the red block and stack it on the blue block"
@@ -300,7 +302,6 @@ Fine-tune from `lerobot/pi0_base` rather than training from scratch:
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi0 \
-  --policy.push_to_hub=false \
   --policy.pretrained_path=lerobot/pi0_base \
   --policy.compile_model=true \
   --policy.gradient_checkpointing=true \
@@ -355,7 +356,6 @@ are higher.
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi05 \
-  --policy.push_to_hub=false \
   --policy.pretrained_path=lerobot/pi05_base \
   --policy.compile_model=true \
   --policy.gradient_checkpointing=true \

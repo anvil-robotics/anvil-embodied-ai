@@ -400,10 +400,6 @@ class TransformRunner:
             return f"'{self.config.task_override}'"
         elif isinstance(transform, DeltaActionTransform):
             return "action = action - observation.state"
-        elif isinstance(transform, GrootMetaDevicePatch):
-            return "device_map=None"
-        elif isinstance(transform, XVLAConfigPatch):
-            return "inject default florence sub-configs"
         return "enabled"
 
     def apply_metadata_patches(self) -> None:

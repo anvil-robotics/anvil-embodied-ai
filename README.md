@@ -70,6 +70,7 @@ ACT and Diffusion are included in the base install. For other policies:
 ```bash
 uv sync --all-packages --extra smolvla
 uv sync --all-packages --extra smolvla --extra pi   # multiple
+uv sync --all-packages --extra all                  # all policies
 ```
 
 > **GPU / CUDA note:** The root `pyproject.toml` pins torch to the PyTorch `cu128` index so `uv sync` always installs the CUDA-enabled build. If your machine runs a different CUDA driver version, change `pytorch-cu128` → `pytorch-cu126` (or `cu124`) in `pyproject.toml` before syncing.

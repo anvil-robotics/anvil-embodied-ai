@@ -51,9 +51,9 @@ dev = [
 #   uv sync --all-packages --extra smolvla
 #   uv sync --all-packages --extra smolvla --extra pi0
 # =============================================================================
-smolvla     = ["lerobot[smolvla]~=0.5.0"]   # SmolVLA
-pi          = ["lerobot[pi]~=0.5.0"]          # Pi0 / Pi0.5
-all-policies = ["lerobot[smolvla,pi]~=0.5.0"]
+smolvla = ["lerobot[smolvla]~=0.5.0"]   # SmolVLA
+pi      = ["lerobot[pi]~=0.5.0"]          # Pi0 / Pi0.5
+all     = ["lerobot[smolvla,pi]~=0.5.0"]  # all policies
 
 [project.scripts]
 anvil-trainer = "lerobot_training.train:main"

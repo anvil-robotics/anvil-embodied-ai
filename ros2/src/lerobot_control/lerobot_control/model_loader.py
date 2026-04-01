@@ -65,9 +65,7 @@ class ModelLoader:
     - Diffusion Policy
     - SmolVLA (Small Vision-Language-Action)
     - Pi0 (Physical Intelligence)
-    - Pi0-Fast (Physical Intelligence - Fast)
-    - GROOT 1.5 (Generalist Robot Operation)
-    - XVLA (Cross-modal Vision-Language-Action)
+    - Pi0.5 (Physical Intelligence)
     """
 
     def __init__(
@@ -194,6 +192,10 @@ class ModelLoader:
                 from lerobot.policies.pi0.modeling_pi0 import PI0Policy
 
                 model = PI0Policy.from_pretrained(str(self.model_path))
+            elif self.model_type == "pi05":
+                from lerobot.policies.pi05 import PI05Policy
+
+                model = PI05Policy.from_pretrained(str(self.model_path))
             else:
                 raise ValueError(f"Unsupported model type: {self.model_type}")
 
