@@ -151,6 +151,9 @@ uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi0 \
   --policy.push_to_hub=false \
+  --policy.pretrained_path=lerobot/pi0_base \
+  --policy.gradient_checkpointing=true \
+  --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
   --job_name=grabbing-pi0 \
   --task-description="Grab the gray doll and put it in the bucket"
@@ -161,8 +164,11 @@ uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi05 \
   --policy.push_to_hub=false \
-  --policy.train_expert_only=true \
+  --policy.pretrained_path=lerobot/pi05_base \
+  --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
+  --policy.train_expert_only=true \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --batch_size=1 \
   --num_workers=0 \
   --job_name=grabbing-pi05 \
@@ -170,6 +176,7 @@ uv run anvil-trainer \
 ```
 
 > Pi0.5 (4B params) requires `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU.
+> The `normalization_mapping` override is needed because mcap-convert datasets don't include quantile stats — see [training tips](docs/training-tips.md#pi05) for details.
 
 Mirror the task description in `configs/lerobot_control/inference_default.yaml`:
 

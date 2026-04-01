@@ -232,10 +232,16 @@ often sufficient. The default scheduler decays over 30k steps
 Pi0 uses a PaliGemma-3B backbone with a flow-matching action expert. It requires
 HuggingFace access to `google/paligemma-3b-pt-224`.
 
-### Train expert only
+### Always start from pretrained weights
 
-For most tasks, freeze the PaliGemma backbone and train only the action expert.
-This reduces GPU memory usage and converges faster:
+Fine-tune from `lerobot/pi0_base` rather than training from scratch:
+
+| Pretrained path | Description |
+|---|---|
+| `lerobot/pi0_base` | General-purpose base — use this for new tasks |
+| `lerobot/pi0_libero` | Pre-trained on the Libero benchmark dataset |
+
+### Training command
 
 ```bash
 uv run anvil-trainer \
@@ -243,10 +249,26 @@ uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi0 \
   --policy.push_to_hub=false \
+  --policy.pretrained_path=lerobot/pi0_base \
+  --policy.compile_model=true \
+  --policy.gradient_checkpointing=true \
+  --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
+  --policy.freeze_vision_encoder=false \
   --job_name=grabbing-pi0 \
   --task-description="pick up the red block"
 ```
+
+### Key parameters
+
+| Flag | Default | Description |
+|---|---|---|
+| `--policy.pretrained_path` | — | Required — start from `lerobot/pi0_base` |
+| `--policy.compile_model` | `false` | Enables torch.compile for faster training |
+| `--policy.gradient_checkpointing` | `false` | Reduces VRAM usage significantly — always enable |
+| `--policy.dtype` | `float32` | Use `bfloat16` for efficiency |
+| `--policy.train_expert_only` | `false` | `true` = freeze VLM, train only action expert + projections — lower memory, faster convergence |
+| `--policy.freeze_vision_encoder` | `false` | Only freeze if GPU memory is extremely tight |
 
 ### Task description
 
@@ -255,17 +277,26 @@ mirror it in the inference YAML — the same string must be used at both stages.
 
 ### Steps
 
-20k–50k steps from scratch is a reasonable range. Pi0 is a flow-matching model
-so it benefits from consistent demonstrations more than raw episode count.
+20k–50k steps from a pretrained base is a reasonable range. Pi0 is a
+flow-matching model and benefits more from demonstration consistency than
+raw episode count.
 
 ---
 
 ## Pi0.5
 
-Pi0.5 is a larger variant (~4B params, vs Pi0's ~3B). The training flags are
-identical to Pi0 but GPU memory requirements are higher.
+Pi0.5 is a larger variant (~4B params vs Pi0's ~3B) with stronger language
+understanding. Training flags are identical to Pi0 but GPU memory requirements
+are higher.
 
-### Required flags on a 24 GB GPU
+### Always start from pretrained weights
+
+| Pretrained path | Description |
+|---|---|
+| `lerobot/pi05_base` | General-purpose base — use this for new tasks |
+| `lerobot/pi05_libero` | Pre-trained on the Libero benchmark dataset |
+
+### Training command
 
 ```bash
 uv run anvil-trainer \
@@ -273,16 +304,45 @@ uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi05 \
   --policy.push_to_hub=false \
-  --policy.train_expert_only=true \
+  --policy.pretrained_path=lerobot/pi05_base \
+  --policy.compile_model=true \
+  --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
+  --policy.train_expert_only=true \
+  --policy.freeze_vision_encoder=false \
   --batch_size=1 \
   --num_workers=0 \
   --job_name=grabbing-pi05 \
   --task-description="pick up the red block"
 ```
 
+### Required flags on a 24 GB GPU
+
 | Flag | Why |
 |---|---|
-| `--policy.dtype=bfloat16` | Halves VRAM usage — required to fit 4B model on 24 GB |
+| `--policy.dtype=bfloat16` | Halves VRAM — required to fit 4B model on 24 GB |
+| `--policy.gradient_checkpointing=true` | Further reduces VRAM during backprop |
 | `--batch_size=1` | Avoids VRAM OOM during forward pass |
-| `--num_workers=0` | Prevents CPU RAM OOM — model load forks worker processes which each copy parent memory |
+| `--num_workers=0` | Prevents CPU RAM OOM — forked workers each copy the full model into RAM |
+
+### Normalization mapping
+
+Pi0.5 expects datasets with **quantile statistics** pre-computed. If your dataset
+was converted with `mcap-convert` (which stores raw float32 values without quantile
+stats), use `MEAN_STD` normalization instead:
+
+```bash
+--policy.normalization_mapping='{"ACTION": "MEAN_STD", "STATE": "MEAN_STD", "VISUAL": "IDENTITY"}'
+```
+
+Alternatively, augment your dataset with quantile stats in-place:
+
+```bash
+uv run python -c "
+from lerobot.datasets.v30.augment_dataset_quantile_stats import main
+main()
+" -- --repo-id=local/your-dataset
+```
+
+> If neither is done, Pi0.5 may fail or produce poor results because its default
+> `QUANTILE10` normalization requires the quantile fields to exist in `stats.json`.
