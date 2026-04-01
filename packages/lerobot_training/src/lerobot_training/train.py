@@ -119,6 +119,14 @@ class TrainingConfig:
         if not any(arg.startswith("--policy.push_to_hub") for arg in sys.argv):
             sys.argv.append("--policy.push_to_hub=false")
 
+        # Default dataset.repo_id=local for local dataset training
+        if not any(arg.startswith("--dataset.repo_id") for arg in sys.argv):
+            sys.argv.append("--dataset.repo_id=local")
+
+        # Disable eval by default — no gym env available for Anvil datasets
+        if not any(arg.startswith("--eval_freq") for arg in sys.argv):
+            sys.argv.append("--eval_freq=0")
+
         # Try to extract dataset root from args for validation
         dataset_root = None
         for arg in sys.argv:
@@ -345,6 +353,8 @@ class DeltaActionTransform(Transform):
         return item
 
 
+
+
 # =============================================================================
 # Transform Runner
 # =============================================================================
@@ -423,7 +433,10 @@ class TransformRunner:
         import lerobot.utils.train_utils as train_utils_mod
         from lerobot.utils.train_utils import save_checkpoint as original_save_checkpoint
 
-        anvil_cfg_content = json.dumps({"use_delta_actions": self.config.use_delta_actions}, indent=2)
+        anvil_cfg: dict = {"use_delta_actions": self.config.use_delta_actions}
+        if self.config.task_override:
+            anvil_cfg["task_description"] = self.config.task_override
+        anvil_cfg_content = json.dumps(anvil_cfg, indent=2)
 
         def patched_save_checkpoint(checkpoint_dir, **kwargs):
             original_save_checkpoint(checkpoint_dir, **kwargs)
@@ -492,16 +505,16 @@ anvil-trainer — LeRobot training with Anvil customizations
 Examples:
 
   # Train ACT (basic)
-  anvil-trainer --dataset.repo_id=local --dataset.root=data/datasets/my-dataset \\
+  anvil-trainer --dataset.root=data/datasets/my-dataset \\
     --policy.type=act --job_name=grabbing-w1
 
   # Train SmolVLA with task description
-  anvil-trainer --dataset.repo_id=local --dataset.root=data/datasets/my-dataset \\
+  anvil-trainer --dataset.root=data/datasets/my-dataset \\
     --policy.type=smolvla --job_name=grabbing-w1 \\
     --task-description="Grab the gray doll and put it in the bucket"
 
   # Train with delta actions and camera subset
-  anvil-trainer --dataset.repo_id=local --dataset.root=data/datasets/my-dataset \\
+  anvil-trainer --dataset.root=data/datasets/my-dataset \\
     --policy.type=act --job_name=grabbing-w1 \\
     --camera-filter=chest,waist --use-delta-actions
 

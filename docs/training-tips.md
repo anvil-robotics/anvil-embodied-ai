@@ -1,5 +1,20 @@
 # Training Tips
 
+## anvil-trainer Defaults
+
+`anvil-trainer` is a thin wrapper around LeRobot's `lerobot-train` CLI. In addition to Anvil-specific flags (`--task-description`, `--camera-filter`, `--use-delta-actions`), it injects the following LeRobot defaults automatically so you don't have to repeat them in every command:
+
+| Injected flag | Value | Reason |
+|---|---|---|
+| `--dataset.repo_id` | `local` | Anvil datasets are always local; HuggingFace Hub upload is not needed for training |
+| `--policy.push_to_hub` | `false` | Prevents accidental upload of checkpoints to HuggingFace Hub |
+| `--eval_freq` | `0` | LeRobot's default (20 000 steps) would attempt to launch a gym simulation environment, which doesn't exist for Anvil MCAP datasets |
+| `--output_dir` | `model_zoo/<job_name>` | Resolved from `--job_name`; auto-generated from policy type + timestamp if omitted |
+
+Any of these can be overridden by passing the flag explicitly.
+
+---
+
 ## MODEL_PATH — Point to a Specific Checkpoint
 
 After training, checkpoints are saved under `model_zoo/<job_name>/checkpoints/<step>/pretrained_model/`.
@@ -23,7 +38,6 @@ LeRobot uses [Weights & Biases](https://wandb.ai) for training monitoring. Enabl
 uv run wandb login   # one-time setup
 
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
   --job_name=grabbing-w1 \
@@ -43,9 +57,7 @@ If you don't want W&B, training still runs fine without it — logs are printed 
 
 ---
 
-## save_freq and eval_freq
-
-### save_freq
+## save_freq
 
 Controls how often a checkpoint is saved (in steps). Each checkpoint writes the full model to `model_zoo/<job_name>/checkpoints/<step>/pretrained_model/`.
 
@@ -126,7 +138,6 @@ to ablate which cameras matter most for your task:
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
   --job_name=grabbing-w1 \
@@ -152,6 +163,58 @@ batch size if GPU memory allows — it stabilizes training.
 
 ---
 
+## Diffusion Policy
+
+### When to use Diffusion vs ACT
+
+Diffusion Policy models the action distribution as a denoising diffusion process rather than a deterministic regression. This makes it naturally suited for tasks where multiple valid trajectories exist (e.g. the robot can approach an object from several angles). It produces smooth, natural motions without explicit chunk tuning.
+
+Trade-off: inference is slower than ACT because each step requires running a denoising loop (default 100 DDPM steps or 10 DDIM steps). If real-time latency is tight, try ACT first.
+
+### Training command
+
+```bash
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=diffusion \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --job_name=pick-and-place
+```
+
+### Steps and batch size
+
+100k steps with batch size 64 is a solid default. Diffusion models benefit more from larger batch sizes than ACT — this reduces the variance of the score-matching objective and stabilizes training. If GPU memory is limited, batch size 32 is acceptable.
+
+If your dataset is small (< 50 episodes), 50k steps is often enough.
+
+### n_action_steps
+
+Diffusion Policy predicts a full action chunk (default 16 steps) and executes all of them before re-running inference. If the resulting motion feels jerky or hesitant, tune `n_action_steps` at inference without retraining:
+
+```yaml
+# configs/lerobot_control/inference_default.yaml
+inference_tuning:
+  n_action_steps: 8   # execute fewer steps before re-querying
+```
+
+### num_inference_steps (DDPM vs DDIM)
+
+The denoising loop runs `num_inference_steps` iterations per inference call. The default is 100 (DDPM), which is accurate but slow. Switching to DDIM with 10 steps gives similar quality at ~10× the speed:
+
+```bash
+--policy.num_inference_steps=10
+```
+
+### Image augmentation and camera selection
+
+Same guidance as ACT applies — use `--dataset.image_transforms.enable=true` for color jitter and affine augmentation, and `--camera-filter` to drop cameras that don't contribute signal.
+
+### Delta actions
+
+`--use-delta-actions` is supported and can help for tasks requiring repeated returns to similar poses. See the [ACT section](#delta-actions) for details.
+
+---
+
 ## SmolVLA
 
 ### Always start from pretrained weights
@@ -167,13 +230,12 @@ Always fine-tune from `lerobot/smolvla_base` rather than training from scratch:
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=smolvla \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
-  --job_name=grabbing-w1 \
-  --eval_freq=0
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --job_name=grabbing-w1
 ```
 
 `--policy.load_vlm_weights=true` is required when loading from a SmolVLA
@@ -188,9 +250,11 @@ so every sample gets the same instruction:
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=smolvla \
+  --policy.pretrained_path=lerobot/smolvla_base \
+  --policy.load_vlm_weights=true \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=grabbing-w1 \
   --task-description="pick up the red block and stack it on the blue block"
 ```
@@ -200,15 +264,6 @@ Mirror the same string in the inference YAML:
 ```yaml
 model:
   task_description: "pick up the red block and stack it on the blue block"
-```
-
-### Disable eval
-
-SmolVLA evaluation requires a live robot or simulator. Set `eval_freq=0`
-to skip it entirely:
-
-```bash
---eval_freq=0
 ```
 
 ### Frozen layers (defaults are good)
@@ -224,3 +279,137 @@ differs significantly from the pretrained data.
 SmolVLA converges faster than ACT from a pretrained base. 30k–50k steps is
 often sufficient. The default scheduler decays over 30k steps
 (`scheduler_decay_steps=30000`) which aligns well with this range.
+
+---
+
+## Pi0
+
+Pi0 uses a PaliGemma-3B backbone with a flow-matching action expert. It requires
+HuggingFace access to `google/paligemma-3b-pt-224`.
+
+### Always start from pretrained weights
+
+Fine-tune from `lerobot/pi0_base` rather than training from scratch:
+
+| Pretrained path | Description |
+|---|---|
+| `lerobot/pi0_base` | General-purpose base — use this for new tasks |
+| `lerobot/pi0_libero` | Pre-trained on the Libero benchmark dataset |
+
+### Training command
+
+```bash
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=pi0 \
+  --policy.pretrained_path=lerobot/pi0_base \
+  --policy.compile_model=true \
+  --policy.gradient_checkpointing=true \
+  --policy.dtype=bfloat16 \
+  --policy.train_expert_only=true \
+  --policy.freeze_vision_encoder=false \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --job_name=grabbing-pi0 \
+  --task-description="pick up the red block"
+```
+
+### Key parameters
+
+| Flag | Default | Description |
+|---|---|---|
+| `--policy.pretrained_path` | — | Required — start from `lerobot/pi0_base` |
+| `--policy.compile_model` | `false` | Enables torch.compile for faster training |
+| `--policy.gradient_checkpointing` | `false` | Reduces VRAM usage significantly — always enable |
+| `--policy.dtype` | `float32` | Use `bfloat16` for efficiency |
+| `--policy.train_expert_only` | `false` | `true` = freeze VLM, train only action expert + projections — lower memory, faster convergence |
+| `--policy.freeze_vision_encoder` | `false` | Only freeze if GPU memory is extremely tight |
+
+### Task description
+
+Pi0 is language-conditioned. Always pass `--task-description` at training and
+mirror it in the inference YAML — the same string must be used at both stages.
+
+### Steps
+
+20k–50k steps from a pretrained base is a reasonable range. Pi0 is a
+flow-matching model and benefits more from demonstration consistency than
+raw episode count.
+
+---
+
+## Pi0.5
+
+Pi0.5 is a larger variant (~4B params vs Pi0's ~3B) with stronger language
+understanding. Training flags are identical to Pi0 but GPU memory requirements
+are higher.
+
+### Always start from pretrained weights
+
+| Pretrained path | Description |
+|---|---|
+| `lerobot/pi05_base` | General-purpose base — use this for new tasks |
+| `lerobot/pi05_libero` | Pre-trained on the Libero benchmark dataset |
+
+### Training command
+
+```bash
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=pi05 \
+  --policy.pretrained_path=lerobot/pi05_base \
+  --policy.compile_model=true \
+  --policy.gradient_checkpointing=true \
+  --policy.dtype=bfloat16 \
+  --policy.train_expert_only=true \
+  --policy.freeze_vision_encoder=false \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --batch_size=1 \
+  --num_workers=0 \
+  --job_name=grabbing-pi05 \
+  --task-description="pick up the red block"
+```
+
+### Required flags on a 24 GB GPU
+
+| Flag | Why |
+|---|---|
+| `--policy.dtype=bfloat16` | Halves VRAM — required to fit 4B model on 24 GB |
+| `--policy.gradient_checkpointing=true` | Further reduces VRAM during backprop |
+| `--batch_size=1` | Avoids VRAM OOM during forward pass |
+| `--num_workers=0` | Prevents CPU RAM OOM — forked workers each copy the full model into RAM |
+
+### Normalization mapping
+
+Pi0.5's default normalization is `QUANTILE10`, which requires `stats.json` to contain pre-computed quantile fields (`q01` / `q99`). Datasets converted with `mcap-convert` do not include these — only `mean`, `std`, `min`, and `max` are written.
+
+There are two ways to resolve this:
+
+**Option A — Override normalization (recommended for Anvil datasets)**
+
+Pass `MEAN_STD` for actions and states, which uses the existing mean/std stats:
+
+```bash
+--policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'
+```
+
+This is the approach shown in the training command above and requires no changes to your dataset.
+
+**Option B — Augment the dataset with quantile stats**
+
+Computes and writes quantile fields directly into the dataset's `stats.json`:
+
+```bash
+uv run python -c "
+from lerobot.datasets.v30.augment_dataset_quantile_stats import main
+main()
+" -- --repo-id=local/your-dataset
+```
+
+> **Warning: this modifies the dataset in-place.** Back up your dataset before running:
+> ```bash
+> cp -r data/datasets/my-dataset data/datasets/my-dataset.bak
+> ```
+
+After augmentation, you can use the default `QUANTILE10` normalization and omit `--policy.normalization_mapping`.
+
+Option A is simpler and sufficient for most tasks. Choose Option B only if you need to reproduce results that rely specifically on quantile normalization.

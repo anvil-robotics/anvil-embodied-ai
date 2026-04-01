@@ -34,30 +34,12 @@ def generate_launch_description():
         "control_frequency", default_value="30.0", description="Control loop frequency (Hz)"
     )
 
-    model_type_arg = DeclareLaunchArgument(
-        "model_type", default_value="act", description="Model type (act, diffusion, or smolvla)"
+    deterministic_arg = DeclareLaunchArgument(
+        "deterministic", default_value="false", description="Enable deterministic mode"
     )
 
-    max_position_delta_arg = DeclareLaunchArgument(
-        "max_position_delta",
-        default_value="0.01",
-        description="Max position delta per step in radians (safety limit)",
-    )
-
-    use_amp_arg = DeclareLaunchArgument(
-        "use_amp", default_value="false", description="Automatic Mixed Precision"
-    )
-
-    clip_actions_arg = DeclareLaunchArgument(
-        "clip_actions", default_value="true", description="Clip actions to training bounds"
-    )
-
-    throttle_action_logs_arg = DeclareLaunchArgument(
-        "throttle_action_logs", default_value="true", description="Throttle action logging"
-    )
-
-    throttle_duration_arg = DeclareLaunchArgument(
-        "throttle_duration", default_value="5.0", description="Log throttle duration in seconds"
+    deterministic_seed_arg = DeclareLaunchArgument(
+        "deterministic_seed", default_value="42", description="Random seed for deterministic mode"
     )
 
     monitor_only_arg = DeclareLaunchArgument(
@@ -78,12 +60,8 @@ def generate_launch_description():
                 "config_file": LaunchConfiguration("config_file"),
                 "control_frequency": LaunchConfiguration("control_frequency"),
                 "device": LaunchConfiguration("device"),
-                "model_type": LaunchConfiguration("model_type"),
-                "max_position_delta": LaunchConfiguration("max_position_delta"),
-                "use_amp": LaunchConfiguration("use_amp"),
-                "clip_actions": LaunchConfiguration("clip_actions"),
-                "throttle_action_logs": LaunchConfiguration("throttle_action_logs"),
-                "throttle_duration": LaunchConfiguration("throttle_duration"),
+                "deterministic": LaunchConfiguration("deterministic"),
+                "deterministic_seed": LaunchConfiguration("deterministic_seed"),
                 "monitor_only": LaunchConfiguration("monitor_only"),
             }
         ],
@@ -95,12 +73,8 @@ def generate_launch_description():
             config_file_arg,
             device_arg,
             control_freq_arg,
-            model_type_arg,
-            max_position_delta_arg,
-            use_amp_arg,
-            clip_actions_arg,
-            throttle_action_logs_arg,
-            throttle_duration_arg,
+            deterministic_arg,
+            deterministic_seed_arg,
             monitor_only_arg,
             inference_node,
         ]
