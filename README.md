@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.12+-yellow?style=flat-square&logo=python&logoColor=white" alt="Python" /></a>
   <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-22314E?style=flat-square&logo=ros&logoColor=white" alt="ROS2" /></a>
-  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.4.4-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
+  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.5.0-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
 </p>
 
 ---
@@ -38,7 +38,7 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | **0. Data Collection** | Record teleoperation demos as ROS2 MCAP files through[ Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). |
 | **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets                                                                 |
-| **2. Model Training**  | Train ACT, SmolVLA, or other policies via LeRobot                                                                |
+| **2. Model Training**  | Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies via LeRobot v0.5.0                                        |
 | **3. Run Inference**   | Deploy trained models on a GPU PC via ROS2 CycloneDDS                                                            |
 
 > **Don't have data yet?** The [Anvil OpenARM Quest Teleop Kit](https://shop.anvil.bot/products/openarm-quest-teleop-kit) gives you everything you need to start collecting teleoperation demonstrations out of the box — robot hardware, cameras, control software, and recording tools included. See our [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
@@ -71,6 +71,8 @@ ACT and Diffusion are included in the base install. For other policies:
 uv sync --all-packages --extra smolvla
 uv sync --all-packages --extra smolvla --extra pi   # multiple
 ```
+
+> **GPU / CUDA note:** The root `pyproject.toml` pins torch to the PyTorch `cu128` index so `uv sync` always installs the CUDA-enabled build. If your machine runs a different CUDA driver version, change `pytorch-cu128` → `pytorch-cu126` (or `cu124`) in `pyproject.toml` before syncing. SmolVLA and Pi-series models also require a HuggingFace account with access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once before training.
 
 ### 0. Data Collection
 
@@ -124,7 +126,7 @@ Optional flags:
 
 **Training SmolVLA with a task description:**
 
-SmolVLA is language-conditioned — it requires a task description to understand what the robot should do. Pass the same string at both training and inference:
+SmolVLA is language-conditioned — it requires a task description. Pass the same string at both training and inference:
 
 ```bash
 uv run anvil-trainer \
@@ -138,7 +140,38 @@ uv run anvil-trainer \
   --eval_freq=0
 ```
 
-Then mirror the same string in `configs/lerobot_control/inference_default.yaml`:
+**Training Pi0 / Pi0.5:**
+
+Pi0 and Pi0.5 use a PaliGemma-3B backbone (requires HuggingFace access to `google/paligemma-3b-pt-224`). Train only the action expert to reduce GPU memory:
+
+```bash
+# Pi0
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=pi0 \
+  --policy.push_to_hub=false \
+  --policy.train_expert_only=true \
+  --job_name=grabbing-pi0 \
+  --task-description="Grab the gray doll and put it in the bucket"
+
+# Pi0.5
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=pi05 \
+  --policy.push_to_hub=false \
+  --policy.train_expert_only=true \
+  --policy.dtype=bfloat16 \
+  --batch_size=1 \
+  --num_workers=0 \
+  --job_name=grabbing-pi05 \
+  --task-description="Grab the gray doll and put it in the bucket"
+```
+
+> Pi0.5 (4B params) requires `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU.
+
+Mirror the task description in `configs/lerobot_control/inference_default.yaml`:
 
 ```yaml
 model:
@@ -259,6 +292,15 @@ anvil-embodied-ai/
 - Set a specific task description via `--task-description` — it matters
 - Set `--eval_freq=0` (no live env available)
 - 30k–50k steps is usually enough from a pretrained base
+
+**Pi0 (TL;DR)**
+- Use `--policy.train_expert_only=true` to freeze the PaliGemma backbone — faster and enough for most tasks
+- Always pass `--task-description` — Pi0 is language-conditioned
+- Requires HuggingFace access to `google/paligemma-3b-pt-224`
+
+**Pi0.5 (TL;DR)**
+- Same as Pi0 but 4B params — always add `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU
+- `bfloat16` is required to fit in VRAM; `num_workers=0` prevents CPU RAM OOM during model load
 
 **MODEL_PATH gotcha**
 

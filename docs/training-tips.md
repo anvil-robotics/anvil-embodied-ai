@@ -224,3 +224,65 @@ differs significantly from the pretrained data.
 SmolVLA converges faster than ACT from a pretrained base. 30k–50k steps is
 often sufficient. The default scheduler decays over 30k steps
 (`scheduler_decay_steps=30000`) which aligns well with this range.
+
+---
+
+## Pi0
+
+Pi0 uses a PaliGemma-3B backbone with a flow-matching action expert. It requires
+HuggingFace access to `google/paligemma-3b-pt-224`.
+
+### Train expert only
+
+For most tasks, freeze the PaliGemma backbone and train only the action expert.
+This reduces GPU memory usage and converges faster:
+
+```bash
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=pi0 \
+  --policy.push_to_hub=false \
+  --policy.train_expert_only=true \
+  --job_name=grabbing-pi0 \
+  --task-description="pick up the red block"
+```
+
+### Task description
+
+Pi0 is language-conditioned. Always pass `--task-description` at training and
+mirror it in the inference YAML — the same string must be used at both stages.
+
+### Steps
+
+20k–50k steps from scratch is a reasonable range. Pi0 is a flow-matching model
+so it benefits from consistent demonstrations more than raw episode count.
+
+---
+
+## Pi0.5
+
+Pi0.5 is a larger variant (~4B params, vs Pi0's ~3B). The training flags are
+identical to Pi0 but GPU memory requirements are higher.
+
+### Required flags on a 24 GB GPU
+
+```bash
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=pi05 \
+  --policy.push_to_hub=false \
+  --policy.train_expert_only=true \
+  --policy.dtype=bfloat16 \
+  --batch_size=1 \
+  --num_workers=0 \
+  --job_name=grabbing-pi05 \
+  --task-description="pick up the red block"
+```
+
+| Flag | Why |
+|---|---|
+| `--policy.dtype=bfloat16` | Halves VRAM usage — required to fit 4B model on 24 GB |
+| `--batch_size=1` | Avoids VRAM OOM during forward pass |
+| `--num_workers=0` | Prevents CPU RAM OOM — model load forks worker processes which each copy parent memory |

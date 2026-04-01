@@ -11,7 +11,7 @@
 # Model
 # -----------------------------------------------------------------------------
 model:
-  # VLA task prompt — SmolVLA only, ignored for ACT/Diffusion
+  # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion
   task_description: "Use right arm to pick up the black doll, switch to left arm, and place it in the bucket."
 
   # use_delta_actions: read automatically from anvil_config.json in the checkpoint.
