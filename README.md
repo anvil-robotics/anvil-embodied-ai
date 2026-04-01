@@ -102,7 +102,40 @@ Expected output: 5 checks (load, info, features, read, batch) all showing `[OK]`
 
 ### 2. Model Training
 
-Train a policy on the converted dataset:
+Supported policies:
+
+| Policy | `--policy.type` | Notes |
+|--------|----------------|-------|
+| ACT | `act` | Action Chunking Transformer — fast, reliable |
+| Diffusion | `diffusion` | Diffusion Policy — smooth, multimodal |
+| SmolVLA | `smolvla` | Language-conditioned VLA; requires task description |
+| Pi0 | `pi0` | Flow-matching VLA; PaliGemma-3B backbone |
+| Pi0.5 | `pi05` | Larger Pi0 variant (~4B params); higher VRAM |
+
+Checkpoints are saved to `model_zoo/<job_name>/`. Run `anvil-trainer --help` for the full flag reference.
+
+#### Common Parameters
+
+| Flag | Description |
+|------|-------------|
+| `--dataset.root=PATH` | Path to converted LeRobot dataset |
+| `--policy.type=TYPE` | Policy type (see table above) |
+| `--job_name=NAME` | Run name; auto-generated if omitted |
+| `--camera-filter=chest,waist` | Train with a subset of cameras |
+| `--task-description="..."` | Task prompt — required for SmolVLA / Pi0 / Pi0.5 |
+
+#### Common Hyperparameters
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--steps=100000` | 100k | Total training steps |
+| `--batch_size=8` | 8 | Reduce if GPU OOM |
+| `--save_freq=10000` | 10k | Checkpoint interval |
+| `--use-delta-actions` | off | Relative actions (target − state) |
+| `--wandb.enable=true` | off | Stream metrics to W&B |
+| `--resume=true` | off | Resume from `--output_dir` checkpoint |
+
+#### [ACT](docs/training-tips.md#act)
 
 ```bash
 uv run anvil-trainer \
@@ -112,21 +145,19 @@ uv run anvil-trainer \
   --job_name=pick-and-place
 ```
 
-Checkpoints are saved to `model_zoo/<job_name>/` by default. Run `anvil-trainer --help` for the full flag reference.
+#### [Diffusion](docs/training-tips.md#diffusion-policy)
 
-Optional flags:
+```bash
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=diffusion \
+  --job_name=pick-and-place
+```
 
-- `--job_name=NAME` — run name; auto-generated from policy + timestamp if omitted
-- `--task-description="..."` — task prompt for SmolVLA (see below)
-- `--camera-filter=chest,waist` — train with a subset of cameras
-- `--use-delta-actions` — convert actions to relative (action - state)
-- `--steps=100000` — total training steps (default 100k)
-- `--batch_size=8` — adjust based on GPU memory
-- `--save_freq=10000` — save a checkpoint every N steps
+#### [SmolVLA](docs/training-tips.md#smolvla)
 
-**Training SmolVLA with a task description:**
-
-SmolVLA is language-conditioned — it requires a task description. Pass the same string at both training and inference:
+Language-conditioned — always pass `--task-description` and `--policy.pretrained_path`. Mirror the same description in the inference YAML.
 
 ```bash
 uv run anvil-trainer \
@@ -135,35 +166,37 @@ uv run anvil-trainer \
   --policy.type=smolvla \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
-  --job_name=grabbing-w1 \
+  --job_name=grabbing-smolvla \
   --task-description="Grab the gray doll and put it in the bucket" \
   --eval_freq=0
 ```
 
-**Training Pi0 / Pi0.5:**
+#### [Pi0](docs/training-tips.md#pi0)
 
-Pi0 and Pi0.5 use a PaliGemma-3B backbone (requires HuggingFace access to `google/paligemma-3b-pt-224`). Train only the action expert to reduce GPU memory:
+Requires HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once first.
 
 ```bash
-# Pi0
 uv run anvil-trainer \
   --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi0 \
-  --policy.push_to_hub=false \
   --policy.pretrained_path=lerobot/pi0_base \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
   --job_name=grabbing-pi0 \
   --task-description="Grab the gray doll and put it in the bucket"
+```
 
-# Pi0.5
+#### [Pi0.5](docs/training-tips.md#pi05)
+
+Same as Pi0 but ~4B params. Requires `bfloat16 + batch_size=1 + num_workers=0` on a 24 GB GPU. Also requires `normalization_mapping` because mcap-convert datasets don't include quantile stats.
+
+```bash
 uv run anvil-trainer \
   --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi05 \
-  --policy.push_to_hub=false \
   --policy.pretrained_path=lerobot/pi05_base \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
@@ -175,24 +208,18 @@ uv run anvil-trainer \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
 
-> Pi0.5 (4B params) requires `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU.
-> The `normalization_mapping` override is needed because mcap-convert datasets don't include quantile stats — see [training tips](docs/training-tips.md#pi05) for details.
-
-Mirror the task description in `configs/lerobot_control/inference_default.yaml`:
+After training SmolVLA / Pi0 / Pi0.5, mirror the task description in `configs/lerobot_control/inference_default.yaml`:
 
 ```yaml
 model:
   task_description: "Grab the gray doll and put it in the bucket"
 ```
 
-
-**Visualizing training progress with Weights & Biases:**
+#### Weights & Biases
 
 ```bash
-# Login once
-uv run wandb login
+uv run wandb login   # one-time setup
 
-# Train with W&B enabled
 uv run anvil-trainer \
   --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
@@ -202,15 +229,13 @@ uv run anvil-trainer \
   --wandb.project=my-project
 ```
 
-Loss curves, action prediction visualizations, and eval metrics are streamed live to [wandb.ai](https://wandb.ai).
-
-To resume a stopped or interrupted run:
+#### Resume a run
 
 ```bash
 uv run anvil-trainer --resume=true --output_dir=model_zoo/pick-and-place
 ```
 
-LeRobot will pick up from the latest checkpoint. Only pass `--resume=true` and `--output_dir` — all other settings are restored from the saved `train_config.json`.
+Only pass `--resume=true` and `--output_dir` — all other settings are restored from the saved `train_config.json`.
 
 ### 3. Run Inference
 

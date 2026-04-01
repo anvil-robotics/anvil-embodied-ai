@@ -152,6 +152,32 @@ batch size if GPU memory allows — it stabilizes training.
 
 ---
 
+## Diffusion Policy
+
+### Overview
+
+Diffusion Policy models the action distribution as a denoising diffusion process. It handles multimodal action distributions well and produces smooth, natural motions without explicit chunking tuning.
+
+### Training command
+
+```bash
+uv run anvil-trainer \
+  --dataset.repo_id=local \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=diffusion \
+  --job_name=pick-and-place
+```
+
+### Steps
+
+100k steps with batch size 64 is a solid default. Diffusion models generally benefit from larger batch sizes when GPU memory allows — this reduces the variance of the score-matching objective.
+
+### n_action_steps
+
+At inference, Diffusion Policy executes the full predicted chunk by default. If motion feels jerky, lower `n_action_steps` via the inference YAML — no retraining needed.
+
+---
+
 ## SmolVLA
 
 ### Always start from pretrained weights
