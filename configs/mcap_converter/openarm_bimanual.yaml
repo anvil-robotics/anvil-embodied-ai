@@ -61,7 +61,7 @@ camera_topic_mapping:
   "/cam_wrist_l/image_raw/compressed": "wrist_l"
 
 # Target image resolution [width, height]
-image_resolution: [1920, 1080]
+image_resolution: [640, 480]
 
 
 # =============================================================================

@@ -65,9 +65,7 @@ ACT and Diffusion are included in the base install. For other policies:
 | Extra | Policy |
 |---|---|
 | `smolvla` | SmolVLA |
-| `pi` | Pi0 / Pi0.5 / Pi0Fast |
-| `groot` | GROOT 1.5 (Linux/CUDA only) |
-| `xvla` | X-VLA |
+| `pi` | Pi0 / Pi0.5 |
 
 ```bash
 uv sync --all-packages --extra smolvla

@@ -86,8 +86,8 @@ class ModelLoader:
         Args:
             model_path: Path to model checkpoint directory
             device: Device for inference ("cuda" or "cpu")
-            model_type: Model type ("act", "diffusion", "smolvla", "pi0", "pi0_fast",
-                        "groot", "xvla"). None = auto-detect from config.json.
+            model_type: Model type ("act", "diffusion", "smolvla", "pi0", "pi05").
+                        None = auto-detect from config.json.
             logger: Optional ROS2 logger
             deterministic: If True, enable deterministic mode
             seed: Random seed for deterministic mode
@@ -194,18 +194,6 @@ class ModelLoader:
                 from lerobot.policies.pi0.modeling_pi0 import PI0Policy
 
                 model = PI0Policy.from_pretrained(str(self.model_path))
-            elif self.model_type == "pi0_fast":
-                from lerobot.policies.pi0_fast.modeling_pi0_fast import PI0FastPolicy
-
-                model = PI0FastPolicy.from_pretrained(str(self.model_path))
-            elif self.model_type == "groot":
-                from lerobot.policies.groot.modeling_groot import GrootPolicy
-
-                model = GrootPolicy.from_pretrained(str(self.model_path))
-            elif self.model_type == "xvla":
-                from lerobot.policies.xvla.modeling_xvla import XVLAPolicy
-
-                model = XVLAPolicy.from_pretrained(str(self.model_path))
             else:
                 raise ValueError(f"Unsupported model type: {self.model_type}")
 

@@ -255,7 +255,7 @@ class LeRobotInferenceNode(Node):
         # Confirm final model_type (ModelLoader auto-detects if None was passed)
         self.model_type = loader.model_type
 
-        if self.model_type in {"smolvla", "pi0", "pi0_fast", "groot", "xvla"} and not self.task_description:
+        if self.model_type in {"smolvla", "pi0", "pi05"} and not self.task_description:
             self.get_logger().warn(
                 f"{self.model_type} has no task_description — re-train with --task-description "
                 "or set model.task_description in the inference YAML."
@@ -273,7 +273,7 @@ class LeRobotInferenceNode(Node):
             logger.info(f"Model:      {self.model_path}")
             logger.info(f"Type:       {self.model_type or 'unknown'}")
             logger.info(f"Delta acts: {self.use_delta_actions}")
-            if self.model_type in {"smolvla", "pi0", "pi0_fast", "groot", "xvla"}:
+            if self.model_type in {"smolvla", "pi0", "pi05"}:
                 logger.info(f"Task:       '{self.task_description}'")
         logger.info(f"Device:     {self.device}")
         logger.info(f"Frequency:  {self.control_freq} Hz")
@@ -339,7 +339,7 @@ class LeRobotInferenceNode(Node):
         try:
             # Preprocess observation
             if self.preprocessor:
-                if self.model_type in {"smolvla", "pi0", "pi0_fast", "groot", "xvla"} and self.task_description:
+                if self.model_type in {"smolvla", "pi0", "pi05"} and self.task_description:
                     # VLA-family policies need 'task' in complementary_data for tokenization
                     # Use full transition processing instead of just process_observation
                     from lerobot.processor.converters import create_transition
