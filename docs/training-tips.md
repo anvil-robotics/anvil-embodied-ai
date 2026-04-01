@@ -23,7 +23,6 @@ LeRobot uses [Weights & Biases](https://wandb.ai) for training monitoring. Enabl
 uv run wandb login   # one-time setup
 
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
   --job_name=grabbing-w1 \
@@ -126,7 +125,6 @@ to ablate which cameras matter most for your task:
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
   --job_name=grabbing-w1 \
@@ -162,7 +160,6 @@ Diffusion Policy models the action distribution as a denoising diffusion process
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
   --job_name=pick-and-place
@@ -193,7 +190,6 @@ Always fine-tune from `lerobot/smolvla_base` rather than training from scratch:
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=smolvla \
   --policy.pretrained_path=lerobot/smolvla_base \
@@ -214,7 +210,6 @@ so every sample gets the same instruction:
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=smolvla \
   --job_name=grabbing-w1 \
@@ -271,7 +266,6 @@ Fine-tune from `lerobot/pi0_base` rather than training from scratch:
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi0 \
   --policy.push_to_hub=false \
@@ -326,7 +320,6 @@ are higher.
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi05 \
   --policy.push_to_hub=false \

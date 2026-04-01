@@ -139,7 +139,6 @@ Checkpoints are saved to `model_zoo/<job_name>/`. Run `anvil-trainer --help` for
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
   --job_name=pick-and-place
@@ -149,7 +148,6 @@ uv run anvil-trainer \
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
   --job_name=pick-and-place
@@ -161,7 +159,6 @@ Language-conditioned — always pass `--task-description` and `--policy.pretrain
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=smolvla \
   --policy.pretrained_path=lerobot/smolvla_base \
@@ -177,7 +174,6 @@ Requires HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi0 \
   --policy.pretrained_path=lerobot/pi0_base \
@@ -194,7 +190,6 @@ Same as Pi0 but ~4B params. Requires `bfloat16 + batch_size=1 + num_workers=0` o
 
 ```bash
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi05 \
   --policy.pretrained_path=lerobot/pi05_base \
@@ -221,7 +216,6 @@ model:
 uv run wandb login   # one-time setup
 
 uv run anvil-trainer \
-  --dataset.repo_id=local \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
   --job_name=grabbing-w1 \

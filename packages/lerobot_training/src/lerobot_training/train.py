@@ -119,6 +119,10 @@ class TrainingConfig:
         if not any(arg.startswith("--policy.push_to_hub") for arg in sys.argv):
             sys.argv.append("--policy.push_to_hub=false")
 
+        # Default dataset.repo_id=local for local dataset training
+        if not any(arg.startswith("--dataset.repo_id") for arg in sys.argv):
+            sys.argv.append("--dataset.repo_id=local")
+
         # Try to extract dataset root from args for validation
         dataset_root = None
         for arg in sys.argv:
@@ -501,16 +505,16 @@ anvil-trainer — LeRobot training with Anvil customizations
 Examples:
 
   # Train ACT (basic)
-  anvil-trainer --dataset.repo_id=local --dataset.root=data/datasets/my-dataset \\
+  anvil-trainer --dataset.root=data/datasets/my-dataset \\
     --policy.type=act --job_name=grabbing-w1
 
   # Train SmolVLA with task description
-  anvil-trainer --dataset.repo_id=local --dataset.root=data/datasets/my-dataset \\
+  anvil-trainer --dataset.root=data/datasets/my-dataset \\
     --policy.type=smolvla --job_name=grabbing-w1 \\
     --task-description="Grab the gray doll and put it in the bucket"
 
   # Train with delta actions and camera subset
-  anvil-trainer --dataset.repo_id=local --dataset.root=data/datasets/my-dataset \\
+  anvil-trainer --dataset.root=data/datasets/my-dataset \\
     --policy.type=act --job_name=grabbing-w1 \\
     --camera-filter=chest,waist --use-delta-actions
 
