@@ -169,7 +169,7 @@ uv run anvil-trainer \
 
 #### Pi Series ([Pi0](docs/training-tips.md#pi0) / [Pi0.5](docs/training-tips.md#pi05))
 
-Pi0 and Pi0.5 are flow-matching VLA policies from [Physical Intelligence](https://github.com/Physical-Intelligence/openpi), built on a PaliGemma-3B backbone. Both require HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once first.
+Pi0 and Pi0.5 are flow-matching VLA policies from [Physical Intelligence](https://github.com/Physical-Intelligence/openpi), built on a PaliGemma-3B backbone. Both require HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once first. Use `--policy.train_expert_only=true` to freeze the backbone and train only the action expert — lower memory, faster convergence, and sufficient for most tasks.
 
 **Pi0**
 
@@ -321,7 +321,6 @@ anvil-embodied-ai/
 
 **Pi Series — Pi0 / Pi0.5 (TL;DR)** ([openpi](https://github.com/Physical-Intelligence/openpi))
 - Both require HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once
-- Use `--policy.train_expert_only=true` to freeze the PaliGemma backbone — faster and enough for most tasks
 - Always pass `--task-description` — Pi series is language-conditioned
 - Pi0.5 (4B params) additionally needs `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU
 
