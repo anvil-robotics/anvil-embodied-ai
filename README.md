@@ -336,6 +336,7 @@ anvil-embodied-ai/
 - Both require HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once
 - Always pass `--task-description` — Pi series is language-conditioned
 - Pi0.5 (4B params) additionally needs `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU
+- Pi0.5 requires quantile stats in `stats.json` — mcap-convert datasets don't include them. Use `--policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'` (recommended), or run `augment_dataset_quantile_stats` to compute them in-place (**backs up your dataset first** — it modifies in-place). See [Pi0.5 normalization](docs/training-tips.md#normalization-mapping) for details.
 
 **MODEL_PATH gotcha**
 
