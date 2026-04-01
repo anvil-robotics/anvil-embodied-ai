@@ -380,15 +380,23 @@ uv run anvil-trainer \
 
 ### Normalization mapping
 
-Pi0.5 expects datasets with **quantile statistics** pre-computed. If your dataset
-was converted with `mcap-convert` (which stores raw float32 values without quantile
-stats), use `MEAN_STD` normalization instead:
+Pi0.5's default normalization is `QUANTILE10`, which requires `stats.json` to contain pre-computed quantile fields (`q01` / `q99`). Datasets converted with `mcap-convert` do not include these — only `mean`, `std`, `min`, and `max` are written.
+
+There are two ways to resolve this:
+
+**Option A — Override normalization (recommended for Anvil datasets)**
+
+Pass `MEAN_STD` for actions and states, which uses the existing mean/std stats:
 
 ```bash
---policy.normalization_mapping='{"ACTION": "MEAN_STD", "STATE": "MEAN_STD", "VISUAL": "IDENTITY"}'
+--policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'
 ```
 
-Alternatively, augment your dataset with quantile stats in-place:
+This is the approach shown in the training command above and requires no changes to your dataset.
+
+**Option B — Augment the dataset with quantile stats**
+
+Computes and writes quantile fields directly into the dataset's `stats.json`:
 
 ```bash
 uv run python -c "
@@ -397,5 +405,11 @@ main()
 " -- --repo-id=local/your-dataset
 ```
 
-> If neither is done, Pi0.5 may fail or produce poor results because its default
-> `QUANTILE10` normalization requires the quantile fields to exist in `stats.json`.
+> **Warning: this modifies the dataset in-place.** Back up your dataset before running:
+> ```bash
+> cp -r data/datasets/my-dataset data/datasets/my-dataset.bak
+> ```
+
+After augmentation, you can use the default `QUANTILE10` normalization and omit `--policy.normalization_mapping`.
+
+Option A is simpler and sufficient for most tasks. Choose Option B only if you need to reproduce results that rely specifically on quantile normalization.
