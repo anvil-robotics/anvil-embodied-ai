@@ -72,7 +72,7 @@ uv sync --all-packages --extra smolvla
 uv sync --all-packages --extra smolvla --extra pi   # multiple
 ```
 
-> **GPU / CUDA note:** The root `pyproject.toml` pins torch to the PyTorch `cu128` index so `uv sync` always installs the CUDA-enabled build. If your machine runs a different CUDA driver version, change `pytorch-cu128` → `pytorch-cu126` (or `cu124`) in `pyproject.toml` before syncing. SmolVLA and Pi-series models also require a HuggingFace account with access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once before training.
+> **GPU / CUDA note:** The root `pyproject.toml` pins torch to the PyTorch `cu128` index so `uv sync` always installs the CUDA-enabled build. If your machine runs a different CUDA driver version, change `pytorch-cu128` → `pytorch-cu126` (or `cu124`) in `pyproject.toml` before syncing.
 
 ### 0. Data Collection
 
@@ -167,9 +167,11 @@ uv run anvil-trainer \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
 
-#### [Pi0](docs/training-tips.md#pi0)
+#### Pi Series ([Pi0](docs/training-tips.md#pi0) / [Pi0.5](docs/training-tips.md#pi05))
 
-Requires HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once first.
+Pi0 and Pi0.5 are flow-matching VLA policies from [Physical Intelligence](https://github.com/Physical-Intelligence/openpi), built on a PaliGemma-3B backbone. Both require HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once first.
+
+**Pi0**
 
 ```bash
 uv run anvil-trainer \
@@ -183,7 +185,7 @@ uv run anvil-trainer \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
 
-#### [Pi0.5](docs/training-tips.md#pi05)
+**Pi0.5**
 
 Same as Pi0 but ~4B params. Requires `bfloat16 + batch_size=1 + num_workers=0` on a 24 GB GPU. Also requires `normalization_mapping` because mcap-convert datasets don't include quantile stats.
 
@@ -317,14 +319,11 @@ anvil-embodied-ai/
 - Set a specific task description via `--task-description` — it matters
 - 30k–50k steps is usually enough from a pretrained base
 
-**Pi0 (TL;DR)**
+**Pi Series — Pi0 / Pi0.5 (TL;DR)** ([openpi](https://github.com/Physical-Intelligence/openpi))
+- Both require HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once
 - Use `--policy.train_expert_only=true` to freeze the PaliGemma backbone — faster and enough for most tasks
-- Always pass `--task-description` — Pi0 is language-conditioned
-- Requires HuggingFace access to `google/paligemma-3b-pt-224`
-
-**Pi0.5 (TL;DR)**
-- Same as Pi0 but 4B params — always add `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU
-- `bfloat16` is required to fit in VRAM; `num_workers=0` prevents CPU RAM OOM during model load
+- Always pass `--task-description` — Pi series is language-conditioned
+- Pi0.5 (4B params) additionally needs `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU
 
 **MODEL_PATH gotcha**
 
