@@ -132,6 +132,7 @@ Checkpoints are saved to `model_zoo/<job_name>/`. Run `anvil-trainer --help` for
 | `--batch_size=8` | 8 | Reduce if GPU OOM |
 | `--save_freq=10000` | 10k | Checkpoint interval |
 | `--use-delta-actions` | off | Relative actions (target − state) |
+| `--policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'` | policy default | Override normalization — required for mcap-convert datasets with Pi0.5; safe to add for all models |
 | `--wandb.enable=true` | off | Stream metrics to W&B |
 | `--resume=true` | off | Resume from `--output_dir` checkpoint |
 
@@ -141,6 +142,7 @@ Checkpoints are saved to `model_zoo/<job_name>/`. Run `anvil-trainer --help` for
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=pick-and-place
 ```
 
@@ -152,6 +154,7 @@ Good at tasks with multimodal action distributions (e.g. the robot can complete 
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=pick-and-place
 ```
 
@@ -165,6 +168,7 @@ uv run anvil-trainer \
   --policy.type=smolvla \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=grabbing-smolvla \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
@@ -183,6 +187,7 @@ uv run anvil-trainer \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=grabbing-pi0 \
   --task-description="Grab the gray doll and put it in the bucket"
 ```

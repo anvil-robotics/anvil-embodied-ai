@@ -177,6 +177,7 @@ Trade-off: inference is slower than ACT because each step requires running a den
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=pick-and-place
 ```
 
@@ -233,6 +234,7 @@ uv run anvil-trainer \
   --policy.type=smolvla \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=grabbing-w1
 ```
 
@@ -250,6 +252,7 @@ so every sample gets the same instruction:
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=smolvla \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=grabbing-w1 \
   --task-description="pick up the red block and stack it on the blue block"
 ```
@@ -304,6 +307,7 @@ uv run anvil-trainer \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
   --policy.freeze_vision_encoder=false \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=grabbing-pi0 \
   --task-description="pick up the red block"
 ```
@@ -358,6 +362,7 @@ uv run anvil-trainer \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
   --policy.freeze_vision_encoder=false \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --batch_size=1 \
   --num_workers=0 \
   --job_name=grabbing-pi05 \
