@@ -127,6 +127,10 @@ class TrainingConfig:
         if not any(arg.startswith("--eval_freq") for arg in sys.argv):
             sys.argv.append("--eval_freq=0")
 
+        # Default wandb project to "anvil"
+        if not any(arg.startswith("--wandb.project") for arg in sys.argv):
+            sys.argv.append("--wandb.project=anvil")
+
         # Try to extract dataset root from args for validation
         dataset_root = None
         for arg in sys.argv:

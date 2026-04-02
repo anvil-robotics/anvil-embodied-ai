@@ -10,6 +10,7 @@
 | `--policy.push_to_hub` | `false` | Prevents accidental upload of checkpoints to HuggingFace Hub |
 | `--eval_freq` | `0` | LeRobot's default (20 000 steps) would attempt to launch a gym simulation environment, which doesn't exist for Anvil MCAP datasets |
 | `--output_dir` | `model_zoo/<job_name>` | Resolved from `--job_name`; auto-generated from policy type + timestamp if omitted |
+| `--wandb.project` | `anvil` | Default W&B project name — all runs land in the same project; `--job_name` becomes the run name |
 
 Any of these can be overridden by passing the flag explicitly.
 
