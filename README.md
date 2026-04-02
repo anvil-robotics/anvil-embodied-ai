@@ -134,10 +134,26 @@ Checkpoints are saved to `model_zoo/<job_name>/`. Run `anvil-trainer --help` for
 | `--save_freq=10000` | 10k | Checkpoint interval |
 | `--use-delta-actions` | off | Relative actions (target − state) |
 | `--policy.normalization_mapping='{...}'` | policy default | e.g. `{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}`<br><br>Keys:<br>`ACTION` · `STATE` · `VISUAL`<br>Values:<br>`MEAN_STD`   — normalise by μ/σ<br>`MIN_MAX`    — normalise to [0,1]<br>`QUANTILE10` — normalise by p10/p90 (Pi0.5 default; requires quantile stats\*)<br>`IDENTITY`   — passthrough (always use for images)<br><br>mcap-convert datasets lack quantile stats — use `MEAN_STD` for `ACTION`/`STATE`. |
-| `--wandb.enable=true` | off | Stream metrics to W&B |
 | `--resume=true` | off | Resume from `--output_dir` checkpoint |
 
 \* quantile stats (`q01`/`q99`) are not produced by `mcap-convert`. See [Pi0.5 — Normalization mapping](docs/training-tips.md#normalization-mapping) for how to add them or switch normalization method.
+
+#### Weights & Biases
+
+[Weights & Biases](https://wandb.ai) streams training metrics in real time — useful for tracking loss curves, gradient norms, and comparing runs. One-time setup:
+
+```bash
+uv run wandb login
+```
+
+Then add to any training command:
+
+| Flag | Description |
+|---|---|
+| `--wandb.enable=true` | Enable W&B logging (default: `false`) |
+| `--wandb.project=NAME` | W&B project name — `--job_name` becomes the run name within it |
+
+Key metrics: `train/loss` (should decrease steadily), `train/grad_norm` (spikes indicate instability — try lowering LR). All sample commands below include `--wandb.enable=false` — flip to `true` to start logging.
 
 #### [ACT](docs/training-tips.md#act)
 
@@ -146,6 +162,7 @@ uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --wandb.enable=false \  # set true to save training logs to W&B
   --job_name=pick-and-place
 ```
 
@@ -158,6 +175,7 @@ uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --wandb.enable=false \  # set true to save training logs to W&B
   --job_name=pick-and-place
 ```
 
@@ -172,13 +190,23 @@ uv run anvil-trainer \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --wandb.enable=false \  # set true to save training logs to W&B
   --job_name=grabbing-smolvla \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
 
 #### Pi Series ([Pi0](docs/training-tips.md#pi0) / [Pi0.5](docs/training-tips.md#pi05))
 
-Pi0 and Pi0.5 are flow-matching VLA policies from [Physical Intelligence](https://github.com/Physical-Intelligence/openpi), built on a PaliGemma-3B backbone. Both require HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once first. Use `--policy.train_expert_only=true` to freeze the backbone and train only the action expert — lower memory, faster convergence, and sufficient for most tasks.
+Pi0 and Pi0.5 are flow-matching VLA policies from [Physical Intelligence](https://github.com/Physical-Intelligence/openpi), built on a PaliGemma-3B backbone. Both require HuggingFace access to [`google/paligemma-3b-pt-224`](https://huggingface.co/google/paligemma-3b-pt-224) (request access on the model page) — then run [`huggingface-hub login`](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-login) once to authenticate.
+
+Key flags for both models:
+
+| Flag | Recommendation |
+|---|---|
+| `--policy.train_expert_only=true` | Freeze backbone, train only action expert — lower memory, faster convergence, sufficient for most tasks |
+| `--policy.compile_model=true` | Enables `torch.compile` for ~10–20% throughput gain on the denoising loop (one-time compilation cost on first forward pass) |
+| `--policy.gradient_checkpointing=true` | Reduces VRAM during backprop — always enable |
+| `--policy.dtype=bfloat16` | Halves VRAM — required for Pi0.5 on a 24 GB GPU |
 
 **Pi0**
 
@@ -187,29 +215,33 @@ uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi0 \
   --policy.pretrained_path=lerobot/pi0_base \
+  --policy.compile_model=true \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --wandb.enable=false \  # set true to save training logs to W&B
   --job_name=grabbing-pi0 \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
 
 **Pi0.5**
 
-Same as Pi0 but ~4B params. Requires `bfloat16 + batch_size=1 + num_workers=0` on a 24 GB GPU. Also requires `normalization_mapping` because mcap-convert datasets don't include quantile stats.
+Same as Pi0 but ~4B params. Requires `--num_workers=0` to prevent CPU RAM OOM from forked workers copying the full model. Use `--batch_size=16` as a starting point — reduce if GPU OOM.
 
 ```bash
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi05 \
   --policy.pretrained_path=lerobot/pi05_base \
+  --policy.compile_model=true \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --batch_size=1 \
+  --batch_size=16 \
   --num_workers=0 \
+  --wandb.enable=false \  # set true to save training logs to W&B
   --job_name=grabbing-pi05 \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
@@ -219,19 +251,6 @@ After training SmolVLA / Pi0 / Pi0.5, mirror the task description in `configs/le
 ```yaml
 model:
   task_description: "Grab the gray doll and put it in the bucket"
-```
-
-#### Weights & Biases
-
-```bash
-uv run wandb login   # one-time setup
-
-uv run anvil-trainer \
-  --dataset.root=data/datasets/my-dataset \
-  --policy.type=act \
-  --job_name=grabbing-w1 \
-  --wandb.enable=true \
-  --wandb.project=my-project
 ```
 
 #### Resume a run

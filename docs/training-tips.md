@@ -42,8 +42,10 @@ uv run anvil-trainer \
   --policy.type=act \
   --job_name=grabbing-w1 \
   --wandb.enable=true \
-  --wandb.project=my-project
+  --wandb.project=anvil
 ```
+
+**`--job_name` becomes the W&B run name.** LeRobot passes `job_name` directly to `wandb.init(name=job_name)`, so each training run appears in the W&B dashboard under its job name. Set `--wandb.project` to group runs from the same robot/task together.
 
 Key metrics to watch on the W&B dashboard:
 
@@ -363,7 +365,7 @@ uv run anvil-trainer \
   --policy.train_expert_only=true \
   --policy.freeze_vision_encoder=false \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --batch_size=1 \
+  --batch_size=16 \
   --num_workers=0 \
   --job_name=grabbing-pi05 \
   --task-description="pick up the red block"
@@ -375,7 +377,7 @@ uv run anvil-trainer \
 |---|---|
 | `--policy.dtype=bfloat16` | Halves VRAM — required to fit 4B model on 24 GB |
 | `--policy.gradient_checkpointing=true` | Further reduces VRAM during backprop |
-| `--batch_size=1` | Avoids VRAM OOM during forward pass |
+| `--batch_size=16` | Starting point — reduce if GPU OOM |
 | `--num_workers=0` | Prevents CPU RAM OOM — forked workers each copy the full model into RAM |
 
 ### Normalization mapping
