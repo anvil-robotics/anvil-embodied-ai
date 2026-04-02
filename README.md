@@ -133,9 +133,11 @@ Checkpoints are saved to `model_zoo/<job_name>/`. Run `anvil-trainer --help` for
 | `--batch_size=8` | 8 | Reduce if GPU OOM |
 | `--save_freq=10000` | 10k | Checkpoint interval |
 | `--use-delta-actions` | off | Relative actions (target − state) |
-| `--policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'` | policy default | Override normalization — required for mcap-convert datasets with Pi0.5; safe to add for all models |
+| `--policy.normalization_mapping='{...}'` | policy default | e.g. `{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}`<br><br>Keys:<br>`ACTION` · `STATE` · `VISUAL`<br>Values:<br>`MEAN_STD`   — normalise by μ/σ<br>`MIN_MAX`    — normalise to [0,1]<br>`QUANTILE10` — normalise by p10/p90 (Pi0.5 default; requires quantile stats\*)<br>`IDENTITY`   — passthrough (always use for images)<br><br>mcap-convert datasets lack quantile stats — use `MEAN_STD` for `ACTION`/`STATE`. |
 | `--wandb.enable=true` | off | Stream metrics to W&B |
 | `--resume=true` | off | Resume from `--output_dir` checkpoint |
+
+\* quantile stats (`q01`/`q99`) are not produced by `mcap-convert`. See [Pi0.5 — Normalization mapping](docs/training-tips.md#normalization-mapping) for how to add them or switch normalization method.
 
 #### [ACT](docs/training-tips.md#act)
 
