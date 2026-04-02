@@ -314,6 +314,16 @@ class ModelLoader:
         except Exception as e:
             self._log("warn", f"Failed to load processor pipelines: {e}")
 
+        if pre_processor is None and post_processor is None:
+            self._log(
+                "warn",
+                "No processor pipelines found in checkpoint — observations and actions will NOT be "
+                "normalized. If the model was trained with a non-IDENTITY normalization_mapping "
+                "(e.g. MEAN_STD), inference results will be incorrect. "
+                "Re-train or ensure policy_preprocessor.json / policy_postprocessor.json exist in "
+                f"{self.model_path}",
+            )
+
         return model, pre_processor, post_processor
 
     @staticmethod
