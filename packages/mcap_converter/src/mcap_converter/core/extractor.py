@@ -562,6 +562,7 @@ class BufferedStreamExtractor:
         """
         self.config = config
         self.fps = fps
+        self.frame_interval = 1.0 / fps  # seconds between output frames (for subsampling)
         self.buffer_seconds = buffer_seconds
         self.half_buffer = int(buffer_seconds * fps / 2)  # 75 frames for 5s @ 30fps
         self.full_buffer = self.half_buffer * 2  # 150 frames
@@ -639,7 +640,7 @@ class BufferedStreamExtractor:
 
         cursor = 0  # Index of frame to process next
         frames_yielded = 0
-        first_ts = None
+        next_yield_ts = None  # Next target timestamp for subsampling
 
         for message in reader.read_messages(topics=all_topics):
             topic = message.channel.topic
@@ -662,10 +663,6 @@ class BufferedStreamExtractor:
             # Use MCAP log_time for consistent time domain across all streams
             time_s = message.log_time.timestamp()
 
-            # Track first timestamp for relative timing
-            if first_ts is None:
-                first_ts = time_s
-
             # Decode image — detect CompressedImage vs Image by attribute
             ros_msg = message.ros_msg
             if hasattr(ros_msg, 'format'):
@@ -681,20 +678,29 @@ class BufferedStreamExtractor:
 
             # Condition: buffer has at least half_buffer frames ahead of cursor
             if main_buffer_len >= self.half_buffer + cursor:
-                frame = self._align_frame_at_cursor(
-                    camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
-                )
-                if frame is not None:
-                    yield frame
-                    frames_yielded += 1
+                frame_ts = camera_buffers[main_cam][cursor][0]
 
-                    # Progress reporting
-                    if self.progress_callback:
-                        self.progress_callback(frames_yielded)
-                    elif not self.quiet and frames_yielded % 100 == 0:
-                        print(f"[BufferedStream] Processed {frames_yielded} frames...")
+                # Initialize subsampling anchor on first frame
+                if next_yield_ts is None:
+                    next_yield_ts = frame_ts
+
+                # Subsampling: only yield if this frame is at or past the next target timestamp
+                if frame_ts >= next_yield_ts:
+                    frame = self._align_frame_at_cursor(
+                        camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
+                    )
+                    if frame is not None:
+                        yield frame
+                        frames_yielded += 1
+                        next_yield_ts += self.frame_interval
 
                 cursor += 1
+
+                # Always report progress after each cursor advance (including skipped frames)
+                if self.progress_callback:
+                    self.progress_callback(frames_yielded)
+                elif not self.quiet and frames_yielded % 100 == 0:
+                    print(f"[BufferedStream] Processed {frames_yielded} frames...")
 
                 # Once buffer reaches full size, remove oldest to maintain size
                 if main_buffer_len > self.full_buffer:
@@ -713,14 +719,18 @@ class BufferedStreamExtractor:
         if not self.quiet:
             print("[BufferedStream] Flushing remaining buffer...")
         while cursor < len(camera_buffers[main_cam]):
-            frame = self._align_frame_at_cursor(
-                camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
-            )
-            if frame is not None:
-                yield frame
-                frames_yielded += 1
-                if self.progress_callback:
-                    self.progress_callback(frames_yielded)
+            frame_ts = camera_buffers[main_cam][cursor][0]
+            if next_yield_ts is None or frame_ts >= next_yield_ts:
+                frame = self._align_frame_at_cursor(
+                    camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
+                )
+                if frame is not None:
+                    yield frame
+                    frames_yielded += 1
+                    if next_yield_ts is not None:
+                        next_yield_ts += self.frame_interval
+                    if self.progress_callback:
+                        self.progress_callback(frames_yielded)
             cursor += 1
 
         if not self.quiet:

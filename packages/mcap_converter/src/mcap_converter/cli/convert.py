@@ -6,6 +6,7 @@ Uses extracted core modules for cleaner, testable code.
 
 import argparse
 import contextlib
+import json
 import os
 import shutil
 import sys
@@ -35,6 +36,7 @@ from mcap_converter import (
     McapReader,
 )
 from mcap_converter.core.extractor import BufferedStreamExtractor
+from mcap_converter.core.reader import snap_fps
 
 console = Console()
 
@@ -191,6 +193,9 @@ def convert_session(
     buffer_seconds: float = 5.0,
     config_path: str = None,
     vcodec: str = "h264",
+    resume_from: int = 0,
+    max_episodes: int = None,
+    mcap_files: List[Path] = None,
 ):
     """
     Convert MCAP session to LeRobot dataset
@@ -213,12 +218,17 @@ def convert_session(
     if config is None:
         config = ConfigLoader.get_default()
 
-    # Find all MCAP files
-    mcap_files = collect_mcap_files(input_dir)
+    # Find all MCAP files (use pre-collected list if provided)
+    if mcap_files is None:
+        mcap_files = collect_mcap_files(input_dir)
     if not mcap_files:
         raise FileNotFoundError(f"No .mcap files found in {input_dir}")
 
-    log(f"Found [bold]{len(mcap_files)}[/bold] MCAP files")
+    if max_episodes is not None:
+        mcap_files = mcap_files[:max_episodes]
+        log(f"Found [bold]{len(mcap_files)}[/bold] MCAP files (limited to first {max_episodes})")
+    else:
+        log(f"Found [bold]{len(mcap_files)}[/bold] MCAP files")
     log(f"Buffered streaming (buffer={buffer_seconds}s)")
 
     # Initialize writer (quiet — Rich handles output)
@@ -261,15 +271,21 @@ def convert_session(
         raise ValueError("No camera images available, cannot create dataset image features")
     log(f"Cameras: {camera_names}")
 
-    # Create dataset
-    dataset = writer.create_dataset(
-        joint_names=joint_names,
-        camera_names=camera_names,
-    )
+    # Create or load dataset
+    if resume_from > 0:
+        dataset = writer.load_dataset_for_writing()
+        log(f"Loaded existing dataset ({resume_from} episodes already converted)")
+    else:
+        dataset = writer.create_dataset(
+            joint_names=joint_names,
+            camera_names=camera_names,
+        )
 
-    # Copy conversion config for inference generation during training
+    # Copy conversion config for inference generation during training (skip if resuming)
     conversion_config_dest = os.path.join(output_dir, "conversion_config.yaml")
-    if config_path and os.path.exists(config_path):
+    if resume_from > 0:
+        log(f"Skipping config copy — using existing [dim]{conversion_config_dest}[/dim]")
+    elif config_path and os.path.exists(config_path):
         shutil.copy(config_path, conversion_config_dest)
         log(f"Copied conversion config: [dim]{conversion_config_dest}[/dim]")
     else:
@@ -313,10 +329,15 @@ def convert_session(
         overall_task = progress.add_task(
             "[bold blue]Converting episodes",
             total=len(mcap_files),
-            status=f"0/{len(mcap_files)} episodes",
+            status=f"{resume_from}/{len(mcap_files)} episodes",
         )
 
         for episode_idx, mcap_path in enumerate(mcap_files):
+            if episode_idx < resume_from:
+                progress.advance(overall_task)
+                progress.update(overall_task, status=f"{episode_idx + 1}/{len(mcap_files)} episodes [dim](skipped)[/dim]")
+                continue
+
             episode_start_time = time.time()
 
             episode_task = progress.add_task(
@@ -434,13 +455,14 @@ def convert_session(
     ep_table.add_column("Frames", justify="right")
     ep_table.add_column("Duration", justify="right")
     ep_table.add_column("Speed", justify="right")
-    for i, mcap_path in enumerate(mcap_files):
-        ep_fps = episode_frame_counts[i] / episode_times[i] if episode_times[i] > 0 else 0
+    for i, mcap_path in enumerate(mcap_files[resume_from:], start=resume_from):
+        j = i - resume_from
+        ep_fps = episode_frame_counts[j] / episode_times[j] if episode_times[j] > 0 else 0
         ep_table.add_row(
             str(i + 1),
             mcap_path.name,
-            str(episode_frame_counts[i]),
-            format_duration(episode_times[i]),
+            str(episode_frame_counts[j]),
+            format_duration(episode_times[j]),
             f"{ep_fps:.1f} f/s",
         )
 
@@ -470,9 +492,13 @@ def main(args=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  mcap-convert -i data/raw/session -o /tmp/dataset --config configs/mcap_converter/openarm_bimanual.yaml
-  mcap-convert -i data/raw/session -o /tmp/dataset --vcodec libsvtav1
-  mcap-convert -i data/raw/session -o /tmp/dataset --fps 15 --push-to-hub
+  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/openarm_bimanual.yaml
+  # output goes to data/datasets/my-session/
+
+  mcap-convert -i data/raw/my-session -o data/datasets --vcodec libsvtav1
+  mcap-convert -i data/raw/my-session -o data/datasets --fps 15 --push-to-hub
+  mcap-convert -i data/raw/my-session -o data/datasets --max-episodes 5
+  mcap-convert -i data/raw/my-session -o data/datasets --resume
 """,
     )
     parser.add_argument(
@@ -480,8 +506,8 @@ examples:
         help="input directory containing MCAP files",
     )
     parser.add_argument(
-        "-o", "--output-dir", type=str, default="data/processed/dataset",
-        help="output directory (default: data/processed/dataset)",
+        "-o", "--output-dir", type=str, default="data/datasets",
+        help="output base directory — dataset is saved to <output-dir>/<input-dir-name>/ (default: data/datasets)",
     )
     parser.add_argument(
         "--config", type=str,
@@ -501,8 +527,8 @@ examples:
         help="robot type (default: anvil_openarm)",
     )
     parser.add_argument(
-        "--fps", type=int, default=30,
-        help="video framerate (default: 30)",
+        "--fps", type=int, default=None,
+        help="output fps — overrides auto-detected source fps; must not exceed source fps",
     )
     parser.add_argument(
         "--tolerance-s", type=float, default=1e-3,
@@ -525,11 +551,21 @@ examples:
         choices=["h264", "hevc", "libsvtav1"],
         help="video codec (default: h264). h264 is widely viewable; libsvtav1 gives best compression",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="resume conversion — skip already-converted episodes and append new ones",
+    )
+    parser.add_argument(
+        "--max-episodes", type=int, default=None,
+        metavar="N",
+        help="only convert the first N episodes (default: convert all)",
+    )
 
     args = parser.parse_args(args)
 
-    # Normalize paths
-    args.output_dir = args.output_dir.rstrip("/")
+    # Resolve output path: <output-dir>/<input-dir-name>/
+    input_name = Path(args.input_dir.rstrip("/")).name
+    args.output_dir = str(Path(args.output_dir.rstrip("/")) / input_name)
 
     # Handle HuggingFace username
     if args.hf_user:
@@ -554,6 +590,47 @@ examples:
         config = ConfigLoader.get_default()
         log("Using default configuration")
 
+    # Collect MCAP files once (reused for fps detection and conversion)
+    all_mcap_files = collect_mcap_files(args.input_dir)
+
+    # Always auto-detect input fps from all episodes (fast — reads MCAP summary only)
+    ref_topic = list(config.camera_topic_mapping.keys())[0] if config.camera_topic_mapping else None
+    ep_fps_raw = []
+    if ref_topic:
+        for f in all_mcap_files:
+            v = McapReader(str(f)).estimate_fps(ref_topic)
+            if v:
+                ep_fps_raw.append(v)
+
+    if ep_fps_raw:
+        snapped = [snap_fps(v) for v in ep_fps_raw]
+        input_fps = snap_fps(min(ep_fps_raw))
+        input_fps_label = str(input_fps)
+        if len(set(snapped)) > 1:
+            input_fps_label = f"{input_fps} [yellow](mixed: {snapped})[/yellow]"
+    else:
+        input_fps = None
+        input_fps_label = "unknown"
+
+    # Resolve output fps: CLI --fps > auto-detect min > 30
+    if args.fps is not None:
+        fps = args.fps
+        output_fps_label = f"{fps} (manual override)"
+        if input_fps is not None and fps > input_fps:
+            console.print(
+                f"\n[bold red]ERROR: Output fps ({fps}) is higher than source session fps ({input_fps}).[/bold red]\n"
+                "Upsampling is not supported — it creates duplicate frames and degrades dataset quality.\n"
+                f"Use [bold]--fps {input_fps}[/bold] or lower, or omit --fps to use the source fps automatically.\n"
+            )
+            exit(1)
+    elif input_fps is not None:
+        fps = input_fps
+        output_fps_label = f"{fps} (default as source)"
+    else:
+        fps = 30
+        output_fps_label = "30 (default)"
+        log("[yellow]Cannot detect fps — defaulting to 30[/yellow]")
+
     # Startup banner
     banner = Table(show_header=False, box=None, padding=(0, 2))
     banner.add_column(style="bold")
@@ -562,9 +639,12 @@ examples:
     banner.add_row("Output directory", args.output_dir)
     banner.add_row("HuggingFace Repo", repo_id)
     banner.add_row("Robot Type", args.robot_type)
-    banner.add_row("FPS", str(args.fps))
+    banner.add_row("Source Session FPS", input_fps_label)
+    banner.add_row("Output FPS", output_fps_label)
     banner.add_row("Buffer", f"{args.buffer_seconds}s")
     banner.add_row("Video codec", args.vcodec)
+    banner.add_row("Resume", "yes" if args.resume else "no")
+    banner.add_row("Max episodes", str(args.max_episodes) if args.max_episodes else "all")
 
     console.print(Panel(
         banner,
@@ -574,8 +654,18 @@ examples:
     ))
 
     try:
-        # Remove output directory if exists
-        if os.path.exists(args.output_dir):
+        # Determine resume_from: number of already-converted episodes to skip
+        resume_from = 0
+        if args.resume and os.path.exists(args.output_dir):
+            info_path = os.path.join(args.output_dir, "meta", "info.json")
+            try:
+                with open(info_path) as f:
+                    resume_from = json.load(f).get("total_episodes", 0)
+                log(f"Resuming from episode [bold]{resume_from}[/bold] — skipping already-converted episodes")
+            except Exception as e:
+                log(f"[yellow]Cannot read existing metadata ({e}) — starting fresh[/yellow]")
+                shutil.rmtree(args.output_dir)
+        elif os.path.exists(args.output_dir):
             shutil.rmtree(args.output_dir)
             log("Removed existing output directory")
 
@@ -586,13 +676,16 @@ examples:
             output_dir=args.output_dir,
             repo_id=repo_id,
             robot_type=args.robot_type,
-            fps=args.fps,
+            fps=fps,
             tolerance_s=args.tolerance_s,
             task=args.task,
             config=config,
             buffer_seconds=args.buffer_seconds,
             config_path=args.config,
             vcodec=args.vcodec,
+            resume_from=resume_from,
+            max_episodes=args.max_episodes,
+            mcap_files=all_mcap_files,
         )
 
         # Upload to Hub if requested
