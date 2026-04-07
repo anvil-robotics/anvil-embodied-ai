@@ -3,7 +3,18 @@
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from mcap.reader import make_reader as make_mcap_reader
 from mcap_ros2.reader import read_ros2_messages
+
+_COMMON_FPS = [15, 20, 24, 25, 30, 50, 60]
+
+
+def snap_fps(detected: float, tolerance: float = 0.15) -> int:
+    """Snap a detected fps value to the nearest standard fps within tolerance."""
+    for standard in sorted(_COMMON_FPS):
+        if abs(detected - standard) / standard <= tolerance:
+            return standard
+    return max(5, round(detected / 5) * 5)
 
 
 class McapReader:
@@ -108,6 +119,51 @@ class McapReader:
             return 0.0
 
         return max(timestamps) - min(timestamps)
+
+    def estimate_fps(self, topic: str) -> Optional[float]:
+        """
+        Estimate recording fps for a topic using MCAP file summary statistics.
+
+        Reads only the file footer (O(1)) — does not scan all messages.
+
+        Args:
+            topic: ROS2 topic name to estimate fps for
+
+        Returns:
+            Estimated fps as a float, or None if not enough data
+        """
+        with open(self.mcap_path, "rb") as f:
+            reader = make_mcap_reader(f)
+            summary = reader.get_summary()
+
+        if summary is None or summary.statistics is None:
+            return None
+
+        # Find the channel id(s) matching the topic
+        matching_channel_ids = {
+            ch_id
+            for ch_id, ch in summary.channels.items()
+            if ch.topic == topic
+        }
+        if not matching_channel_ids:
+            return None
+
+        # Sum message counts across matching channels
+        total_messages = sum(
+            count
+            for ch_id, count in summary.statistics.channel_message_counts.items()
+            if ch_id in matching_channel_ids
+        )
+        if total_messages < 2:
+            return None
+
+        start_ns = summary.statistics.message_start_time
+        end_ns = summary.statistics.message_end_time
+        duration_s = (end_ns - start_ns) * 1e-9
+        if duration_s <= 0:
+            return None
+
+        return (total_messages - 1) / duration_s
 
     def __repr__(self) -> str:
         return f"McapReader('{self.mcap_path}')"
