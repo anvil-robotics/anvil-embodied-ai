@@ -34,6 +34,10 @@ RUN if [ -n "${LEROBOT_EXTRAS}" ]; then \
             "lerobot[${LEROBOT_EXTRAS}]==${LEROBOT_VERSION}"; \
     fi
 
+# Patch lerobot v0.5.0 bug: groot_n1.py has a malformed @dataclass that crashes
+# on import. Remove groot lines from policies/__init__.py since we don't use GR00T.
+RUN find /usr/local/lib -path "*/lerobot/policies/__init__.py" -exec sed -i '/groot/d' {} \;
+
 # Copy ROS2 package (changes often → late layer)
 COPY ros2/src/lerobot_control /workspace/src/lerobot_control
 

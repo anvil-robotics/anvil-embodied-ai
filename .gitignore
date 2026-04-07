@@ -112,3 +112,4 @@ secrets.yaml
 CLAUDE.md
 CLAUDE_GLOBAL.md
 docs/claude_journal/
+rsync_raw_dataset.sh

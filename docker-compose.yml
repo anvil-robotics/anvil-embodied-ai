@@ -15,14 +15,14 @@ services:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}
       - CYCLONEDDS_URI=${CYCLONEDDS_URI:-}
-      - MODEL_PATH=${MODEL_PATH:-/workspace/model_zoo/my_model}
-      - CONFIG_FILE=${CONFIG_FILE:-/workspace/configs/lerobot_control/inference_default.yaml}
       - MONITOR_ONLY=${MONITOR_ONLY:-false}
       - DISPLAY=${DISPLAY}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ./model_zoo:/workspace/model_zoo:ro
-      - ./configs:/workspace/configs:ro
+      # Both MODEL_PATH and CONFIG_FILE are host paths — tab-completion works naturally.
+      # CONFIG_FILE defaults to inference_default.yaml if not set.
+      - ${MODEL_PATH:?MODEL_PATH is required}:/workspace/model:ro
+      - ${CONFIG_FILE:-./configs/lerobot_control/inference_default.yaml}:/workspace/config.yaml:ro
     deploy:
       resources:
         reservations:
@@ -30,4 +30,4 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: bash -c "ros2 launch lerobot_control inference.launch.py model_path:=$$MODEL_PATH config_file:=$$CONFIG_FILE monitor_only:=$$MONITOR_ONLY"
+    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml monitor_only:=${MONITOR_ONLY:-false}
