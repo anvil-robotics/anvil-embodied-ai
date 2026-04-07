@@ -107,11 +107,13 @@ class ModelLoader:
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model path not found: {model_path}")
 
-        # Auto-detect pretrained_model subdirectory
-        pretrained_model_path = self.model_path / "pretrained_model"
-        if pretrained_model_path.exists() and (pretrained_model_path / "config.json").exists():
-            self._log("info", f"Found pretrained_model subdirectory: {pretrained_model_path}")
-            self.model_path = pretrained_model_path
+        # Auto-detect pretrained_model subdirectory.
+        # Accepts paths at checkpoint step level (e.g. checkpoints/last or checkpoints/100000)
+        # by checking for a pretrained_model subfolder when config.json is not in the given path.
+        if not (self.model_path / "config.json").exists():
+            pretrained_model_path = self.model_path / "pretrained_model"
+            if pretrained_model_path.exists() and (pretrained_model_path / "config.json").exists():
+                self.model_path = pretrained_model_path
 
         # Auto-detect model type from checkpoint if not provided
         if self.model_type is None:
@@ -313,6 +315,23 @@ class ModelLoader:
             self._log("warn", f"Processor pipelines not found: {e}")
         except Exception as e:
             self._log("warn", f"Failed to load processor pipelines: {e}")
+
+        # For pi05: if no preprocessor found in the checkpoint (fine-tuned models often
+        # skip saving policy_preprocessor.json), rebuild it from the policy's own factory.
+        # dataset_stats=None → normalization uses empty stats (passthrough), but tokenization
+        # is correctly configured with the PaliGemma tokenizer.
+        if self.model_type == "pi05" and pre_processor is None:
+            try:
+                from lerobot.policies.pi05.processor_pi05 import make_pi05_pre_post_processors
+
+                pre_processor, fallback_post = make_pi05_pre_post_processors(
+                    model.config, dataset_stats=None
+                )
+                if post_processor is None:
+                    post_processor = fallback_post
+                self._log("info", "Built pi05 processor from policy factory (no policy_preprocessor.json found)")
+            except Exception as e:
+                self._log("warn", f"Could not build pi05 processor from factory: {e}")
 
         if pre_processor is None and post_processor is None:
             self._log(

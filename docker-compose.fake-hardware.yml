@@ -1,116 +1,98 @@
-# Mock distributed CycloneDDS discovery test.
+# Simulate real 2-PC cooperation via DDS + Bridge Network (no real robot needed).
 #
-# Three containers on a Docker bridge network using CycloneDDS middleware.
-# Validates: middleware installation, entrypoint env var wiring, and
-# cross-container topic discovery — no GPU or real hardware needed.
+# mock-robot  = Robot PC  — publishes synthetic camera frames and joint states
+# monitor/inference = GPU PC — subscribes via CycloneDDS over the bridge network
+#
+# Profiles:
+#   monitor   — FPS monitoring only (validates DDS connectivity + throughput, no GPU)
+#   inference — full pipeline: model load → preprocess → select_action → publish (GPU)
 #
 # Usage:
-#   docker compose -f docker-compose.mockdist.yml up --build --abort-on-container-exit
+#   # Monitor only (validates DDS + FPS, no model needed)
+#   docker compose -f docker-compose.fake-hardware.yml --profile monitor up --build
+#
+#   # Full GPU inference — MODEL_PATH must be an absolute path or start with ./
+#   MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
+#   docker compose -f docker-compose.fake-hardware.yml --profile inference up --build
+#
+# Optional env overrides:
+#   ROS_DOMAIN_ID — ROS domain (default: 42)
+#   CAMERA_RES    — 480p | 720p (default: 480p)
+#   CAMERA_FPS    — camera publish rate (default: 30)
+#   CONFIG_FILE   — host path to config yaml (default: ./configs/lerobot_control/inference_default.yaml)
+#   IMAGE_TAG     — Docker image tag (default: latest)
+
+x-base: &base
+  image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}
+  build:
+    context: .
+    dockerfile: docker/inference/Dockerfile
+    args:
+      LEROBOT_VERSION: ${LEROBOT_VERSION:-0.5.0}
+      LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-}
+  networks:
+    - ros2_test
+  environment:
+    - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
+    - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    - CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/test_bridge.xml
+  volumes:
+    - ./configs:/workspace/configs:ro
 
 services:
-  # Publishes dummy images + joint states (simulates Robot PC)
+
   mock-robot:
-    build:
-      context: .
-      dockerfile: docker/inference/Dockerfile
-    container_name: lerobot-test-mock-robot
-    networks:
-      - ros2_test
-    environment:
-      - ROS_DOMAIN_ID=99
-      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-      - CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/test_bridge.xml
-    volumes:
-      - ./configs:/workspace/configs:ro
+    <<: *base
+    container_name: lerobot-fake-robot
+    profiles: [monitor, inference]
     command: >
-      ros2 run lerobot_control mock_controller_node --ros-args -p timeout:=120.0 -p required_actions:=999999 -p camera_resolution:=${CAMERA_RES:-480p} -p camera_fps:=${CAMERA_FPS:-30}
+      ros2 run lerobot_control mock_controller_node
+        --ros-args
+        -p timeout:=3600.0
+        -p required_actions:=999999
+        -p camera_resolution:=${CAMERA_RES:-480p}
+        -p camera_fps:=${CAMERA_FPS:-30}
     healthcheck:
-      test: [ "CMD-SHELL", "pgrep -f mock_controller_node > /dev/null" ]
-      start_period: 3s
+      test: ["CMD-SHELL", "pgrep -f mock_controller_node > /dev/null"]
+      start_period: 5s
       interval: 2s
       timeout: 3s
-      retries: 10
+      retries: 15
 
-  # Inference node in monitor_only mode — subscribes + logs FPS, no model needed
-  inference-node:
-    build:
-      context: .
-      dockerfile: docker/inference/Dockerfile
-    container_name: lerobot-test-inference
-    networks:
-      - ros2_test
-    environment:
-      - ROS_DOMAIN_ID=99
-      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-      - CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/test_bridge.xml
+  monitor:
+    <<: *base
+    container_name: lerobot-fake-monitor
+    profiles: [monitor]
     volumes:
-      - ./configs:/workspace/configs:ro
+      - ${CONFIG_FILE:-./configs/lerobot_control/inference_default.yaml}:/workspace/config.yaml:ro
     depends_on:
       mock-robot:
         condition: service_healthy
     command: >
-      ros2 launch lerobot_control inference.launch.py monitor_only:=true config_file:=/workspace/configs/lerobot_control/test_fake_hardware.yaml
+      ros2 launch lerobot_control inference.launch.py
+        monitor_only:=true
+        config_file:=/workspace/config.yaml
 
-  # Lightweight discovery check — verifies both nodes see each other via CycloneDDS
-  discovery-check:
-    build:
-      context: .
-      dockerfile: docker/inference/Dockerfile
-    container_name: lerobot-test-discovery
-    networks:
-      - ros2_test
-    environment:
-      - ROS_DOMAIN_ID=99
-      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-      - CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/test_bridge.xml
+  inference:
+    <<: *base
+    container_name: lerobot-fake-inference
+    profiles: [inference]
     volumes:
-      - ./configs:/workspace/configs:ro
+      # MODEL_PATH is required for --profile inference (see header comment for usage).
+      # CONFIG_FILE defaults to inference_default.yaml if not set.
+      - ${MODEL_PATH:-/dev/null}:/workspace/model:ro
+      - ${CONFIG_FILE:-./configs/lerobot_control/inference_default.yaml}:/workspace/config.yaml:ro
     depends_on:
       mock-robot:
         condition: service_healthy
-    entrypoint: [ "/entrypoint.sh" ]
-    command:
-      - bash
-      - -c
-      - |
-        echo "=== CycloneDDS Discovery Check ==="
-        echo "RMW_IMPLEMENTATION=$${RMW_IMPLEMENTATION}"
-        echo "CYCLONEDDS_URI=$${CYCLONEDDS_URI}"
-        echo "ROS_DOMAIN_ID=$${ROS_DOMAIN_ID}"
-        echo ""
-
-        echo "--- Checking middleware ---"
-        ros2 doctor --report 2>/dev/null | grep -i middleware || echo "(middleware line not found, continuing)"
-        echo ""
-
-        echo "--- Waiting for topic discovery (max 30s) ---"
-        TRIES=0
-        while [ $$TRIES -lt 30 ]; do
-          TOPICS=$$(ros2 topic list 2>/dev/null)
-          if echo "$$TOPICS" | grep -q "/joint_states" && echo "$$TOPICS" | grep -q "/cam_waist/image_raw/compressed" && echo "$$TOPICS" | grep -q "/cam_wrist_r/image_raw/compressed" && echo "$$TOPICS" | grep -q "/cam_chest/image_raw/compressed" && echo "$$TOPICS" | grep -q "/cam_wrist_l/image_raw/compressed"; then
-            echo "PASS: discovered /joint_states and 4 camera topics"
-            echo ""
-            echo "--- All discovered topics ---"
-            echo "$$TOPICS"
-            echo ""
-            echo "--- All discovered nodes ---"
-            ros2 node list 2>/dev/null
-            echo ""
-            echo "=== Discovery check PASSED ==="
-            echo ""
-            echo "Observing for 60s (watch inference-node stats)..."
-            sleep 60
-            echo "=== Observation complete ==="
-            exit 0
-          fi
-          TRIES=$$((TRIES + 1))
-          sleep 1
-        done
-
-        echo "FAIL: could not discover expected topics after 30s"
-        echo "Topics found:"
-        ros2 topic list 2>/dev/null
-        exit 1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml
 
 networks:
   ros2_test:

@@ -246,7 +246,7 @@ uv run anvil-trainer \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
 
-After training SmolVLA / Pi0 / Pi0.5, mirror the task description in `configs/lerobot_control/inference_default.yaml`:
+After training SmolVLA / Pi0 / Pi0.5, the task description is automatically read from `anvil_config.json` saved in the checkpoint — no manual copy needed. To override it at inference time, set it explicitly in `configs/lerobot_control/inference_default.yaml`:
 
 ```yaml
 model:
@@ -264,8 +264,14 @@ Only pass `--resume=true` and `--output_dir` — all other settings are restored
 ### 3. Run Inference
 
 ```bash
-cp .env.example .env              # configure MODEL_PATH, ROS_DOMAIN_ID, CycloneDDS
-docker compose up                  # run inference on GPU PC
+# MODEL_PATH must be an absolute path or start with ./
+# Use $(pwd)/ prefix so tab-completion works naturally on the path first, then wrap it:
+MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
+docker compose up
+
+# Or use explicit ./relative path:
+MODEL_PATH=./model_zoo/my-task/checkpoints/last \
+docker compose up
 ```
 
 Before running, review `configs/lerobot_control/inference_default.yaml`:
@@ -273,8 +279,9 @@ Before running, review `configs/lerobot_control/inference_default.yaml`:
 **Model**
 ```yaml
 model:
-  # Task prompt for SmolVLA — must match what was used during training.
-  task_description: "Grab the gray doll and put it in the bucket"
+  # null = auto-read from anvil_config.json in the checkpoint (recommended).
+  # Set explicitly only to override the checkpoint value.
+  task_description: null
 ```
 
 **Inference Tuning**
@@ -286,16 +293,15 @@ inference_tuning:
   n_action_steps: null
 
   # ACT only — re-infers every step and blends overlapping predictions with exponential weighting.
-  # Smoother motion than raising n_action_steps. Use 0.01 (paper default) will forces n_action_steps=1.
+  # Smoother motion than raising n_action_steps. Use 0.01 (paper default) forces n_action_steps=1.
   temporal_ensemble_coeff: null
 ```
 
 **Safety**
 ```yaml
-safety:
-  # Maximum joint position change allowed per control step (radians). (lower = safer)
-  # But may limit fast motions. Raise cautiously if the robot feels that require quick joint travel.
-  max_position_delta: 0.2
+# Uncomment to override the code default of 0.1 rad/step.
+# safety:
+#   max_position_delta: 0.1
 ```
 
 #### Distributed Inference Architecture
@@ -326,8 +332,8 @@ anvil-embodied-ai/
 │   └── mcap_converter/            # Data conversion config
 ├── docker/
 │   └── inference/                 # Dockerfile + entrypoint
-├── docker-compose.yml             # Production inference (GPU PC)
-├── docker-compose.fake-hardware.yml # Fake hardware test (no real hardware needed)
+├── docker-compose.yml                    # Production inference (GPU PC)
+├── docker-compose.fake-hardware.yml      # Fake hardware: simulate 2-PC DDS cooperation (monitor / inference profiles)
 ├── material/                      # Logo and visual assets
 ├── .env.example                   # Environment template
 └── model_zoo/                     # Trained model weights (gitignored)
@@ -360,12 +366,20 @@ anvil-embodied-ai/
 - Pi0.5 (4B params) additionally needs `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU
 - Pi0.5 requires quantile stats in `stats.json` — mcap-convert datasets don't include them. Use `--policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'` (recommended), or run `augment_dataset_quantile_stats` to compute them in-place (**backs up your dataset first** — it modifies in-place). See [Pi0.5 normalization](docs/training-tips.md#normalization-mapping) for details.
 
-**MODEL_PATH gotcha**
+**MODEL_PATH**
 
-Point to the `pretrained_model` subdirectory inside a specific checkpoint, not the top-level model folder:
-```
-# Correct
-MODEL_PATH=model_zoo/pick-and-place/checkpoints/100000/pretrained_model
+Point `MODEL_PATH` to a specific checkpoint step (or `last` for the latest). The `pretrained_model` subdirectory is detected automatically.
+
+> **Note:** Docker Compose requires bind mount paths to be absolute or start with `./`.
+> Bare relative paths (e.g. `model_zoo/...`) are treated as named volumes and will error.
+
+```bash
+# Recommended: use $(pwd)/ prefix (tab-completion works on the path before wrapping)
+MODEL_PATH=$(pwd)/model_zoo/pick-and-place/checkpoints/last
+MODEL_PATH=$(pwd)/model_zoo/pick-and-place/checkpoints/100000
+
+# Also valid: explicit ./relative path
+MODEL_PATH=./model_zoo/pick-and-place/checkpoints/last
 ```
 
 ## CLI Tools

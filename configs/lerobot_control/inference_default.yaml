@@ -12,7 +12,7 @@
 # -----------------------------------------------------------------------------
 model:
   # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion
-  task_description: "Use right arm to pick up the black doll, switch to left arm, and place it in the bucket."
+  task_description: null
 
   # use_delta_actions: read automatically from anvil_config.json in the checkpoint.
   # Set here only for checkpoints trained before anvil_config.json was introduced.
@@ -104,5 +104,7 @@ camera_mapping:
 # -----------------------------------------------------------------------------
 # Safety Parameters
 # -----------------------------------------------------------------------------
-safety:
-  max_position_delta: 0.2  # Maximum position change per step (radians)
+# max_position_delta: maximum joint position change per step (radians).
+# Uncomment to override the code default of 0.1 rad.
+# safety:
+#   max_position_delta: 0.1
