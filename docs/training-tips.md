@@ -310,7 +310,6 @@ uv run anvil-trainer \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
-  --policy.freeze_vision_encoder=false \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --job_name=grabbing-pi0 \
   --task-description="pick up the red block"
@@ -364,7 +363,6 @@ uv run anvil-trainer \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
-  --policy.freeze_vision_encoder=false \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --batch_size=16 \
   --num_workers=0 \

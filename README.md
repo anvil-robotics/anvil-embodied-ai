@@ -87,16 +87,30 @@ Two teleop modes are supported — pick the config that matches your recording:
 
 ```bash
 # For data recorded with leader-follower
-uv run mcap-convert --input data/raw/my-sessions --output data/datasets/my-dataset --config configs/mcap_converter/openarm_bimanual.yaml
+uv run mcap-convert --input data/raw/my-sessions --output data/datasets --config configs/mcap_converter/openarm_bimanual.yaml
 
 # For data recorded with Quest
-uv run mcap-convert --input data/raw/my-sessions --output data/datasets/my-dataset --config configs/mcap_converter/openarm_bimanual_quest.yaml
+uv run mcap-convert --input data/raw/my-sessions --output data/datasets --config configs/mcap_converter/openarm_bimanual_quest.yaml
 ```
+
+> **Output path:** the dataset is always saved to `<output-dir>/<input-dir-name>/`. With the examples above, the result is `data/datasets/my-sessions/`.
+
+**Common flags:**
+
+| Flag | Description |
+|---|---|
+| `--resume` | Skip already-converted episodes and append new ones — safe to re-run after interruption |
+| `--max-episodes N` | Convert only the first N episodes — useful for a quick sanity check before full conversion |
+| `--fps N` | Override output FPS. FPS is auto-detected from MCAP metadata by default; upsampling beyond source FPS is blocked |
+| `--vcodec` | Video codec: `h264` (default, widely viewable), `hevc` (H.265), or `libsvtav1` (best compression) |
+| `--robot-type` | Robot configuration: `anvil_openarm` (default) or `anvil_yam` |
+
+Run `uv run mcap-convert --help` for the full flag reference.
 
 Then validate the converted dataset:
 
 ```bash
-uv run dataset-validate --root data/datasets/my-dataset
+uv run dataset-validate --root data/datasets/my-sessions
 ```
 
 Expected output: 5 checks (load, info, features, read, batch) all showing `[OK]`.
@@ -263,6 +277,24 @@ Only pass `--resume=true` and `--output_dir` — all other settings are restored
 
 ### 3. Run Inference
 
+#### Test with Fake Hardware First (Recommended)
+
+Before deploying to a real robot, validate your setup using the fake hardware compose file.
+It uses a bridge network + CycloneDDS to simulate real 2-PC cooperation — mock-robot acts as the Robot PC, monitor/inference acts as the GPU PC.
+
+```bash
+# 1. Validate DDS connectivity + camera FPS (no model, no GPU needed)
+docker compose -f docker-compose.fake-hardware.yml --profile monitor up --build
+
+# 2. Validate full inference pipeline with your model (GPU required)
+MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
+docker compose -f docker-compose.fake-hardware.yml --profile inference up --build
+```
+
+If `Control Loop` hits the target FPS (30 Hz) in the stats output, the setup is ready for real hardware.
+
+#### Production (Real Robot)
+
 ```bash
 # MODEL_PATH must be an absolute path or start with ./
 # Use $(pwd)/ prefix so tab-completion works naturally on the path first, then wrap it:
@@ -273,6 +305,14 @@ docker compose up
 MODEL_PATH=./model_zoo/my-task/checkpoints/last \
 docker compose up
 ```
+
+**Optional env overrides:**
+
+| Variable | Description |
+|---|---|
+| `CONFIG_FILE` | Host path to a custom config yaml (default: `./configs/lerobot_control/inference_default.yaml`) |
+| `MONITOR_ONLY` | Set to `true` to subscribe + log FPS without loading a model — useful to verify DDS connectivity on the GPU PC |
+| `LEROBOT_EXTRAS` | Comma-separated policy extras to install in the image (e.g. `pi,diffusion`). **Rebuild the image after changing:** `docker compose build` |
 
 Before running, review `configs/lerobot_control/inference_default.yaml`:
 
@@ -316,6 +356,8 @@ inference_tuning:
 ```
 
 The Anvil Devbox runs [anvil-loader](https://docs.anvil.bot/software/starting-robot-operation) for real-time robot control, streaming joint states and camera feeds over CycloneDDS. This repo runs on a separate GPU PC, subscribing to those streams, running the trained policy, and publishing action commands back. See the [full documentation](https://docs.anvil.bot/) for setup details.
+
+Use `docker-compose.fake-hardware.yml` to simulate this 2-PC setup locally (bridge network + CycloneDDS) before connecting to real hardware.
 
 ## Project Structure
 
@@ -363,7 +405,7 @@ anvil-embodied-ai/
 **Pi Series — Pi0 / Pi0.5 (TL;DR)** ([openpi](https://github.com/Physical-Intelligence/openpi))
 - Both require HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once
 - Always pass `--task-description` — Pi series is language-conditioned
-- Pi0.5 (4B params) additionally needs `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU
+- Pi0.5 (4B params) additionally needs `--policy.dtype=bfloat16 --batch_size=16 --num_workers=0` on a 24 GB GPU (`--num_workers=0` prevents CPU RAM OOM from forked workers copying the full model)
 - Pi0.5 requires quantile stats in `stats.json` — mcap-convert datasets don't include them. Use `--policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'` (recommended), or run `augment_dataset_quantile_stats` to compute them in-place (**backs up your dataset first** — it modifies in-place). See [Pi0.5 normalization](docs/training-tips.md#normalization-mapping) for details.
 
 **MODEL_PATH**
@@ -388,10 +430,10 @@ MODEL_PATH=./model_zoo/pick-and-place/checkpoints/last
 | -------------------- | ------------------------------------------- |
 | `anvil-trainer`    | Train ML models                             |
 | `mcap-convert`     | Convert MCAP recordings to LeRobot datasets |
-| `mcap-inspect`     | Inspect MCAP file structure and topics      |
-| `mcap-to-video`    | Extract MCAP image topics to MP4 videos     |
+| `mcap-inspect`     | Inspect MCAP file structure, topics, and message counts — useful before conversion to check what's inside a recording |
+| `mcap-to-video`    | Extract MCAP image topics to MP4 videos — useful for visually reviewing raw recordings |
 | `dataset-validate` | Validate a converted LeRobot dataset        |
-| `mcap-upload`      | Upload datasets to HuggingFace Hub          |
+| `mcap-upload`      | Upload a converted dataset to HuggingFace Hub |
 
 ## License
 
