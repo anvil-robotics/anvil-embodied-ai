@@ -48,6 +48,12 @@ def generate_launch_description():
         description="Monitor-only mode: subscribe + log FPS, no model or publishing",
     )
 
+    debug_arg = DeclareLaunchArgument(
+        "debug",
+        default_value="false",
+        description="Enable debug metrics: action smoothness, queue depth stats, Action FPS",
+    )
+
     # Node
     inference_node = Node(
         package="lerobot_control",
@@ -63,6 +69,7 @@ def generate_launch_description():
                 "deterministic": LaunchConfiguration("deterministic"),
                 "deterministic_seed": LaunchConfiguration("deterministic_seed"),
                 "monitor_only": LaunchConfiguration("monitor_only"),
+                "debug": LaunchConfiguration("debug"),
             }
         ],
     )
@@ -76,6 +83,7 @@ def generate_launch_description():
             deterministic_arg,
             deterministic_seed_arg,
             monitor_only_arg,
+            debug_arg,
             inference_node,
         ]
     )

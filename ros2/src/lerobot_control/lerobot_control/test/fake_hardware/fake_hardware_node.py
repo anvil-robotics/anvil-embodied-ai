@@ -71,10 +71,14 @@ class MockControllerNode(Node):
         ]
         self.joint_pub = self.create_publisher(JointState, "/joint_states", 10)
 
-        # Subscriber
-        self.action_sub = self.create_subscription(
-            Float64MultiArray, "/actions", self.action_callback, 10
-        )
+        # Subscribers — one per arm, matching inference_node publish topics
+        self._action_subs = [
+            self.create_subscription(Float64MultiArray, topic, self.action_callback, 10)
+            for topic in [
+                "/follower_l_forward_position_controller/commands",
+                "/follower_r_forward_position_controller/commands",
+            ]
+        ]
 
         # Separate timers: 500Hz joint states, configurable camera FPS
         self.joint_timer = self.create_timer(1.0 / 500.0, self.publish_joint_state)
@@ -87,22 +91,25 @@ class MockControllerNode(Node):
         self.valid_actions_received = 0
         self.start_time = self.get_clock().now()
 
-        # Joint names for 14-DOF robot (7 joints per arm for dual-arm setup)
+        # Joint names for 16-DOF robot (8 joints per arm: finger + 7 joints)
+        # Naming matches production: follower_{l,r}_{joint_id}
         self.joint_names = [
-            "left_joint_1",
-            "left_joint_2",
-            "left_joint_3",
-            "left_joint_4",
-            "left_joint_5",
-            "left_joint_6",
-            "left_joint_7",
-            "right_joint_1",
-            "right_joint_2",
-            "right_joint_3",
-            "right_joint_4",
-            "right_joint_5",
-            "right_joint_6",
-            "right_joint_7",
+            "follower_l_finger_joint1",
+            "follower_l_joint1",
+            "follower_l_joint2",
+            "follower_l_joint3",
+            "follower_l_joint4",
+            "follower_l_joint5",
+            "follower_l_joint6",
+            "follower_l_joint7",
+            "follower_r_finger_joint1",
+            "follower_r_joint1",
+            "follower_r_joint2",
+            "follower_r_joint3",
+            "follower_r_joint4",
+            "follower_r_joint5",
+            "follower_r_joint6",
+            "follower_r_joint7",
         ]
 
         # Random number generator
@@ -130,9 +137,9 @@ class MockControllerNode(Node):
         joint_msg.header.stamp = self.get_clock().now().to_msg()
         joint_msg.header.frame_id = "base_link"
         joint_msg.name = self.joint_names
-        joint_msg.position = (self._rng.random(14) * 2 * np.pi - np.pi).tolist()
-        joint_msg.velocity = [0.0] * 14
-        joint_msg.effort = [0.0] * 14
+        joint_msg.position = (self._rng.random(16) * 2 * np.pi - np.pi).tolist()
+        joint_msg.velocity = [0.0] * 16
+        joint_msg.effort = [0.0] * 16
         self.joint_pub.publish(joint_msg)
 
     def check_timeout(self):
@@ -146,16 +153,7 @@ class MockControllerNode(Node):
             raise SystemExit(1)
 
     def action_callback(self, msg: Float64MultiArray):
-        """Handle incoming action commands.
-
-        Args:
-            msg: Float64MultiArray containing action values (expected 14 values)
-        """
-        # Validate action size
-        if len(msg.data) != 14:
-            self.get_logger().error(f"Invalid action size: {len(msg.data)}, expected 14")
-            raise SystemExit(1)
-
+        """Handle incoming action commands from per-arm controller topics."""
         # Validate action values are finite
         for i, val in enumerate(msg.data):
             if not np.isfinite(val):

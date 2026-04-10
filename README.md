@@ -87,13 +87,13 @@ Two teleop modes are supported — pick the config that matches your recording:
 
 ```bash
 # For data recorded with leader-follower
-uv run mcap-convert --input data/raw/my-sessions --output data/datasets --config configs/mcap_converter/openarm_bimanual.yaml
+uv run mcap-convert --input data/raw/my-sessions --config configs/mcap_converter/openarm_bimanual.yaml
 
 # For data recorded with Quest
-uv run mcap-convert --input data/raw/my-sessions --output data/datasets --config configs/mcap_converter/openarm_bimanual_quest.yaml
+uv run mcap-convert --input data/raw/my-sessions --config configs/mcap_converter/openarm_bimanual_quest.yaml
 ```
 
-> **Output path:** the dataset is always saved to `<output-dir>/<input-dir-name>/`. With the examples above, the result is `data/datasets/my-sessions/`.
+> **Output path:** the dataset is always saved to `<output-dir>/<input-dir-name>/`. With the default setting (--output data/datasets), the result is `data/datasets/my-sessions/`.
 
 **Common flags:**
 

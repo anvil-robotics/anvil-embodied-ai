@@ -25,6 +25,7 @@ class MetricsTracker:
         self._joint_count: int = 0
         self._control_loop_count: int = 0
         self._inference_count: int = 0
+        self._action_output_count: int = 0
 
     def reset(self):
         """Reset all metrics."""
@@ -33,6 +34,7 @@ class MetricsTracker:
         self._joint_count = 0
         self._control_loop_count = 0
         self._inference_count = 0
+        self._action_output_count = 0
 
     def _ensure_started(self):
         """Start timing if not already started."""
@@ -63,6 +65,11 @@ class MetricsTracker:
         """Record an inference execution."""
         self._ensure_started()
         self._inference_count += 1
+
+    def record_action_output(self):
+        """Record an action successfully published to the robot."""
+        self._ensure_started()
+        self._action_output_count += 1
 
     def get_elapsed_time(self) -> float:
         """Get elapsed time since tracking started."""
@@ -103,6 +110,8 @@ class MetricsTracker:
             "control_loop_fps": self._control_loop_count / elapsed,
             "inference_count": self._inference_count,
             "inference_fps": self._inference_count / elapsed,
+            "action_output_count": self._action_output_count,
+            "action_output_fps": self._action_output_count / elapsed,
         }
 
     def get_summary(self) -> str:

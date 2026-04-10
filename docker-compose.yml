@@ -23,6 +23,8 @@ services:
       # CONFIG_FILE defaults to inference_default.yaml if not set.
       - ${MODEL_PATH:?MODEL_PATH is required}:/workspace/model:ro
       - ${CONFIG_FILE:-./configs/lerobot_control/inference_default.yaml}:/workspace/config.yaml:ro
+      # HF_CACHE — VLA models (pi0/pi05/smolvla) need PaliGemma tokenizer at runtime.
+      - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface:ro
     deploy:
       resources:
         reservations:
@@ -30,4 +32,4 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml monitor_only:=${MONITOR_ONLY:-false}
+    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml monitor_only:=${MONITOR_ONLY:-false} debug:=${DEBUG:-false}
