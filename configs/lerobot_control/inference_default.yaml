@@ -12,6 +12,7 @@
 # -----------------------------------------------------------------------------
 model:
   # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion
+  # Set to the task the model was trained/finetuned for.
   task_description: null
 
   # use_delta_actions: read automatically from anvil_config.json in the checkpoint.
@@ -72,6 +73,20 @@ joint_names:
     - joint7
     - finger_joint1
 
+  # arm_mapping controls how observation.state is assembled:
+  #   Keys are used in joint name lookup: f"{observation_prefix}_{arm_key}_{joint_id}"
+  #   For bimanual Anvil robot: {l: left, r: right} → 2×8 = 16 DOF state
+  #   For pi05_libero_finetuned (single-arm, 8 DOF): use only one arm below.
+  arm_mapping:
+    l: left
+    r: right
+
+  # Anvil bimanual model uses position + velocity + effort as state inputs
+  state_features:
+    - position
+    - velocity
+    - effort
+
 # -----------------------------------------------------------------------------
 # Arm Configuration
 # -----------------------------------------------------------------------------
@@ -108,3 +123,43 @@ camera_mapping:
 # Uncomment to override the code default of 0.1 rad.
 # safety:
 #   max_position_delta: 0.1
+
+# -----------------------------------------------------------------------------
+# RTC — Real-Time Chunking (VLA models only: pi0, pi0.5, smolvla)
+# -----------------------------------------------------------------------------
+# VLA models always use RTC. ACT / Diffusion ignore this section entirely.
+#
+# How RTC works:
+#   A background thread runs inference continuously. While the robot executes
+#   the current action chunk from ActionQueue, the thread predicts the next
+#   chunk guided by the tail of the previous one (prefix attention). This
+#   eliminates the control-loop stall that occurs when a new chunk is needed.
+#
+# inference_delay: initial step-count estimate for inference latency.
+#   LatencyTracker accumulates real timings and auto-refines this each cycle.
+#   A safe starting value is ceil(expected_latency_sec * control_freq).
+#   e.g. 200 ms inference at 30 Hz → ceil(0.2 * 30) = 6.
+#
+# queue_trigger_threshold: re-trigger inference when ActionQueue depth falls
+#   to or below this count. Set equal to chunk_size for maximum overlap.
+#
+# execution_horizon: steps from the previous chunk kept as RTC guidance prefix.
+#   Recommended: 8–12. Higher → stronger continuity, lower → faster adaptation.
+#
+# max_guidance_weight: gradient guidance strength for the prefix attention.
+#   Default 10.0 is tuned for 10-step DDIM flow-matching (pi0/pi05/smolvla).
+#
+# prefix_attention_schedule: how guidance weight decays across the prefix.
+#   LINEAR | EXP | ONES | ZEROS  (EXP recommended)
+
+rtc:
+  # Baseline benchmark (RTX 4090, pi05_libero_finetuned, chunk_size=50, 10 DDIM steps):
+  #   mean latency: 215.8 ms  p95: 224.6 ms  →  ceil(0.225 × 30 Hz) = 7 steps
+  inference_delay: 7
+  # Set equal to chunk_size for maximum RTC overlap (inference starts as soon as
+  # current chunk is dispatched, eliminating the stall between chunks).
+  # chunk_size=50 → threshold=50
+  queue_trigger_threshold: 50
+  execution_horizon: 10
+  max_guidance_weight: 10.0
+  prefix_attention_schedule: EXP

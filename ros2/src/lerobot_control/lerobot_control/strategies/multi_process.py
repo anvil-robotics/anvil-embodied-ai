@@ -47,6 +47,8 @@ class MultiProcessStrategy:
 
         # Joint state (handled in main process - lightweight)
         self._joint_positions: dict[str, float] | None = None
+        self._joint_velocities: dict[str, float] | None = None
+        self._joint_efforts: dict[str, float] | None = None
         self._joint_timestamp: float | None = None
 
         # Metrics tracker (set via setup)
@@ -147,8 +149,11 @@ class MultiProcessStrategy:
         if self._metrics:
             self._metrics.record_joint_state()
 
-        # Store joint positions as dict for easy lookup
         self._joint_positions = dict(zip(msg.name, msg.position))
+        if msg.velocity:
+            self._joint_velocities = dict(zip(msg.name, msg.velocity))
+        if msg.effort:
+            self._joint_efforts = dict(zip(msg.name, msg.effort))
         self._joint_timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
     def get_observation(
@@ -191,23 +196,31 @@ class MultiProcessStrategy:
             image_tensor = image_tensor.permute(2, 0, 1).unsqueeze(0)
             observation[f"observation.images.{camera_name}"] = image_tensor
 
-        # Add joint state with dual-arm mapping
+        # Build state observations (position / velocity / effort) based on config
         if self._joint_positions:
             obs_prefix = self._joint_names_config.get("observation_prefix", "follower")
             sep = self._joint_names_config.get("separator", "_")
             arm_mapping = self._joint_names_config.get("arm_mapping", {"l": "left", "r": "right"})
             joint_order = self._joint_names_config.get("model_joint_order", [])
+            state_features = self._joint_names_config.get("state_features", ["position"])
 
-            # Build ordered positions: [left_arm_joints..., right_arm_joints...]
-            ordered_positions = []
-            for arm_key in sorted(arm_mapping.keys()):  # 'l' then 'r'
-                for joint_id in joint_order:
-                    joint_name = f"{obs_prefix}{sep}{arm_key}{sep}{joint_id}"
-                    ordered_positions.append(self._joint_positions.get(joint_name, 0.0))
+            feature_map = {
+                "position": (self._joint_positions, "observation.state"),
+                "velocity": (self._joint_velocities, "observation.velocity"),
+                "effort": (self._joint_efforts, "observation.effort"),
+            }
 
-            observation["observation.state"] = torch.tensor(
-                ordered_positions, dtype=torch.float32
-            ).unsqueeze(0)
+            for feature in state_features:
+                if feature not in feature_map:
+                    continue
+                data_dict, obs_key = feature_map[feature]
+                ordered = []
+                for arm_key in sorted(arm_mapping.keys()):
+                    for joint_id in joint_order:
+                        joint_name = f"{obs_prefix}{sep}{arm_key}{sep}{joint_id}"
+                        val = data_dict.get(joint_name, 0.0) if data_dict else 0.0
+                        ordered.append(val)
+                observation[obs_key] = torch.tensor(ordered, dtype=torch.float32).unsqueeze(0)
 
         return observation
 

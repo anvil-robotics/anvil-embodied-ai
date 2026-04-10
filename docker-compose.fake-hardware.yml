@@ -21,6 +21,8 @@
 #   CAMERA_FPS    — camera publish rate (default: 30)
 #   CONFIG_FILE   — host path to config yaml (default: ./configs/lerobot_control/inference_default.yaml)
 #   IMAGE_TAG     — Docker image tag (default: latest)
+#   HF_CACHE      — host path to HuggingFace cache (default: ~/.cache/huggingface)
+#                   VLA models (pi0/pi05/smolvla) need the PaliGemma tokenizer from this cache.
 
 x-base: &base
   image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}
@@ -82,6 +84,10 @@ services:
       # CONFIG_FILE defaults to inference_default.yaml if not set.
       - ${MODEL_PATH:-/dev/null}:/workspace/model:ro
       - ${CONFIG_FILE:-./configs/lerobot_control/inference_default.yaml}:/workspace/config.yaml:ro
+      # HuggingFace model cache — VLA models (pi0/pi05/smolvla) need the PaliGemma tokenizer
+      # at runtime. Set HF_CACHE to your host ~/.cache/huggingface when using a VLA model.
+      # ACT/Diffusion models are unaffected if this is empty.
+      - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface:ro
     depends_on:
       mock-robot:
         condition: service_healthy
@@ -92,7 +98,9 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml
+    # MODEL_PATH is mounted at /workspace/model. HF cache structure (blobs/ + snapshots/)
+    # is auto-detected by inference_node — no need for MODEL_SNAPSHOT_PATH.
+    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml debug:=${DEBUG:-false}
 
 networks:
   ros2_test:

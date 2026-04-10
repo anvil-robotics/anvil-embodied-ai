@@ -99,6 +99,9 @@ Thumbs.db
 *.bak
 *.log
 
+# Local test configs (one-off scenario configs)
+configs/lerobot_control/inference_pi05_*.yaml
+
 # Secrets and credentials
 .env
 .env.*
