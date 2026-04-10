@@ -18,7 +18,7 @@ from .reader import McapReader
 def parse_joint_name(
     joint_name: str,
     pattern: JointNamePattern,
-) -> Tuple[str, str, str]:
+) -> Optional[Tuple[str, str, str]]:
     """
     Parse joint name to extract role, robot, and joint_id.
 
@@ -62,6 +62,9 @@ def parse_joint_name(
     if parts and parts[0] in pattern.robot_prefix:
         robot = pattern.robot_prefix[parts[0]]
         joint_id = parts[1] if len(parts) > 1 else parts[0]
+    elif parts and pattern.robot_prefix and len(parts) > 1:
+        # arms map is configured but this arm identifier is not in it — skip joint
+        return None
     else:
         joint_id = remaining
 
@@ -109,7 +112,7 @@ class DataExtractor:
         # Cache for action topic reorder permutations: {topic: np.ndarray}
         self._action_reorder_cache: Dict[str, np.ndarray] = {}
 
-    def _parse_joint_name(self, joint_name: str) -> Tuple[str, str, str]:
+    def _parse_joint_name(self, joint_name: str) -> Optional[Tuple[str, str, str]]:
         """Parse joint name using shared utility."""
         return parse_joint_name(joint_name, self.config.joint_name_pattern)
 
@@ -250,10 +253,13 @@ class DataExtractor:
 
         for i, joint_name in enumerate(ros_msg.name):
             try:
-                role, robot, joint_id = self._parse_joint_name(joint_name)
+                result = self._parse_joint_name(joint_name)
             except DataExtractionError as e:
                 print(f"Warning: {e}")
                 continue
+            if result is None:
+                continue
+            role, robot, joint_id = result
 
             key = (role, robot)
             if key not in grouped_data:
@@ -956,7 +962,7 @@ class BufferedStreamExtractor:
 
         return nearest_idx
 
-    def _parse_joint_name(self, joint_name: str) -> Tuple[str, str, str]:
+    def _parse_joint_name(self, joint_name: str) -> Optional[Tuple[str, str, str]]:
         """Parse joint name using shared utility."""
         return parse_joint_name(joint_name, self._joint_pattern)
 
@@ -983,9 +989,12 @@ class BufferedStreamExtractor:
 
         for i, joint_name in enumerate(ros_msg.name):
             try:
-                role, robot, joint_id = self._parse_joint_name(joint_name)
+                result = self._parse_joint_name(joint_name)
             except DataExtractionError:
                 continue  # Skip unparseable joints
+            if result is None:
+                continue  # arm not in configured arms map, skip
+            role, robot, joint_id = result
 
             key = (role, robot)
             if key not in grouped:

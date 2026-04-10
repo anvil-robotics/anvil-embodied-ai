@@ -153,13 +153,13 @@ camera_mapping:
 #   LINEAR | EXP | ONES | ZEROS  (EXP recommended)
 
 rtc:
-  # Baseline benchmark (RTX 4090, pi05_libero_finetuned, chunk_size=50, 10 DDIM steps):
-  #   mean latency: 215.8 ms  p95: 224.6 ms  →  ceil(0.225 × 30 Hz) = 7 steps
-  inference_delay: 7
+  # inference_delay: fallback step-count for first inference (before LatencyTracker kicks in).
+  #   Real-robot tuned: ceil(~330ms × 30Hz) ≈ 10 steps. Auto-adjusted after first inference.
+  inference_delay: 10
   # Set equal to chunk_size for maximum RTC overlap (inference starts as soon as
   # current chunk is dispatched, eliminating the stall between chunks).
   # chunk_size=50 → threshold=50
   queue_trigger_threshold: 50
-  execution_horizon: 10
+  execution_horizon: 12
   max_guidance_weight: 10.0
   prefix_attention_schedule: EXP
