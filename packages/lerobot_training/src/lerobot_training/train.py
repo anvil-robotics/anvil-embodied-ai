@@ -127,6 +127,14 @@ class TrainingConfig:
         if not any(arg.startswith("--eval_freq") for arg in sys.argv):
             sys.argv.append("--eval_freq=0")
 
+        # Default total training steps
+        if not any(arg.startswith("--steps") for arg in sys.argv):
+            sys.argv.append("--steps=100000")
+
+        # Default checkpoint save frequency
+        if not any(arg.startswith("--save_freq") for arg in sys.argv):
+            sys.argv.append("--save_freq=10000")
+
         # Default wandb project to "anvil"
         if not any(arg.startswith("--wandb.project") for arg in sys.argv):
             sys.argv.append("--wandb.project=anvil")

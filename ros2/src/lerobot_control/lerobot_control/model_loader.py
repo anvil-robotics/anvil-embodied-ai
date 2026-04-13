@@ -271,6 +271,11 @@ class ModelLoader:
             if coeff is not None and not hasattr(model, "temporal_ensembler"):
                 self._create_temporal_ensembler(model, coeff)
 
+        # Special handling: propagate num_inference_steps to DiffusionModel internal cache
+        # (DiffusionModel caches this at __init__ before overrides are applied)
+        if "num_inference_steps" in self.config_overrides and hasattr(model, "diffusion"):
+            model.diffusion.num_inference_steps = self.config_overrides["num_inference_steps"]
+
     def _apply_rtc_config(self, model) -> None:
         """Inject RTCConfig into VLA models and call init_rtc_processor().
 
@@ -383,7 +388,7 @@ class ModelLoader:
         except FileNotFoundError as e:
             self._log("warn", f"Processor pipelines not found: {e}")
         except Exception as e:
-            self._log("warn", f"Failed to load processor pipelines: {e}")
+            self._log("error", f"Failed to load processor pipelines: {e}")
 
         # For pi05: if no preprocessor found in the checkpoint (fine-tuned models often
         # skip saving policy_preprocessor.json), rebuild it from the policy's own factory.

@@ -87,7 +87,8 @@ services:
       # HuggingFace model cache — VLA models (pi0/pi05/smolvla) need the PaliGemma tokenizer
       # at runtime. Set HF_CACHE to your host ~/.cache/huggingface when using a VLA model.
       # ACT/Diffusion models are unaffected if this is empty.
-      - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface:ro
+      # HuggingFace needs write access to create lock files when loading tokenizers.
+      - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface
     depends_on:
       mock-robot:
         condition: service_healthy

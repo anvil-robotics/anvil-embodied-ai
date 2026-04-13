@@ -24,7 +24,8 @@ services:
       - ${MODEL_PATH:?MODEL_PATH is required}:/workspace/model:ro
       - ${CONFIG_FILE:-./configs/lerobot_control/inference_default.yaml}:/workspace/config.yaml:ro
       # HF_CACHE — VLA models (pi0/pi05/smolvla) need PaliGemma tokenizer at runtime.
-      - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface:ro
+      # HuggingFace needs write access to create lock files when loading tokenizers.
+      - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
