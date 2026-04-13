@@ -165,13 +165,8 @@ class LeRobotInferenceNode(Node):
         self.arms_config = self.config.get("arms", {})
         self.joint_names_config = self.config.get("joint_names", {})
 
-        # Inference tuning knobs (null = use checkpoint defaults)
-        tuning_config = self.config.get("inference_tuning", {})
-        self.n_action_steps_override = tuning_config.get("n_action_steps", None)
-        self.temporal_ensemble_coeff = tuning_config.get("temporal_ensemble_coeff", None)
-
-        # RTC config — passed to ModelLoader for VLA models; ignored for ACT/Diffusion
-        self.rtc_config_yaml = self.config.get("rtc", {})
+        # Inference tuning — per model type (resolved after model_type is known)
+        self._tuning_config = self.config.get("inference_tuning", {})
 
         # --- Checkpoint metadata (lightweight JSON reads, no tensor loading) ---
         meta = self._read_checkpoint_metadata()
@@ -282,17 +277,33 @@ class LeRobotInferenceNode(Node):
             set_deterministic_mode(seed)
             self.get_logger().info(f"Deterministic mode enabled with seed={seed}")
 
-        # Build inference tuning overrides
+        # Resolve inference tuning per model type
+        tuning = self._tuning_config
         config_overrides = {}
-        if self.n_action_steps_override is not None:
-            config_overrides["n_action_steps"] = self.n_action_steps_override
-        if self.temporal_ensemble_coeff is not None:
-            config_overrides["temporal_ensemble_coeff"] = self.temporal_ensemble_coeff
-            if self.n_action_steps_override is None or self.n_action_steps_override > 1:
-                self.get_logger().warn(
-                    "temporal_ensemble requires n_action_steps=1, forcing override"
-                )
-                config_overrides["n_action_steps"] = 1
+
+        if self._is_vla:
+            self.rtc_config_yaml = tuning.get("rtc", {})
+        elif self.model_type == "diffusion":
+            diff = tuning.get("diffusion", {})
+            if diff.get("n_action_steps") is not None:
+                config_overrides["n_action_steps"] = diff["n_action_steps"]
+            if diff.get("num_inference_steps") is not None:
+                config_overrides["num_inference_steps"] = diff["num_inference_steps"]
+        else:  # ACT and others
+            act = tuning.get("act", {})
+            if act.get("n_action_steps") is not None:
+                config_overrides["n_action_steps"] = act["n_action_steps"]
+            if act.get("temporal_ensemble_coeff") is not None:
+                config_overrides["temporal_ensemble_coeff"] = act["temporal_ensemble_coeff"]
+                if act.get("n_action_steps") is None or act["n_action_steps"] > 1:
+                    self.get_logger().warn(
+                        "temporal_ensemble requires n_action_steps=1, forcing override"
+                    )
+                    config_overrides["n_action_steps"] = 1
+
+        # Fallback: also check old top-level rtc key for backward compatibility
+        if self._is_vla and not self.rtc_config_yaml:
+            self.rtc_config_yaml = self.config.get("rtc", {})
 
         loader = ModelLoader(
             self.model_path,
@@ -300,7 +311,7 @@ class LeRobotInferenceNode(Node):
             self.model_type,
             config_overrides=config_overrides,
             logger=self.get_logger(),
-            rtc_config_yaml=self.rtc_config_yaml,
+            rtc_config_yaml=getattr(self, "rtc_config_yaml", {}),
         )
         self.model, self.preprocessor, self.postprocessor = loader.load_with_processors()
         self._loader = loader
