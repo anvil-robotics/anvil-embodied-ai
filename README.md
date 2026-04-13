@@ -127,7 +127,7 @@ Supported policies:
 | Pi0 | `pi0` | Flow-matching VLA; PaliGemma-3B backbone |
 | Pi0.5 | `pi05` | Larger Pi0 variant (~4B params); higher VRAM |
 
-Checkpoints are saved to `model_zoo/<job_name>/`. Run `anvil-trainer --help` for the full flag reference.
+Checkpoints are saved to `model_zoo/<dataset>/<policy>_<timestamp>/` by default. Run `anvil-trainer --help` for the full flag reference.
 
 #### Common Parameters
 
@@ -135,8 +135,10 @@ Checkpoints are saved to `model_zoo/<job_name>/`. Run `anvil-trainer --help` for
 |------|-------------|
 | `--dataset.root=PATH` | Path to converted LeRobot dataset |
 | `--policy.type=TYPE` | Policy type (see table above) |
-| `--job_name=NAME` | Run name; auto-generated if omitted |
-| `--camera-filter=chest,waist` | Train with a subset of cameras |
+| `--job_name=NAME` | Run name — auto-generated as `<policy>_<timestamp>` if omitted |
+| `--camera-filter=chest,waist` | Train with a subset of cameras (e.g. drop `wrist_l` if unused) |
+| `--backbone=resnet18` | Vision backbone for ACT / Diffusion: `resnet18` (default) · `resnet34` · `resnet50` |
+| `--val-split-ratio=0.2` | Hold out the last 20 % of episodes for val loss — logged at every checkpoint |
 | `--task-description="..."` | Task prompt — required for SmolVLA / Pi0 / Pi0.5 |
 
 #### Common Hyperparameters
@@ -165,9 +167,9 @@ Then add to any training command:
 | Flag | Description |
 |---|---|
 | `--wandb.enable=true` | Enable W&B logging (default: `false`) |
-| `--wandb.project=NAME` | W&B project name — `--job_name` becomes the run name within it |
+| `--wandb.project=NAME` | W&B project name — auto-set to the dataset folder name; `--job_name` (= `<policy>_<timestamp>`) becomes the run name |
 
-Key metrics: `train/loss` (should decrease steadily), `train/grad_norm` (spikes indicate instability — try lowering LR). All sample commands below include `--wandb.enable=false` — flip to `true` to start logging.
+Key metrics: `train/loss` (should decrease steadily), `train/grad_norm` (spikes indicate instability — try lowering LR), `val/loss` (logged at every checkpoint if `--val-split-ratio` is set). All sample commands below include `--wandb.enable=false` — flip to `true` to start logging.
 
 #### [ACT](docs/training-tips.md#act)
 
@@ -360,7 +362,7 @@ Use `docker-compose.fake-hardware.yml` to simulate this 2-PC setup locally (brid
 anvil-embodied-ai/
 ├── packages/
 │   ├── mcap_converter/            # MCAP to LeRobot conversion
-│   └── lerobot_training/          # Training utilities & transforms
+│   └── anvil_trainer/             # Training utilities & transforms
 ├── ros2/
 │   └── src/lerobot_control/       # ROS2 inference node (Jazzy)
 ├── configs/
