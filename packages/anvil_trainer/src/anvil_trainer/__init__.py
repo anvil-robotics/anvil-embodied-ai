@@ -1,19 +1,20 @@
 """
-LeRobot Training Package
+Anvil Trainer Package
 
-Custom LeRobot training utilities with pluggable transforms:
+Training utilities for Anvil robotics workflows, supporting lerobot and other platforms.
+Provides pluggable transforms for dataset preprocessing:
 - Camera filtering: Train with a subset of cameras
 - Task override: Override dataset task for SmolVLA
 - Delta actions: Convert actions to relative (action - observation.state)
 
 Usage:
-    from lerobot_training import train, TrainingConfig, TransformRunner
+    from anvil_trainer import train, TrainingConfig, TransformRunner
 
     # Or use CLI:
-    # lerobot-train --dataset.repo_id=local --dataset.root=/path/to/dataset
+    # anvil-trainer --dataset.repo_id=local --dataset.root=/path/to/dataset
 """
 
-from lerobot_training.train import (
+from anvil_trainer.train import (
     CameraFilterTransform,
     DeltaActionTransform,
     TaskOverrideTransform,

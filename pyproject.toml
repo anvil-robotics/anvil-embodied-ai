@@ -39,7 +39,7 @@ dev = [
 [tool.uv.workspace]
 members = [
     "packages/mcap_converter",
-    "packages/lerobot_training",
+    "packages/anvil_trainer",
 ]
 
 # PyTorch index — required for torch+cu* packages with bundled CUDA libs.
@@ -78,7 +78,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["mcap_converter", "lerobot_training"]
+known-first-party = ["mcap_converter", "anvil_trainer"]
 
 [tool.pyright]
 pythonVersion = "3.12"

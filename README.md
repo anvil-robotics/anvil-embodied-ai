@@ -177,7 +177,6 @@ uv run anvil-trainer \
   --policy.type=act \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --wandb.enable=false \  # set true to save training logs to W&B
-  --job_name=pick-and-place
 ```
 
 #### [Diffusion](docs/training-tips.md#diffusion-policy)
@@ -190,7 +189,6 @@ uv run anvil-trainer \
   --policy.type=diffusion \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --wandb.enable=false \  # set true to save training logs to W&B
-  --job_name=pick-and-place
 ```
 
 #### [SmolVLA](docs/training-tips.md#smolvla)
@@ -205,7 +203,6 @@ uv run anvil-trainer \
   --policy.load_vlm_weights=true \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --wandb.enable=false \  # set true to save training logs to W&B
-  --job_name=grabbing-smolvla \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
 
@@ -235,7 +232,6 @@ uv run anvil-trainer \
   --policy.train_expert_only=true \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --wandb.enable=false \  # set true to save training logs to W&B
-  --job_name=grabbing-pi0 \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
 
@@ -256,7 +252,6 @@ uv run anvil-trainer \
   --batch_size=16 \
   --num_workers=0 \
   --wandb.enable=false \  # set true to save training logs to W&B
-  --job_name=grabbing-pi05 \
   --task-description="Grab the gray doll and put it in the bucket"
 ```
 
