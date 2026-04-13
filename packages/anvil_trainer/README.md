@@ -1,6 +1,6 @@
-# LeRobot Training Package
+# Anvil Trainer
 
-Custom LeRobot training utilities with pluggable transforms for Anvil robotics workflows.
+Training utilities for Anvil robotics workflows with pluggable transforms. Supports lerobot and other training platforms.
 
 ## Features
 
@@ -21,26 +21,27 @@ uv sync --all-packages
 
 ```bash
 # Basic training with local dataset
-lerobot-train \
+anvil-trainer \
     --dataset.repo_id=local \
     --dataset.root=/path/to/dataset \
     --policy.type=act
 
 # Train with camera filtering
-LEROBOT_CAMERA_FILTER=chest,waist,wrist_l lerobot-train \
+LEROBOT_CAMERA_FILTER=chest,waist,wrist_l \
+    anvil-trainer \
     --dataset.repo_id=local \
     --dataset.root=/path/to/dataset \
     --policy.type=act
 
 # Train with delta actions
-lerobot-train \
+anvil-trainer \
     --dataset.repo_id=local \
     --dataset.root=/path/to/dataset \
     --policy.type=act \
     --use-delta-actions
 
 # Train SmolVLA with language instruction
-LEROBOT_TASK_OVERRIDE="Pick up the red cube" lerobot-train \
+LEROBOT_TASK_OVERRIDE="Pick up the red cube" anvil-trainer \
     --dataset.repo_id=local \
     --dataset.root=/path/to/dataset \
     --policy.type=smolvla
@@ -49,7 +50,7 @@ LEROBOT_TASK_OVERRIDE="Pick up the red cube" lerobot-train \
 ### Python API
 
 ```python
-from lerobot_training import train, TrainingConfig
+from anvil_trainer import train, TrainingConfig
 
 config = TrainingConfig(
     cameras=["chest", "waist", "wrist_l"],
