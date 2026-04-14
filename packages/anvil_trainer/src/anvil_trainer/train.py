@@ -75,6 +75,7 @@ class TrainingConfig:
     cameras: list[str] | None = None
     task_override: str | None = None
     use_delta_actions: bool = False
+    delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when use_delta_actions=True
     dataset_root: str | None = None
     output_dir: str | None = None
     val_split_ratio: float = 0.2  # Fraction of episodes held out for validation loss (0.0 = disabled)
@@ -121,6 +122,15 @@ class TrainingConfig:
         if use_delta_actions:
             sys.argv.remove("--use-delta-actions")
 
+        # Joints to exclude from delta transform (kept in absolute space)
+        delta_exclude_joints: list[str] | None = None
+        for arg in sys.argv:
+            if arg.startswith("--delta-exclude-joints="):
+                raw = arg.split("=", 1)[1]
+                delta_exclude_joints = [j.strip() for j in raw.split(",") if j.strip()]
+                sys.argv.remove(arg)
+                break
+
         # Validation split ratio from --val-split-ratio arg (remove to avoid lerobot arg parsing error)
         val_split_ratio = 0.2  # default
         for arg in sys.argv:
@@ -142,6 +152,13 @@ class TrainingConfig:
             if arg.startswith("--policy.type="):
                 policy_type = arg.split("=", 1)[1]
                 break
+
+        # If --policy.path is given (loading from checkpoint), lerobot rejects --policy.type.
+        # Strip --policy.type from sys.argv; we've already captured the value for naming purposes.
+        # Also skip backbone injection — the checkpoint already contains backbone config.
+        has_policy_path = any(a.startswith("--policy.path=") for a in sys.argv)
+        if has_policy_path:
+            sys.argv = [a for a in sys.argv if not a.startswith("--policy.type=")]
 
         # Backbone selection from --backbone= arg (for ACT/Diffusion; VLAs use their own vision)
         backbone = "resnet18"
@@ -173,8 +190,9 @@ class TrainingConfig:
 
         # Inject backbone settings for non-VLA policies (ACT, Diffusion).
         # Pi0.5 / SmolVLA use their own vision encoders and ignore these flags.
+        # Skip when loading from a checkpoint (--policy.path): backbone is already saved in the config.
         _VLA_POLICIES = {"pi05", "smolvla", "pi0"}
-        if policy_type not in _VLA_POLICIES:
+        if policy_type not in _VLA_POLICIES and not has_policy_path:
             _BACKBONE_MAP = {
                 "resnet18": ("resnet18", "ResNet18_Weights.IMAGENET1K_V1"),
                 "resnet34": ("resnet34", "ResNet34_Weights.IMAGENET1K_V1"),
@@ -225,6 +243,7 @@ class TrainingConfig:
             cameras=cameras,
             task_override=task_override,
             use_delta_actions=use_delta_actions,
+            delta_exclude_joints=delta_exclude_joints,
             dataset_root=dataset_root,
             output_dir=output_dir,
             val_split_ratio=val_split_ratio,
@@ -398,7 +417,15 @@ class TaskOverrideTransform(Transform):
 
 
 class DeltaActionTransform(Transform):
-    """Convert absolute actions to delta actions (action - observation.state)."""
+    """Convert absolute actions to delta actions (action - observation.state).
+
+    Joints listed in config.delta_exclude_joints are kept in absolute space
+    (their delta is not applied). Joint names are resolved from the dataset's
+    meta/info.json on first call and cached.
+    """
+
+    def __init__(self):
+        self._exclude_indices: list[int] | None = None  # cached after first lookup
 
     @property
     def name(self) -> str:
@@ -407,9 +434,52 @@ class DeltaActionTransform(Transform):
     def is_enabled(self, config: TrainingConfig) -> bool:
         return config.use_delta_actions
 
+    def _resolve_exclude_indices(self, config: TrainingConfig) -> list[int]:
+        """Resolve joint names → action tensor indices from dataset metadata (cached)."""
+        if self._exclude_indices is not None:
+            return self._exclude_indices
+
+        if not config.delta_exclude_joints or not config.dataset_root:
+            self._exclude_indices = []
+            return self._exclude_indices
+
+        info_path = Path(config.dataset_root) / "meta" / "info.json"
+        if not info_path.exists():
+            log.warning("[delta_actions] %s not found — no joints excluded", info_path)
+            self._exclude_indices = []
+            return self._exclude_indices
+
+        with open(info_path) as f:
+            info = json.load(f)
+
+        names = info.get("features", {}).get("action", {}).get("names", [])
+        # Flatten if nested list (e.g. [{"motor_names": [...]}])
+        if names and isinstance(names[0], dict):
+            names = [n for group in names for n in group.get("motor_names", [])]
+
+        indices = []
+        for joint in config.delta_exclude_joints:
+            if joint in names:
+                idx = names.index(joint)
+                indices.append(idx)
+                log.info("[delta_actions] Excluding joint '%s' (index %d) from delta", joint, idx)
+            else:
+                log.warning("[delta_actions] Joint '%s' not found in action names %s", joint, names)
+
+        self._exclude_indices = indices
+        return self._exclude_indices
+
     def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
-        if "action" in item and "observation.state" in item:
-            item["action"] = item["action"] - item["observation.state"]
+        if "action" not in item or "observation.state" not in item:
+            return item
+
+        original_action = item["action"].clone()
+        item["action"] = item["action"] - item["observation.state"]
+
+        # Restore excluded joints to their original absolute values
+        for idx in self._resolve_exclude_indices(config):
+            item["action"][..., idx] = original_action[..., idx]
+
         return item
 
 
@@ -430,16 +500,19 @@ class TransformRunner:
     - Dataset patching (after lerobot import)
     """
 
-    # Registry of available transforms (add new transforms here)
-    TRANSFORMS: list[Transform] = [
-        CameraFilterTransform(),
-        TaskOverrideTransform(),
-        DeltaActionTransform(),
-    ]
+    # Registry of available transforms (add new transforms here).
+    # Instantiated fresh per TransformRunner so stateful transforms (e.g. DeltaActionTransform
+    # which caches joint indices) do not share state across runs.
+    TRANSFORMS: list[Transform] = []  # populated in __init__
 
     def __init__(self, config: TrainingConfig):
         self.config = config
-        self.active_transforms = [t for t in self.TRANSFORMS if t.is_enabled(config)]
+        transforms: list[Transform] = [
+            CameraFilterTransform(),
+            TaskOverrideTransform(),
+            DeltaActionTransform(),
+        ]
+        self.active_transforms = [t for t in transforms if t.is_enabled(config)]
         self._val_dataloader = None  # set by apply_val_loss_patch when make_dataset is called
 
     def log_config(self) -> None:
@@ -562,6 +635,8 @@ class TransformRunner:
         from lerobot.utils.train_utils import save_checkpoint as original_save_checkpoint
 
         anvil_cfg: dict = {"use_delta_actions": self.config.use_delta_actions}
+        if self.config.delta_exclude_joints:
+            anvil_cfg["delta_exclude_joints"] = self.config.delta_exclude_joints
         if self.config.task_override:
             anvil_cfg["task_description"] = self.config.task_override
         anvil_cfg_content = json.dumps(anvil_cfg, indent=2)
@@ -597,6 +672,14 @@ class TransformRunner:
                     val_loss = total_loss / max(n_batches, 1)
                     val_s = time.perf_counter() - t0
                     log.info("[val_loss] Step %s: loss=%.4f (%.1fs)", step, val_loss, val_s)
+
+                    # Log to WandB if it is active
+                    try:
+                        import wandb as _wandb
+                        if _wandb.run is not None:
+                            _wandb.log({"val/loss": val_loss}, step=int(step))
+                    except Exception:
+                        pass
 
             # --- Original save ---
             original_save_checkpoint(checkpoint_dir, **kwargs)
