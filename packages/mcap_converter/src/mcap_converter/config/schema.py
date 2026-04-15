@@ -137,7 +137,7 @@ class DataConfig:
     # Separate feature mappings for observation vs action
     # This allows different features for input (observation) and output (action)
     observation_feature_mapping: FeatureMapping = field(
-        default_factory=lambda: FeatureMapping(state="position", others=["velocity", "effort"])
+        default_factory=lambda: FeatureMapping(state="position", others=[])
     )
 
     action_feature_mapping: FeatureMapping = field(

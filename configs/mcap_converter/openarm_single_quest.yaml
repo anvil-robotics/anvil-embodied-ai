@@ -63,7 +63,6 @@ camera_topics:
   - "/cam_waist/image_raw/compressed"
   - "/cam_wrist_r/image_raw/compressed"
   - "/cam_chest/image_raw/compressed"
-  - "/cam_wrist_l/image_raw/compressed"
 
 # Map ROS topics to dataset camera names
 # These become: observation.images.{name}
@@ -71,7 +70,6 @@ camera_topic_mapping:
   "/cam_waist/image_raw/compressed": "waist"
   "/cam_wrist_r/image_raw/compressed": "wrist_r"
   "/cam_chest/image_raw/compressed": "chest"
-  "/cam_wrist_l/image_raw/compressed": "wrist_l"
 
 # Target image resolution [width, height]
 image_resolution: [640, 480]
@@ -84,7 +82,7 @@ image_resolution: [640, 480]
 # What to extract from observation joints (follower)
 observation_feature_mapping:
   state: "position"      # Primary feature -> observation.state
-  # others:                # Additional features
+  others: []             # Uncomment to add velocity/effort:
   #   - "velocity"         # -> observation.velocity
   #   - "effort"           # -> observation.effort
 
