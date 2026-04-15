@@ -152,11 +152,6 @@ class LeRobotWriter:
             print("  - Saving episode and encoding images...")
         dataset.save_episode()
 
-        # Stop image writer
-        if not self.quiet:
-            print("  - Stopping image writer...")
-        dataset.stop_image_writer()
-
     def finalize(self, dataset: LeRobotDataset):
         """
         Finalize dataset (write metadata and close files)
@@ -297,45 +292,18 @@ class LeRobotWriter:
         """
         Load an existing dataset in write mode for appending new episodes.
 
-        Mirrors the internal setup of LeRobotDataset.create() but uses
-        LeRobotDatasetMetadata.__init__ to load existing metadata instead
-        of creating a fresh directory. Use this when --resume is set and
+        Uses LeRobotDataset.resume() to load existing metadata and prepare
+        the dataset for writing. Use this when --resume is set and
         the output directory already contains a partial conversion.
 
         Returns:
             LeRobotDataset instance ready to accept add_frame / save_episode calls
         """
-        from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
-        from lerobot.datasets.video_utils import get_safe_default_codec, resolve_vcodec
-
-        vcodec = resolve_vcodec(self.vcodec)
-        obj = LeRobotDataset.__new__(LeRobotDataset)
-        obj.meta = LeRobotDatasetMetadata(self.repo_id, root=str(self.output_dir))
-        obj.repo_id = obj.meta.repo_id
-        obj.root = obj.meta.root
-        obj.revision = None
-        obj.tolerance_s = 1e-4
-        obj.image_writer = None
-        obj.batch_encoding_size = 1
-        obj.episodes_since_last_encoding = 0
-        obj.vcodec = vcodec
-        obj._encoder_threads = None
-        obj.episode_buffer = obj.create_episode_buffer()
-        obj.episodes = None
-        obj.hf_dataset = obj.create_hf_dataset()
-        obj.image_transforms = None
-        obj.delta_timestamps = None
-        obj.delta_indices = None
-        obj._absolute_to_relative_idx = None
-        obj.video_backend = get_safe_default_codec()
-        obj.writer = None
-        obj.latest_episode = None
-        obj._current_file_start_frame = None
-        obj._lazy_loading = False
-        obj._recorded_frames = 0
-        obj._writer_closed_for_reading = False
-        obj._streaming_encoder = None
-        return obj
+        return LeRobotDataset.resume(
+            repo_id=self.repo_id,
+            root=str(self.output_dir),
+            vcodec=self.vcodec,
+        )
 
     def __repr__(self) -> str:
         return f"LeRobotWriter(output_dir='{self.output_dir}', repo_id='{self.repo_id}')"

@@ -395,7 +395,6 @@ def convert_session(
             )
             with suppress_fd_output():
                 dataset.save_episode()
-                dataset.stop_image_writer()
 
             episode_time = time.time() - episode_start_time
             episode_times.append(episode_time)
