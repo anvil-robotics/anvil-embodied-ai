@@ -51,7 +51,7 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 
 log = logging.getLogger(__name__)
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +78,8 @@ class TrainingConfig:
     delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when use_delta_actions=True
     dataset_root: str | None = None
     output_dir: str | None = None
-    val_split_ratio: float = 0.2  # Fraction of episodes held out for validation loss (0.0 = disabled)
+    resume_job_path: str | None = None
+    split_ratio: list[float] = field(default_factory=lambda: [8.0, 1.0, 1.0])  # train/val/test episode split ratios
     # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50 (VLA models ignore this)
     backbone: str = "resnet18"
 
@@ -131,11 +132,14 @@ class TrainingConfig:
                 sys.argv.remove(arg)
                 break
 
-        # Validation split ratio from --val-split-ratio arg (remove to avoid lerobot arg parsing error)
-        val_split_ratio = 0.2  # default
+        # Episode split ratios from --split-ratio arg (remove to avoid lerobot arg parsing error)
+        split_ratio = [8.0, 1.0, 1.0]  # default: train/val/test
         for arg in sys.argv:
-            if arg.startswith("--val-split-ratio="):
-                val_split_ratio = float(arg.split("=", 1)[1])
+            if arg.startswith("--split-ratio="):
+                parts = [float(x) for x in arg.split("=", 1)[1].split(",")]
+                if len(parts) == 2:
+                    parts.append(0.0)  # no test set
+                split_ratio = parts
                 sys.argv.remove(arg)
                 break
 
@@ -153,12 +157,57 @@ class TrainingConfig:
                 policy_type = arg.split("=", 1)[1]
                 break
 
-        # If --policy.path is given (loading from checkpoint), lerobot rejects --policy.type.
-        # Strip --policy.type from sys.argv; we've already captured the value for naming purposes.
-        # Also skip backbone injection — the checkpoint already contains backbone config.
-        has_policy_path = any(a.startswith("--policy.path=") for a in sys.argv)
-        if has_policy_path:
-            sys.argv = [a for a in sys.argv if not a.startswith("--policy.type=")]
+        # Resume job from --resume-job=PATH arg
+        resume_job_path = None
+        for arg in sys.argv:
+            if arg.startswith("--resume-job="):
+                resume_job_path = arg.split("=", 1)[1]
+                sys.argv.remove(arg)
+                break
+
+        # If --resume or --output_dir is passed directly, warn and tell to use --resume-job
+        if any(a.startswith("--resume") or a.startswith("--output_dir") for a in sys.argv):
+            log.warning("[anvil_trainer] Manual --resume or --output_dir detected. Please use --resume-job=PATH instead for better compatibility.")
+
+        is_resume = resume_job_path is not None
+        
+        if is_resume:
+            # Inject lerobot resume flags
+            if not any(a.startswith("--resume=") for a in sys.argv) and "--resume" not in sys.argv:
+                sys.argv.append("--resume=true")
+            if not any(a.startswith("--output_dir=") for a in sys.argv):
+                sys.argv.append(f"--output_dir={resume_job_path}")
+            
+            # Extract output_dir for our internal config
+            output_dir = resume_job_path
+        else:
+            # Resolve output_dir for NEW job: model_zoo/{dataset_name}/{run_name}
+            # Extract job_name if provided (passed through to lerobot as-is)
+            job_name = None
+            for arg in sys.argv:
+                if arg.startswith("--job_name="):
+                    job_name = arg.split("=", 1)[1]
+                    break
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_name = job_name if job_name else f"{policy_type}_{timestamp}"
+
+            output_dir = None
+            for arg in sys.argv:
+                if arg.startswith("--output_dir="):
+                    output_dir = arg.split("=", 1)[1]
+                    break
+            if output_dir is None:
+                output_dir = f"model_zoo/{dataset_name}/{run_name}"
+                sys.argv.append(f"--output_dir={output_dir}")
+
+            # Auto-inject job_name if not provided (used as wandb run name)
+            if not job_name:
+                sys.argv.append(f"--job_name={run_name}")
+
+            # Set wandb project = dataset_name (not hardcoded "anvil")
+            if not any(a.startswith("--wandb.project=") for a in sys.argv):
+                sys.argv.append(f"--wandb.project={dataset_name}")
 
         # Backbone selection from --backbone= arg (for ACT/Diffusion; VLAs use their own vision)
         backbone = "resnet18"
@@ -168,76 +217,52 @@ class TrainingConfig:
                 sys.argv.remove(arg)
                 break
 
-        # Default push_to_hub=false unless explicitly set
-        if not any(arg.startswith("--policy.push_to_hub") for arg in sys.argv):
-            sys.argv.append("--policy.push_to_hub=false")
+        # Defaults injection — skip if resuming to avoid draccus decoding errors
+        if not is_resume:
+            # Default push_to_hub=false unless explicitly set
+            if not any(arg.startswith("--policy.push_to_hub") for arg in sys.argv):
+                sys.argv.append("--policy.push_to_hub=false")
 
-        # Default dataset.repo_id=local for local dataset training
-        if not any(arg.startswith("--dataset.repo_id") for arg in sys.argv):
-            sys.argv.append("--dataset.repo_id=local")
+            # Default dataset.repo_id=local for local dataset training
+            if not any(arg.startswith("--dataset.repo_id") for arg in sys.argv):
+                sys.argv.append("--dataset.repo_id=local")
 
-        # Disable eval by default — no gym env available for Anvil datasets
-        if not any(arg.startswith("--eval_freq") for arg in sys.argv):
-            sys.argv.append("--eval_freq=0")
+            # Disable eval by default — no gym env available for Anvil datasets
+            if not any(arg.startswith("--eval_freq") for arg in sys.argv):
+                sys.argv.append("--eval_freq=0")
 
-        # Default total training steps
-        if not any(arg.startswith("--steps") for arg in sys.argv):
-            sys.argv.append("--steps=100000")
+            # Default total training steps
+            if not any(arg.startswith("--steps") for arg in sys.argv):
+                sys.argv.append("--steps=100000")
 
-        # Default checkpoint save frequency
-        if not any(arg.startswith("--save_freq") for arg in sys.argv):
-            sys.argv.append("--save_freq=10000")
+            # Default checkpoint save frequency
+            if not any(arg.startswith("--save_freq") for arg in sys.argv):
+                sys.argv.append("--save_freq=10000")
 
-        # Inject backbone settings for non-VLA policies (ACT, Diffusion).
-        # Pi0.5 / SmolVLA use their own vision encoders and ignore these flags.
-        # Skip when loading from a checkpoint (--policy.path): backbone is already saved in the config.
-        _VLA_POLICIES = {"pi05", "smolvla", "pi0"}
-        if policy_type not in _VLA_POLICIES and not has_policy_path:
-            _BACKBONE_MAP = {
-                "resnet18": ("resnet18", "ResNet18_Weights.IMAGENET1K_V1"),
-                "resnet34": ("resnet34", "ResNet34_Weights.IMAGENET1K_V1"),
-                "resnet50": ("resnet50", "ResNet50_Weights.IMAGENET1K_V1"),
-            }
-            _vb, _pw = _BACKBONE_MAP.get(backbone, ("resnet18", "ResNet18_Weights.IMAGENET1K_V1"))
-            if not any(a.startswith("--policy.vision_backbone=") for a in sys.argv):
-                sys.argv.append(f"--policy.vision_backbone={_vb}")
-            if not any(a.startswith("--policy.pretrained_backbone_weights=") for a in sys.argv):
-                sys.argv.append(f"--policy.pretrained_backbone_weights={_pw}")
-            # Diffusion's use_group_norm=True replaces BatchNorm with GroupNorm, which is
-            # incompatible with pretrained ImageNet weights. Disable it so the pretrained
-            # BatchNorm statistics are preserved. GroupNorm is only needed for very small batches.
-            if policy_type == "diffusion":
-                if not any(a.startswith("--policy.use_group_norm=") for a in sys.argv):
-                    sys.argv.append("--policy.use_group_norm=false")
+            # If --policy.path is given (loading from checkpoint), lerobot rejects --policy.type.
+            # Strip --policy.type from sys.argv; we've already captured the value for naming purposes.
+            # Also skip backbone injection — the checkpoint already contains backbone config.
+            has_policy_path = any(a.startswith("--policy.path=") for a in sys.argv)
+            if has_policy_path:
+                sys.argv = [a for a in sys.argv if not a.startswith("--policy.type=")]
 
-        # Extract job_name if provided (passed through to lerobot as-is)
-        job_name = None
-        for arg in sys.argv:
-            if arg.startswith("--job_name="):
-                job_name = arg.split("=", 1)[1]
-                break
-
-        # Resolve output_dir: model_zoo/{dataset_name}/{run_name}
-        #   run_name = job_name if provided, else {policy_type}_{timestamp}
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = job_name if job_name else f"{policy_type}_{timestamp}"
-
-        output_dir = None
-        for arg in sys.argv:
-            if arg.startswith("--output_dir="):
-                output_dir = arg.split("=", 1)[1]
-                break
-        if output_dir is None:
-            output_dir = f"model_zoo/{dataset_name}/{run_name}"
-            sys.argv.append(f"--output_dir={output_dir}")
-
-        # Auto-inject job_name if not provided (used as wandb run name)
-        if not job_name:
-            sys.argv.append(f"--job_name={run_name}")
-
-        # Set wandb project = dataset_name (not hardcoded "anvil")
-        if not any(a.startswith("--wandb.project=") for a in sys.argv):
-            sys.argv.append(f"--wandb.project={dataset_name}")
+            # Inject backbone settings for non-VLA policies (ACT, Diffusion).
+            # Pi0.5 / SmolVLA use their own vision encoders and ignore these flags.
+            _VLA_POLICIES = {"pi05", "smolvla", "pi0"}
+            if policy_type not in _VLA_POLICIES and not has_policy_path:
+                _BACKBONE_MAP = {
+                    "resnet18": ("resnet18", "ResNet18_Weights.IMAGENET1K_V1"),
+                    "resnet34": ("resnet34", "ResNet34_Weights.IMAGENET1K_V1"),
+                    "resnet50": ("resnet50", "ResNet50_Weights.IMAGENET1K_V1"),
+                }
+                _vb, _pw = _BACKBONE_MAP.get(backbone, ("resnet18", "ResNet18_Weights.IMAGENET1K_V1"))
+                if not any(a.startswith("--policy.vision_backbone=") for a in sys.argv):
+                    sys.argv.append(f"--policy.vision_backbone={_vb}")
+                if not any(a.startswith("--policy.pretrained_backbone_weights=") for a in sys.argv):
+                    sys.argv.append(f"--policy.pretrained_backbone_weights={_pw}")
+                if policy_type == "diffusion":
+                    if not any(a.startswith("--policy.use_group_norm=") for a in sys.argv):
+                        sys.argv.append("--policy.use_group_norm=false")
 
         return cls(
             cameras=cameras,
@@ -246,7 +271,8 @@ class TrainingConfig:
             delta_exclude_joints=delta_exclude_joints,
             dataset_root=dataset_root,
             output_dir=output_dir,
-            val_split_ratio=val_split_ratio,
+            resume_job_path=resume_job_path,
+            split_ratio=split_ratio,
             backbone=backbone,
         )
 
@@ -263,6 +289,7 @@ class TrainingConfig:
             task_override=data.get("task_override"),
             use_delta_actions=data.get("use_delta_actions", False),
             dataset_root=data.get("dataset_root"),
+            split_ratio=data.get("split_ratio", [8.0, 1.0, 1.0]),
             backbone=data.get("backbone", "resnet18"),
         )
 
@@ -513,7 +540,12 @@ class TransformRunner:
             DeltaActionTransform(),
         ]
         self.active_transforms = [t for t in transforms if t.is_enabled(config)]
-        self._val_dataloader = None  # set by apply_val_loss_patch when make_dataset is called
+        self._val_dataloader = None   # set by apply_val_loss_patch when make_dataset is called
+        self._test_dataloader = None  # set by apply_val_loss_patch when make_dataset is called
+        self._split_info: dict = {}   # populated by patched_make_dataset
+        self._preprocessor = None     # captured from make_pre_post_processors
+        self._val_freq = 0            # set from cfg.log_freq * 5 inside patched_make_dataset
+        self._resume_step = 0         # for absolute step tracking in wandb
 
     def log_config(self) -> None:
         """Log active transforms."""
@@ -541,91 +573,184 @@ class TransformRunner:
             transform.patch_metadata(self.config)
 
     def apply_dataset_patches(self) -> None:
-        """Patch LeRobotDataset.__getitem__ to apply transforms."""
-        if not self.active_transforms:
-            return
+        """Patch LeRobotDataset.__getitem__ to apply transforms and fix index mapping.
 
+        This patch is always installed (even without active_transforms) because
+        EpisodeAwareSampler yields absolute frame indices that must be remapped to
+        relative indices for filtered (split) datasets. The mapping is only applied
+        to the train dataset instance (flagged via _anvil_uses_abs_sampler).
+        """
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
+        # We must capture the original __getitem__ to use it in our patch.
+        # LeRobotDataset.__getitem__ in v0.5.1 does not perform index mapping,
+        # but EpisodeAwareSampler yields absolute indices. We add the mapping
+        # logic here to support filtered datasets (splits).
         original_getitem = LeRobotDataset.__getitem__
         transforms = self.active_transforms
         config = self.config
 
         def patched_getitem(self, idx):
+            # 1. Resolve relative index if the dataset is filtered by episodes.
+            # Only the train dataset uses EpisodeAwareSampler (absolute indices).
+            # Val/test datasets use DataLoader without a sampler (relative indices
+            # 0..N-1) and must NOT be remapped — doing so would corrupt reads when
+            # relative indices overlap with the absolute frame index space.
+            reader = self._ensure_reader()
+            if getattr(self, '_anvil_uses_abs_sampler', False) and reader._absolute_to_relative_idx is not None:
+                # Map from absolute HF frame index to relative filtered index
+                idx = reader._absolute_to_relative_idx.get(idx, idx)
+
+            # 2. Call original __getitem__ (which calls reader.get_item)
             item = original_getitem(self, idx)
+
+            # 3. Apply transforms (no-op when transforms list is empty)
             for transform in transforms:
                 item = transform.apply(item, config)
             return item
 
         LeRobotDataset.__getitem__ = patched_getitem
-        log.info("[anvil_trainer] Patched LeRobotDataset with %d transform(s)", len(transforms))
+        log.info("[anvil_trainer] Patched LeRobotDataset.__getitem__ (%d transform(s))", len(transforms))
 
     def apply_val_loss_patch(self) -> None:
-        """Monkey-patch make_dataset to create a val split, then compute val loss at each checkpoint."""
-        if self.config.val_split_ratio <= 0.0:
-            return
+        """Monkey-patch make_dataset to create train/val/test splits, and capture preprocessor."""
+        s = self.config.split_ratio
+        total_r = sum(s)
+        if total_r <= 0 or (s[1] <= 0 and (len(s) < 3 or s[2] <= 0)):
+            return  # no val or test, skip patching
 
         import lerobot.datasets.factory as factory_mod
+        import lerobot.policies.factory as policy_factory_mod
         import lerobot.scripts.lerobot_train as lerobot_train_mod
         from lerobot.datasets.factory import make_dataset as original_make_dataset
         import torch
+        import random
 
-        val_split_ratio = self.config.val_split_ratio
         val_state = self
         _patched = {"done": False}
 
         def patched_make_dataset(cfg):
             # Only intercept the first call (main process dataset creation).
-            # Subsequent calls (non-main process or internal re-calls) pass through.
             if _patched["done"]:
                 return original_make_dataset(cfg)
             _patched["done"] = True
 
+            # Capture val_freq and resume_step from lerobot cfg
+            val_state._val_freq = cfg.log_freq * 5 if cfg.log_freq > 0 else 0
+            if cfg.resume and hasattr(cfg, "checkpoint_path") and cfg.checkpoint_path:
+                try:
+                    step_file = Path(cfg.checkpoint_path) / "training_state" / "training_step.json"
+                    if step_file.exists():
+                        val_state._resume_step = json.loads(step_file.read_text()).get("step", 0)
+                except Exception:
+                    val_state._resume_step = 0
+
             # Full dataset to determine total episode count
             full_dataset = original_make_dataset(cfg)
             total_ep = full_dataset.num_episodes
-            n_val = max(1, round(total_ep * val_split_ratio))
-            train_ep = list(range(0, total_ep - n_val))
-            val_ep = list(range(total_ep - n_val, total_ep))
 
-            # Val dataset
-            cfg.dataset.episodes = val_ep
-            val_dataset = original_make_dataset(cfg)
+            # Check if split_info.json already exists in last checkpoint (for resume)
+            split_info_path = Path(cfg.output_dir) / "checkpoints" / "last" / "pretrained_model" / "split_info.json"
+            if split_info_path.exists():
+                try:
+                    loaded_split = json.loads(split_info_path.read_text())
+                    train_ep = loaded_split.get("train_episodes", [])
+                    val_ep = loaded_split.get("val_episodes", [])
+                    test_ep = loaded_split.get("test_episodes", [])
+                    log.info("[split] Loaded random splits from %s", split_info_path)
+                except Exception as e:
+                    log.warning("[split] Failed to load %s: %s. Re-splitting...", split_info_path, e)
+                    train_ep = val_ep = test_ep = None
+            else:
+                train_ep = val_ep = test_ep = None
 
-            # Train dataset — leave cfg.dataset.episodes = train_ep so the rest of
-            # the training pipeline (sampler, logging) sees only the train set.
+            if train_ep is None:
+                # Random three-way split
+                n_test = max(1, round(total_ep * s[2] / total_r)) if len(s) > 2 and s[2] > 0 else 0
+                n_val = max(1, round(total_ep * s[1] / total_r)) if s[1] > 0 else 0
+                n_train = total_ep - n_val - n_test
+
+                if n_train < 1:
+                    log.warning("[split] Not enough episodes (%d) for split %s, using all for training", total_ep, s)
+                    return full_dataset
+
+                all_eps = list(range(total_ep))
+                # Use a fixed seed for splitting to ensure consistency if re-run without split_info.json
+                rng = random.Random(cfg.seed)
+                rng.shuffle(all_eps)
+
+                train_ep = sorted(all_eps[:n_train])
+                val_ep = sorted(all_eps[n_train : n_train + n_val])
+                test_ep = sorted(all_eps[n_train + n_val :])
+                log.info("[split] Generated random splits")
+
+            # Store split info for anvil_config.json (as full lists now)
+            val_state._split_info = {
+                "split_ratio": list(s),
+                "total_episodes": total_ep,
+                "train_episodes": train_ep,
+                "val_episodes": val_ep,
+                "test_episodes": test_ep,
+            }
+
+            def _make_dataloader(dataset):
+                return torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=cfg.batch_size,
+                    shuffle=False,
+                    sampler=None,
+                    num_workers=cfg.num_workers,
+                    pin_memory=True,
+                    drop_last=False,
+                    prefetch_factor=2 if cfg.num_workers > 0 else None,
+                )
+
+            # Val dataloader
+            if val_ep:
+                cfg.dataset.episodes = val_ep
+                val_dataset = original_make_dataset(cfg)
+                val_state._val_dataloader = _make_dataloader(val_dataset)
+                log.info("[split] val=%d ep (randomly selected, %d frames)", len(val_ep), val_dataset.num_frames)
+
+            # Test dataloader
+            if test_ep:
+                cfg.dataset.episodes = test_ep
+                test_dataset = original_make_dataset(cfg)
+                val_state._test_dataloader = _make_dataloader(test_dataset)
+                log.info("[split] test=%d ep (randomly selected, %d frames)", len(test_ep), test_dataset.num_frames)
+
+            # Train dataset
             cfg.dataset.episodes = train_ep
             train_dataset = original_make_dataset(cfg)
-
-            # Val dataloader — sequential, no episode-aware sampler.
-            # EpisodeAwareSampler uses absolute frame indices from the full dataset, which
-            # are out-of-bounds for the subset val dataset. For loss computation we just
-            # iterate all val frames in order; drop_n_last_frames is a training-only concern.
-            val_state._val_dataloader = torch.utils.data.DataLoader(
-                val_dataset,
-                batch_size=cfg.batch_size,
-                shuffle=False,
-                sampler=None,
-                num_workers=cfg.num_workers,
-                pin_memory=True,
-                drop_last=False,
-                prefetch_factor=2 if cfg.num_workers > 0 else None,
-            )
-
-            log.info(
-                "[val_loss] Val split: train=%d ep, val=%d ep (idx %d–%d, %d frames)",
-                len(train_ep), len(val_ep), val_ep[0], val_ep[-1], val_dataset.num_frames,
-            )
+            # Flag this instance so patched_getitem applies absolute→relative mapping.
+            # EpisodeAwareSampler (used by ACT and similar policies) yields absolute
+            # frame indices; val/test dataloaders use relative indices and must NOT
+            # be remapped.
+            train_dataset._anvil_uses_abs_sampler = True
+            log.info("[split] train=%d ep (randomly selected)", len(train_ep))
             return train_dataset
 
         factory_mod.make_dataset = patched_make_dataset
         lerobot_train_mod.make_dataset = patched_make_dataset
-        log.info("[val_loss] Patched make_dataset (val_split_ratio=%.2f)", val_split_ratio)
+        log.info("[split] Patched make_dataset (split_ratio=%s, random=True)", s)
+
+        # Capture preprocessor when it's created by lerobot
+        original_make_processors = policy_factory_mod.make_pre_post_processors
+
+        def capturing_make_processors(*args, **kwargs):
+            preprocessor, postprocessor = original_make_processors(*args, **kwargs)
+            val_state._preprocessor = preprocessor
+            return preprocessor, postprocessor
+
+        policy_factory_mod.make_pre_post_processors = capturing_make_processors
+        lerobot_train_mod.make_pre_post_processors = capturing_make_processors
+        log.info("[split] Patched make_pre_post_processors to capture preprocessor")
+
 
     def apply_checkpoint_patch(self) -> None:
         """Monkey-patch lerobot save_checkpoint to:
-        1. Compute and log validation loss (if val split is active).
-        2. Write anvil_config.json into each checkpoint's pretrained_model/ directory.
+        1. Compute and log test loss (if test split is active) at save_freq.
+        2. Write anvil_config.json (with split info) into each checkpoint's pretrained_model/ directory.
         """
         import time
 
@@ -634,29 +759,36 @@ class TransformRunner:
         import lerobot.utils.train_utils as train_utils_mod
         from lerobot.utils.train_utils import save_checkpoint as original_save_checkpoint
 
-        anvil_cfg: dict = {"use_delta_actions": self.config.use_delta_actions}
+        anvil_cfg_base: dict = {"use_delta_actions": self.config.use_delta_actions}
         if self.config.delta_exclude_joints:
-            anvil_cfg["delta_exclude_joints"] = self.config.delta_exclude_joints
+            anvil_cfg_base["delta_exclude_joints"] = self.config.delta_exclude_joints
         if self.config.task_override:
-            anvil_cfg["task_description"] = self.config.task_override
-        anvil_cfg_content = json.dumps(anvil_cfg, indent=2)
+            anvil_cfg_base["task_description"] = self.config.task_override
 
-        val_state = self  # captures self._val_dataloader set by apply_val_loss_patch
+        val_state = self
 
         def patched_save_checkpoint(checkpoint_dir, **kwargs):
-            # --- Validation loss ---
-            if val_state._val_dataloader is not None:
+            # --- Test loss (computed at save_freq) ---
+            if val_state._test_dataloader is not None:
                 policy = kwargs.get("policy")
-                preprocessor = kwargs.get("preprocessor")
+                preprocessor = kwargs.get("preprocessor") or val_state._preprocessor
                 step = kwargs.get("step", "?")
 
                 if policy is not None:
+                    policy.eval()
                     t0 = time.perf_counter()
                     total_loss = 0.0
                     n_batches = 0
 
+                    # ACTPolicy in evaluation mode has no VAE, but test_loss
+                    # needs to calculate the full loss. We set back to train mode
+                    # to get the VAE loss if needed.
+                    is_act = "ACTPolicy" in str(type(policy))
+                    if is_act:
+                        policy.train()
+
                     with torch.no_grad():
-                        for batch in val_state._val_dataloader:
+                        for batch in val_state._test_dataloader:
                             if preprocessor is not None:
                                 batch = preprocessor(batch)
                             else:
@@ -669,31 +801,120 @@ class TransformRunner:
                             total_loss += loss.item()
                             n_batches += 1
 
-                    val_loss = total_loss / max(n_batches, 1)
-                    val_s = time.perf_counter() - t0
-                    log.info("[val_loss] Step %s: loss=%.4f (%.1fs)", step, val_loss, val_s)
+                    if is_act:
+                        policy.eval()
 
-                    # Log to WandB if it is active
+                    test_loss = total_loss / max(n_batches, 1)
+                    test_s = time.perf_counter() - t0
+                    log.info("[eval] test_loss=%.6f @ step %s (%.1fs)", test_loss, step, test_s)
+
                     try:
                         import wandb as _wandb
                         if _wandb.run is not None:
-                            _wandb.log({"val/loss": val_loss}, step=int(step))
+                            _wandb.log({"eval/test_loss": test_loss}, step=int(step))
                     except Exception:
                         pass
 
             # --- Original save ---
             original_save_checkpoint(checkpoint_dir, **kwargs)
 
-            # --- Write anvil_config.json ---
+            # --- Save split_info.json and anvil_config.json ---
             pretrained_dir = checkpoint_dir / "pretrained_model"
             if pretrained_dir.exists():
-                (pretrained_dir / "anvil_config.json").write_text(anvil_cfg_content)
-                log.info("[anvil_trainer] Saved anvil_config.json to %s", pretrained_dir)
+                # 1. anvil_config.json: only non-split flags
+                (pretrained_dir / "anvil_config.json").write_text(json.dumps(anvil_cfg_base, indent=2))
+                
+                # 2. split_info.json: all split metadata
+                if val_state._split_info:
+                    (pretrained_dir / "split_info.json").write_text(json.dumps(val_state._split_info, indent=2))
+                
+                log.info("[anvil_trainer] Saved configs to %s", pretrained_dir)
 
         # Patch both the module and the already-imported reference in lerobot_train
         train_utils_mod.save_checkpoint = patched_save_checkpoint
         lerobot_train_mod.save_checkpoint = patched_save_checkpoint
-        log.info("[anvil_trainer] Patched save_checkpoint to write anvil_config.json per checkpoint")
+        log.info("[anvil_trainer] Patched save_checkpoint for test loss + anvil_config.json")
+
+    def apply_val_loss_hook(self) -> None:
+        """Monkey-patch update_policy for periodic val loss computation at val_freq intervals."""
+        import time
+
+        import torch
+        import lerobot.scripts.lerobot_train as lerobot_train_mod
+
+        original_update_policy = lerobot_train_mod.update_policy
+        val_state = self
+        _counter = {"n": 0}
+
+        def patched_update_policy(
+            train_metrics, policy, batch, optimizer, grad_clip_norm,
+            accelerator=None, lr_scheduler=None, lock=None, rabc_weights_provider=None,
+        ):
+            result = original_update_policy(
+                train_metrics, policy, batch, optimizer, grad_clip_norm,
+                accelerator=accelerator, lr_scheduler=lr_scheduler,
+                lock=lock, rabc_weights_provider=rabc_weights_provider,
+            )
+
+            _counter["n"] += 1
+            val_freq = val_state._val_freq
+            if not val_freq or val_freq <= 0 or val_state._val_dataloader is None:
+                return result
+            if _counter["n"] % val_freq != 0:
+                return result
+
+            abs_step = val_state._resume_step + _counter["n"]
+            preprocessor = val_state._preprocessor
+
+            # Unwrap accelerator-wrapped policy for eval
+            if accelerator is not None:
+                unwrapped = accelerator.unwrap_model(policy, keep_fp32_wrapper=True)
+            else:
+                unwrapped = policy
+
+            unwrapped.eval()
+            t0 = time.perf_counter()
+            total_loss = 0.0
+            n_batches = 0
+
+            # ACTPolicy in evaluation mode has no VAE, but val_loss
+            # needs to calculate the full loss.
+            is_act = "ACTPolicy" in str(type(unwrapped))
+            if is_act:
+                unwrapped.train()
+
+            with torch.no_grad():
+                for val_batch in val_state._val_dataloader:
+                    if preprocessor is not None:
+                        val_batch = preprocessor(val_batch)
+                    else:
+                        device = next(unwrapped.parameters()).device
+                        val_batch = {
+                            k: v.to(device) if isinstance(v, torch.Tensor) else v
+                            for k, v in val_batch.items()
+                        }
+                    loss, _ = unwrapped.forward(val_batch)
+                    total_loss += loss.item()
+                    n_batches += 1
+
+            if is_act:
+                unwrapped.eval()
+
+            val_loss = total_loss / max(n_batches, 1)
+            val_s = time.perf_counter() - t0
+            log.info("[eval] val_loss=%.6f @ step %s (%.1fs)", val_loss, abs_step, val_s)
+
+            try:
+                import wandb as _wandb
+                if _wandb.run is not None:
+                    _wandb.log({"eval/val_loss": val_loss}, step=abs_step)
+            except Exception:
+                pass
+
+            return result
+
+        lerobot_train_mod.update_policy = patched_update_policy
+        log.info("[eval] Patched update_policy for periodic val loss (val_freq will be log_freq*5)")
 
 
 # =============================================================================
@@ -736,13 +957,23 @@ def train(config: TrainingConfig | None = None) -> None:
     # Apply dataset transforms
     runner.apply_dataset_patches()
 
-    # Patch make_dataset to create val split (must be before apply_checkpoint_patch)
+    # Patch make_dataset for train/val/test split + capture preprocessor
     runner.apply_val_loss_patch()
 
-    # Monkey-patch save_checkpoint to compute val loss + write anvil_config.json
+    # Patch save_checkpoint for test loss + anvil_config.json
     runner.apply_checkpoint_patch()
 
+    # Patch update_policy for periodic val loss
+    runner.apply_val_loss_hook()
+
     # Run training
+    if config.resume_job_path:
+        # LeRobot 0.5.1 saves train_config.json inside each checkpoint
+        last_cfg_path = Path(config.resume_job_path) / "checkpoints" / "last" / "pretrained_model" / "train_config.json"
+        if last_cfg_path.exists() and not any(a.startswith("--config_path=") for a in sys.argv):
+            sys.argv.append(f"--config_path={last_cfg_path}")
+            log.info("[anvil_trainer] Resuming with config from last checkpoint: %s", last_cfg_path)
+
     lerobot_train()
 
 
@@ -767,7 +998,7 @@ Examples:
     --camera-filter=chest,waist --use-delta-actions
 
   # Resume a stopped run
-  anvil-trainer --resume=true --output_dir=model_zoo/grabbing-w1
+  anvil-trainer --resume-job=model_zoo/my-dataset/grabbing-w1
 
 ===============================================================================
 
@@ -778,6 +1009,10 @@ Anvil-specific flags (stripped before passing to LeRobot):
       Persisted to anvil_config.json in each checkpoint so inference
       can read it automatically.
 
+  --resume-job=PATH
+      Resume a previously stopped training job.
+      Shortcut for --resume=true --output_dir=PATH.
+
   --task-description=TEXT
       Task prompt for SmolVLA. Overrides LEROBOT_TASK_OVERRIDE env var.
       Example: --task-description="Grab the gray doll and put it in the bucket"
@@ -786,10 +1021,12 @@ Anvil-specific flags (stripped before passing to LeRobot):
       Train using only the specified cameras. Overrides LEROBOT_CAMERA_FILTER.
       Example: --camera-filter=chest,waist
 
-  --val-split-ratio=FLOAT
-      Fraction of episodes (last N%) held out for validation loss (default: 0.2).
-      Val loss is computed at every --save_freq step and logged to console + wandb.
-      Set to 0 to disable: --val-split-ratio=0
+  --split-ratio=TRAIN,VAL,TEST
+      Episode split ratios for train/val/test (default: 8,1,1).
+      Two values also accepted: --split-ratio=8,2 means [8,2,0] (no test set).
+      Val loss logged every log_freq*5 steps (eval/val_loss).
+      Test loss logged every save_freq steps (eval/test_loss).
+      Set to --split-ratio=1,0,0 to disable held-out sets.
 
   --job_name=NAME
       Human-readable run name. Checkpoints saved to model_zoo/<name>/.
@@ -797,6 +1034,7 @@ Anvil-specific flags (stripped before passing to LeRobot):
 
   --output_dir=PATH
       Override the default checkpoint directory (default: model_zoo/).
+      For resuming, use --resume-job instead.
 
 Output:
   Checkpoints  →  model_zoo/<job_name>/checkpoints/<step>/pretrained_model/
