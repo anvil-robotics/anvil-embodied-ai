@@ -7,6 +7,7 @@ contention with the main inference process.
 """
 
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -32,12 +33,19 @@ class ImageWorkerNode(Node):
         camera_name: str,
         image_shape: tuple[int, int, int],
         buffer_name_prefix: str = "lerobot_img_",
+        debug_dir: str | None = None,
+        debug_max_frames: int = 10,
     ):
         super().__init__(f"image_worker_{camera_name}")
 
         self.camera_name = camera_name
         self.camera_topic = camera_topic
         self.image_shape = image_shape
+
+        self._debug_dir = Path(debug_dir) / camera_name if debug_dir else None
+        self._debug_max_frames = debug_max_frames
+        self._debug_saved = 0
+        self._debug_last_save: float = 0.0
 
         # Connect to shared memory (created by main process)
         self.shared_buffer = SharedImageBuffer(
@@ -71,9 +79,33 @@ class ImageWorkerNode(Node):
             # Convert BGR to RGB
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-            # Resize if needed
+            # Resize with padding to preserve aspect ratio
             if image.shape[:2] != self.image_shape[:2]:
-                image = cv2.resize(image, (self.image_shape[1], self.image_shape[0]))
+                target_h, target_w = self.image_shape[:2]
+                src_h, src_w = image.shape[:2]
+                scale = min(target_w / src_w, target_h / src_h)
+                new_w = int(src_w * scale)
+                new_h = int(src_h * scale)
+                resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+                offset_x = (target_w - new_w) // 2
+                offset_y = (target_h - new_h) // 2
+                canvas[offset_y : offset_y + new_h, offset_x : offset_x + new_w] = resized
+                image = canvas
+
+            # Save debug frames at 1 Hz up to debug_max_frames (before model input, uint8 RGB)
+            if self._debug_dir is not None and self._debug_saved < self._debug_max_frames:
+                now = time.time()
+                if now - self._debug_last_save >= 1.0:
+                    self._debug_dir.mkdir(parents=True, exist_ok=True)
+                    fname = self._debug_dir / f"frame_{self._debug_saved:04d}.png"
+                    cv2.imwrite(str(fname), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+                    self._debug_last_save = now
+                    self._debug_saved += 1
+                    if self._debug_saved == self._debug_max_frames:
+                        self.get_logger().info(
+                            f"[debug] Saved {self._debug_max_frames} frames to {self._debug_dir}"
+                        )
 
             # Get timestamp from message
             timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -98,6 +130,8 @@ def run_image_worker(
     image_shape: tuple[int, int, int],
     buffer_name_prefix: str = "lerobot_img_",
     stop_event=None,
+    debug_dir: str | None = None,
+    debug_max_frames: int = 10,
 ):
     """
     Entry point for running image worker in a separate process.
@@ -116,6 +150,8 @@ def run_image_worker(
         camera_name=camera_name,
         image_shape=image_shape,
         buffer_name_prefix=buffer_name_prefix,
+        debug_dir=debug_dir,
+        debug_max_frames=debug_max_frames,
     )
 
     executor = SingleThreadedExecutor()

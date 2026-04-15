@@ -16,6 +16,7 @@ services:
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}
       - CYCLONEDDS_URI=${CYCLONEDDS_URI:-}
       - MONITOR_ONLY=${MONITOR_ONLY:-false}
+      - DEBUG=${DEBUG:-false}
       - DISPLAY=${DISPLAY}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
@@ -26,6 +27,8 @@ services:
       # HF_CACHE — VLA models (pi0/pi05/smolvla) need PaliGemma tokenizer at runtime.
       # HuggingFace needs write access to create lock files when loading tokenizers.
       - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface
+      # DEBUG=true: pre-model input frames saved here for training/inference comparison
+      - ./debug_images:/workspace/debug_images
     deploy:
       resources:
         reservations:

@@ -63,6 +63,7 @@ class LeRobotInferenceNode(Node):
             image_shape=self.image_shape,
             metrics=self.metrics,
             callback_group=self._subscription_callback_group,
+            debug_image_dir=self._debug_image_dir,
         )
 
         # Non-VLA action buffer (ACT/Diffusion put actions here from obs timer)
@@ -140,10 +141,13 @@ class LeRobotInferenceNode(Node):
         self.declare_parameter("deterministic_seed", 42)
         self.declare_parameter("monitor_only", False)
         self.declare_parameter("debug", False)
+        self.declare_parameter("debug_image_dir", "")
 
         # Static fields from ROS2 params
         self.monitor_only = self.get_parameter("monitor_only").value
         self._debug = self.get_parameter("debug").value
+        _debug_image_dir = self.get_parameter("debug_image_dir").value
+        self._debug_image_dir: str | None = _debug_image_dir if _debug_image_dir else None
         self.model_path = self.get_parameter("model_path").value
         if not self.model_path and not self.monitor_only:
             raise ValueError("model_path parameter is required")

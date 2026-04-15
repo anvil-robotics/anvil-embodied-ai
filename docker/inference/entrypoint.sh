@@ -27,4 +27,12 @@ if [ -n "${CYCLONEDDS_URI}" ]; then
     echo "[entrypoint] CYCLONEDDS_URI=${CYCLONEDDS_URI}"
 fi
 
-exec "$@"
+# When DEBUG=true, auto-configure debug image capture
+DEBUG_IMAGE_ARG=""
+if [ "${DEBUG:-false}" = "true" ]; then
+    mkdir -p /workspace/debug_images
+    DEBUG_IMAGE_ARG="debug_image_dir:=/workspace/debug_images"
+    echo "[entrypoint] DEBUG=true — saving pre-model images to /workspace/debug_images"
+fi
+
+exec "$@" ${DEBUG_IMAGE_ARG}

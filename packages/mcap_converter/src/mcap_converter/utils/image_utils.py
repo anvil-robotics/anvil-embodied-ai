@@ -129,13 +129,31 @@ def encode_image_to_bytes(img: np.ndarray, format: str = "png") -> bytes:
 
 def resize_image(img: np.ndarray, target_size: tuple) -> np.ndarray:
     """
-    Resize image to target size
+    Resize image to target size while preserving aspect ratio by padding with black.
 
     Args:
-        img: Image array
-        target_size: (width, height) tuple
+        img: Image array (H, W, C) or (H, W)
+        target_size: (width, height) tuple — target canvas size
 
     Returns:
-        Resized image
+        Image resized to fit within target_size with black padding, shape (H, W, C) or (H, W).
     """
-    return cv2.resize(img, target_size, interpolation=cv2.INTER_LINEAR)
+    target_w, target_h = target_size
+    src_h, src_w = img.shape[:2]
+
+    scale = min(target_w / src_w, target_h / src_h)
+    new_w = int(src_w * scale)
+    new_h = int(src_h * scale)
+
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+    if img.ndim == 3:
+        canvas = np.zeros((target_h, target_w, img.shape[2]), dtype=img.dtype)
+    else:
+        canvas = np.zeros((target_h, target_w), dtype=img.dtype)
+
+    offset_x = (target_w - new_w) // 2
+    offset_y = (target_h - new_h) // 2
+    canvas[offset_y : offset_y + new_h, offset_x : offset_x + new_w] = resized
+
+    return canvas

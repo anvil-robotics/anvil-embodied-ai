@@ -67,6 +67,7 @@ class MultiProcessStrategy:
         image_shape: tuple,
         metrics: Any = None,
         callback_group: Any = None,
+        debug_image_dir: str | None = None,
     ) -> None:
         """Initialize shared memory and start worker processes."""
         self._node = node
@@ -77,6 +78,7 @@ class MultiProcessStrategy:
         self._image_shape = image_shape
         self._metrics = metrics
         self._callback_group = callback_group
+        self._debug_image_dir = debug_image_dir
 
         # Create shared memory buffers
         self._setup_shared_memory()
@@ -116,7 +118,10 @@ class MultiProcessStrategy:
             p = ctx.Process(
                 target=run_image_worker,
                 args=(topic, camera_name, self._image_shape),
-                kwargs={"stop_event": self._stop_event},
+                kwargs={
+                    "stop_event": self._stop_event,
+                    "debug_dir": self._debug_image_dir,
+                },
                 name=f"image_worker_{camera_name}",
             )
             p.start()
