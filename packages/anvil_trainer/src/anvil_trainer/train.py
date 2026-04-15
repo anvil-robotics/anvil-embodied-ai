@@ -66,13 +66,15 @@ class TrainingConfig:
     Configuration for custom training transformations.
 
     Attributes:
-        cameras: List of camera names to include (None = all cameras)
+        camera_exclude: Camera names to DROP from training (None = keep all cameras)
+        observation_exclude: Non-image observation suffixes to DROP, e.g. ["velocity", "effort"] (None = keep all)
         task_override: Override task string for all samples (for SmolVLA)
         use_delta_actions: Convert actions to delta (action - observation.state)
         dataset_root: Path to local dataset (for validation)
     """
 
-    cameras: list[str] | None = None
+    camera_exclude: list[str] | None = None
+    observation_exclude: list[str] | None = None
     task_override: str | None = None
     use_delta_actions: bool = False
     delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when use_delta_actions=True
@@ -89,23 +91,34 @@ class TrainingConfig:
         Parse configuration from environment variables and command line args.
 
         Environment variables:
-            LEROBOT_CAMERA_FILTER: Comma-separated camera names
+            LEROBOT_CAMERA_EXCLUDE: Comma-separated camera names to exclude
+            LEROBOT_OBSERVATION_EXCLUDE: Comma-separated observation suffixes to exclude
             LEROBOT_TASK_OVERRIDE: Task string override
 
         Command line args:
             --use-delta-actions: Enable delta action transform
         """
-        # Camera filter from --camera-filter arg (takes precedence over env var)
+        # Camera exclude from --camera-exclude arg (takes precedence over env var)
         camera_str = None
         for arg in sys.argv:
-            if arg.startswith("--camera-filter="):
+            if arg.startswith("--camera-exclude="):
                 camera_str = arg.split("=", 1)[1]
                 sys.argv.remove(arg)
                 break
-        # Fall back to environment variable
         if camera_str is None:
-            camera_str = os.environ.get("LEROBOT_CAMERA_FILTER", "")
-        cameras = [c.strip() for c in camera_str.split(",") if c.strip()] or None
+            camera_str = os.environ.get("LEROBOT_CAMERA_EXCLUDE", "")
+        camera_exclude = [c.strip() for c in camera_str.split(",") if c.strip()] or None
+
+        # Observation exclude from --observation-exclude arg (takes precedence over env var)
+        obs_str = None
+        for arg in sys.argv:
+            if arg.startswith("--observation-exclude="):
+                obs_str = arg.split("=", 1)[1]
+                sys.argv.remove(arg)
+                break
+        if obs_str is None:
+            obs_str = os.environ.get("LEROBOT_OBSERVATION_EXCLUDE", "")
+        observation_exclude = [k.strip() for k in obs_str.split(",") if k.strip()] or None
 
         # Task description from --task-description arg (takes precedence over env var)
         task_override = None
@@ -265,7 +278,8 @@ class TrainingConfig:
                         sys.argv.append("--policy.use_group_norm=false")
 
         return cls(
-            cameras=cameras,
+            camera_exclude=camera_exclude,
+            observation_exclude=observation_exclude,
             task_override=task_override,
             use_delta_actions=use_delta_actions,
             delta_exclude_joints=delta_exclude_joints,
@@ -285,7 +299,8 @@ class TrainingConfig:
             data = yaml.safe_load(f)
 
         return cls(
-            cameras=data.get("cameras"),
+            camera_exclude=data.get("camera_exclude"),
+            observation_exclude=data.get("observation_exclude"),
             task_override=data.get("task_override"),
             use_delta_actions=data.get("use_delta_actions", False),
             dataset_root=data.get("dataset_root"),
@@ -303,7 +318,7 @@ class TrainingConfig:
         Raises:
             FileNotFoundError: If dataset metadata not found
         """
-        if not self.cameras or not self.dataset_root:
+        if not self.camera_exclude or not self.dataset_root:
             return []
 
         info_path = Path(self.dataset_root) / "meta" / "info.json"
@@ -320,7 +335,7 @@ class TrainingConfig:
             if key.startswith("observation.images.")
         ]
 
-        invalid = [c for c in self.cameras if c not in available_cameras]
+        invalid = [c for c in self.camera_exclude if c not in available_cameras]
         return invalid
 
 
@@ -374,54 +389,73 @@ class Transform(ABC):
 # =============================================================================
 
 
-class CameraFilterTransform(Transform):
-    """Filter dataset to include only specified cameras."""
+class CameraExcludeTransform(Transform):
+    """Exclude specified cameras from training."""
 
     @property
     def name(self) -> str:
-        return "camera_filter"
+        return "camera_exclude"
 
     def is_enabled(self, config: TrainingConfig) -> bool:
-        return config.cameras is not None
+        return bool(config.camera_exclude)
 
     def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
-        if not config.cameras:
-            return item
-
-        keys_to_remove = [
-            key
-            for key in item
-            if key.startswith("observation.images.")
-            and key.replace("observation.images.", "") not in config.cameras
-        ]
-        for key in keys_to_remove:
-            del item[key]
-
+        for cam in config.camera_exclude:
+            item.pop(f"observation.images.{cam}", None)
         return item
 
     def patch_metadata(self, config: TrainingConfig) -> None:
-        """Patch dataset_to_policy_features to exclude filtered cameras."""
-        if not config.cameras:
-            return
-
+        """Patch dataset_to_policy_features to exclude specified cameras."""
         import lerobot.datasets.utils
         from lerobot.datasets.utils import dataset_to_policy_features
 
         original_func = dataset_to_policy_features
-        selected_cameras = config.cameras
-        transform_name = self.name
+        excluded_cams = set(config.camera_exclude)
 
         def filtered_func(features: dict) -> dict:
             filtered = {}
             for key, value in features.items():
                 if key.startswith("observation.images."):
-                    cam_name = key.replace("observation.images.", "")
-                    if cam_name in selected_cameras:
-                        filtered[key] = value
-                    else:
-                        log.info("[camera_filter] Excluding: %s", key)
-                else:
-                    filtered[key] = value
+                    cam = key.replace("observation.images.", "")
+                    if cam in excluded_cams:
+                        log.info("[camera_exclude] Excluding: %s", key)
+                        continue
+                filtered[key] = value
+            return original_func(filtered)
+
+        lerobot.datasets.utils.dataset_to_policy_features = filtered_func
+
+
+class ObservationExcludeTransform(Transform):
+    """Exclude specified non-image observation keys from training."""
+
+    @property
+    def name(self) -> str:
+        return "observation_exclude"
+
+    def is_enabled(self, config: TrainingConfig) -> bool:
+        return bool(config.observation_exclude)
+
+    def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
+        for key in config.observation_exclude:
+            item.pop(f"observation.{key}", None)
+        return item
+
+    def patch_metadata(self, config: TrainingConfig) -> None:
+        """Patch dataset_to_policy_features to exclude specified observation keys."""
+        import lerobot.datasets.utils
+        from lerobot.datasets.utils import dataset_to_policy_features
+
+        original_func = dataset_to_policy_features
+        excluded = {f"observation.{k}" for k in config.observation_exclude}
+
+        def filtered_func(features: dict) -> dict:
+            filtered = {}
+            for key, value in features.items():
+                if key in excluded:
+                    log.info("[observation_exclude] Excluding: %s", key)
+                    continue
+                filtered[key] = value
             return original_func(filtered)
 
         lerobot.datasets.utils.dataset_to_policy_features = filtered_func
@@ -535,7 +569,8 @@ class TransformRunner:
     def __init__(self, config: TrainingConfig):
         self.config = config
         transforms: list[Transform] = [
-            CameraFilterTransform(),
+            CameraExcludeTransform(),
+            ObservationExcludeTransform(),
             TaskOverrideTransform(),
             DeltaActionTransform(),
         ]
@@ -559,8 +594,10 @@ class TransformRunner:
 
     def _get_transform_details(self, transform: Transform) -> str:
         """Get human-readable details for a transform."""
-        if isinstance(transform, CameraFilterTransform):
-            return str(self.config.cameras)
+        if isinstance(transform, CameraExcludeTransform):
+            return f"excluding cameras: {', '.join(self.config.camera_exclude)}"
+        elif isinstance(transform, ObservationExcludeTransform):
+            return f"excluding: {', '.join(self.config.observation_exclude)}"
         elif isinstance(transform, TaskOverrideTransform):
             return f"'{self.config.task_override}'"
         elif isinstance(transform, DeltaActionTransform):
@@ -934,7 +971,7 @@ def train(config: TrainingConfig | None = None) -> None:
         config = TrainingConfig.from_env_and_args()
 
     # Validate camera names if specified
-    if config.cameras and config.dataset_root:
+    if config.camera_exclude and config.dataset_root:
         try:
             invalid = config.validate_cameras()
             if invalid:
