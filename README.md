@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.12+-yellow?style=flat-square&logo=python&logoColor=white" alt="Python" /></a>
   <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-22314E?style=flat-square&logo=ros&logoColor=white" alt="ROS2" /></a>
-  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.5.0-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
+  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.5.1-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
 </p>
 
 ---
@@ -38,7 +38,7 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | **0. Data Collection** | Record teleoperation demos as ROS2 MCAP files through[ Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). |
 | **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets                                                                 |
-| **2. Model Training**  | Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies via LeRobot v0.5.0                                        |
+| **2. Model Training**  | Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies via LeRobot v0.5.1                                        |
 | **3. Run Inference**   | Deploy trained models on a GPU PC via ROS2 CycloneDDS                                                            |
 
 > **Don't have data yet?** The [Anvil OpenARM Quest Teleop Kit](https://shop.anvil.bot/products/openarm-quest-teleop-kit) gives you everything you need to start collecting teleoperation demonstrations out of the box — robot hardware, cameras, control software, and recording tools included. See our [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
@@ -138,7 +138,7 @@ Checkpoints are saved to `model_zoo/<dataset>/<policy>_<timestamp>/` by default.
 | `--job_name=NAME` | Run name — auto-generated as `<policy>_<timestamp>` if omitted |
 | `--camera-filter=chest,waist` | Train with a subset of cameras (e.g. drop `wrist_l` if unused) |
 | `--backbone=resnet18` | Vision backbone for ACT / Diffusion: `resnet18` (default) · `resnet34` · `resnet50` |
-| `--val-split-ratio=0.2` | Hold out the last 20 % of episodes for val loss — logged at every checkpoint |
+| `--split-ratio=8,1,1` | Dataset split (train,val,test). Val loss is logged regularly; test loss is logged at every checkpoint |
 | `--task-description="..."` | Task prompt — required for SmolVLA / Pi0 / Pi0.5 |
 
 #### Common Hyperparameters
@@ -272,7 +272,31 @@ uv run anvil-trainer --resume=true --output_dir=model_zoo/pick-and-place
 
 Only pass `--resume=true` and `--output_dir` — all other settings are restored from the saved `train_config.json`.
 
-### 3. Run Inference
+### 3. Offline Evaluation
+
+Before deploying to a robot, you can validate model performance offline by replaying dataset episodes through the trained policy.
+
+#### Raw Model Evaluation (`anvil-eval`)
+
+Compare model predictions against ground-truth actions. This produces MSE/MAE metrics, smoothness stats, and joint trajectory plots.
+
+```bash
+uv run anvil-eval \
+  --checkpoint model_zoo/my-task/checkpoints/last \
+  --dataset data/datasets/my-task \
+  --split val \
+  --num-eps 5 \
+  --device cuda
+```
+
+**Features:**
+- **Flexible Splitting:** Evaluate on `train`, `val`, `test`, or `all` (samples equally from each split).
+- **Trajectory Plots:** View predicted vs ground-truth for each joint (grippers are automatically moved to the end).
+- **Summary Box Plots:** Analyze the distribution of errors across joints and dataset splits.
+
+Results are saved to `eval_results/<dataset>/<model>_<split>/`.
+
+### 4. Run Inference
 
 #### Test with Fake Hardware First (Recommended)
 
@@ -426,6 +450,7 @@ MODEL_PATH=./model_zoo/pick-and-place/checkpoints/last
 | Command              | Description                                 |
 | -------------------- | ------------------------------------------- |
 | `anvil-trainer`    | Train ML models                             |
+| `anvil-eval`       | Offline raw model evaluation (MSE/MAE/plots) |
 | `mcap-convert`     | Convert MCAP recordings to LeRobot datasets |
 | `mcap-inspect`     | Inspect MCAP file structure, topics, and message counts — useful before conversion to check what's inside a recording |
 | `mcap-to-video`    | Extract MCAP image topics to MP4 videos — useful for visually reviewing raw recordings |

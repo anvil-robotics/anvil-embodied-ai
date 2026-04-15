@@ -11,6 +11,7 @@
 | `--eval_freq` | `0` | LeRobot's default (20 000 steps) would attempt to launch a gym simulation environment, which doesn't exist for Anvil MCAP datasets |
 | `--job_name` | `<policy>_<timestamp>` | Auto-generated from policy type + timestamp (e.g. `act_20260413_143052`) — used as the W&B run name |
 | `--output_dir` | `model_zoo/<dataset>/<job_name>` | Nested under dataset name for organised model zoo; auto-generated if omitted |
+| `--split-ratio` | `8,1,1` | Default 80/10/10 split for train/val/test sets |
 | `--wandb.project` | `<dataset name>` | Auto-set to the dataset folder name so all runs for the same task group together |
 | `--policy.vision_backbone` | `resnet18` | ImageNet-pretrained ResNet18 for ACT/Diffusion — override with `--backbone=resnet34` or `--backbone=resnet50` |
 
@@ -163,22 +164,22 @@ uv run anvil-trainer ... --use-delta-actions
 (< 50 episodes), 50k steps is often enough and avoids overfitting. Increase
 batch size if GPU memory allows — it stabilizes training.
 
-### Validation loss
+### Validation and Test Loss
 
-Pass `--val-split-ratio=0.2` to hold out the last 20 % of episodes and compute
-val loss at every checkpoint. Use the checkpoint with the lowest val loss rather
-than the last step:
+Pass `--split-ratio=train,val,test` (default `8,1,1`) to hold out episodes for validation and testing.
+
+- **Validation Loss (`val/loss`)**: Computed every `log_freq * 5` steps. Used to monitor overfitting during training.
+- **Test Loss (`eval/test_loss`)**: Computed at every checkpoint (`save_freq`). This is a more thorough evaluation on a completely held-out set.
 
 ```bash
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
-  --val-split-ratio=0.2 \
+  --split-ratio=8,1,1 \
   --wandb.enable=true
 ```
 
-Val loss is logged to console and W&B as `val/loss`. A rising val loss while
-train loss keeps falling is an early overfitting signal — stop there.
+Use the checkpoint with the lowest test loss for deployment. A rising validation loss while train loss keeps falling is an early overfitting signal.
 
 ### Vision backbone
 
@@ -440,3 +441,26 @@ main()
 After augmentation, you can use the default `QUANTILE10` normalization and omit `--policy.normalization_mapping`.
 
 Option A is simpler and sufficient for most tasks. Choose Option B only if you need to reproduce results that rely specifically on quantile normalization.
+
+---
+
+## Offline Evaluation (anvil-eval)
+
+After training a model, use `anvil-eval` to quantify its performance before robot deployment.
+
+### Key Metrics
+- **MAE/MSE**: Mean Absolute/Squared Error across all joints and frames.
+- **Cosine Similarity**: Measures how well the predicted action vector aligns with the ground-truth direction.
+- **Smoothness**: L2 norm of consecutive action deltas. High variance here indicates "jittery" model output.
+
+### Analyzing Plots
+- **Episode Plots**: Found in `plots/episode_NNNN_<split>.png`. Each joint has its own subplot.
+  - **Reordering**: Joint names ending in `finger_joint1` (grippers) are moved to the end of the grid for easier comparison.
+- **Summary Box Plot**: Found in `plots/summary_per_joint_mae.png`.
+  - Shows the distribution of MAE across all evaluated episodes for each joint.
+  - Useful for identifying which joints the model is most/least accurate on across different dataset splits.
+
+### Evaluation Strategies
+- Use `--split all --num-eps 5` to get a representative sample from across the entire dataset.
+- High error on the `train` split indicates the model is underfitting (needs more training or more capacity).
+- Low error on `train` but high error on `val`/`test` indicates the model is overfitting.
