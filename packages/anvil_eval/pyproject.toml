@@ -1,0 +1,63 @@
+[project]
+name = "anvil-eval"
+version = "0.1.0"
+description = "Anvil offline model evaluation — replay dataset episodes through trained policies"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.12"
+authors = [
+    { name = "Anvil Robotics", email = "dev@anvil.bot" }
+]
+keywords = ["robotics", "lerobot", "evaluation", "imitation-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering",
+]
+
+dependencies = [
+    "lerobot~=0.5.1",
+    "torch>=2.2.1,<2.11.0",
+    "numpy>=2.0.0,<2.3.0",
+    "matplotlib>=3.8.0",
+    "tqdm~=4.67",
+]
+
+[project.optional-dependencies]
+wandb = ["wandb~=0.24"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.4.0",
+]
+smolvla = ["lerobot[smolvla]~=0.5.1"]
+pi      = ["lerobot[pi]~=0.5.1"]
+all     = ["lerobot[smolvla,pi]~=0.5.1", "wandb~=0.24"]
+
+[project.scripts]
+anvil-eval = "anvil_eval.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/anvil_eval"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
