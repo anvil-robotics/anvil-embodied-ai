@@ -39,7 +39,8 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 | **0. Data Collection** | Record teleoperation demos as ROS2 MCAP files through[ Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). |
 | **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets                                                                 |
 | **2. Model Training**  | Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies via LeRobot v0.5.1                                        |
-| **3. Run Inference**   | Deploy trained models on a GPU PC via ROS2 CycloneDDS                                                            |
+| **3. Offline Evaluation** | Validate model performance offline against ground-truth actions — dataset replay (`anvil-eval`) or full ROS2 pipeline replay (`anvil-eval-ros`) |
+| **4. Run Inference**   | Deploy trained models on a GPU PC via ROS2 CycloneDDS                                                            |
 
 > **Don't have data yet?** The [Anvil OpenARM Quest Teleop Kit](https://shop.anvil.bot/products/openarm-quest-teleop-kit) gives you everything you need to start collecting teleoperation demonstrations out of the box — robot hardware, cameras, control software, and recording tools included. See our [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
 
@@ -274,27 +275,80 @@ Only pass `--resume=true` and `--output_dir` — all other settings are restored
 
 ### 3. Offline Evaluation
 
-Before deploying to a robot, you can validate model performance offline by replaying dataset episodes through the trained policy.
+Before deploying to a robot, you can validate model performance offline. Two complementary modes are available:
 
-#### Raw Model Evaluation (`anvil-eval`)
+| Mode | Command | What it tests |
+|------|---------|---------------|
+| **Dataset replay** | `anvil-eval` | Feeds dataset observations directly into the model — fast, no ROS2 needed |
+| **ROS2 MCAP replay** | `anvil-eval-ros` | Replays raw MCAP recordings through the full ROS2 inference stack in Docker — mirrors real deployment |
 
-Compare model predictions against ground-truth actions. This produces MSE/MAE metrics, smoothness stats, and joint trajectory plots.
+Both produce the same metrics (MAE, RMSE, per-joint trajectory plots) and write results to a unified layout:
+
+```
+eval_results/{dataset_name}/{job_name}/{checkpoint}/
+├── raw/     ← anvil-eval output
+└── ros/     ← anvil-eval-ros output
+```
+
+#### Dataset Replay (`anvil-eval`)
+
+Feeds LeRobot dataset observations directly into the model and compares predictions against ground-truth actions. Fast — no ROS2 or Docker required.
 
 ```bash
 uv run anvil-eval \
   --checkpoint model_zoo/my-task/checkpoints/last \
   --dataset data/datasets/my-task \
-  --split val \
   --num-eps 5 \
   --device cuda
 ```
 
 **Features:**
-- **Flexible Splitting:** Evaluate on `train`, `val`, `test`, or `all` (samples equally from each split).
+- **Flexible Splitting:** Evaluates across `train`, `val`, and `test` splits (samples equally from each).
 - **Trajectory Plots:** View predicted vs ground-truth for each joint (grippers are automatically moved to the end).
 - **Summary Box Plots:** Analyze the distribution of errors across joints and dataset splits.
 
-Results are saved to `eval_results/<dataset>/<model>_<split>/`.
+Results are saved to `eval_results/{dataset}/{job}/{checkpoint}/raw/`.
+
+#### ROS2 MCAP Replay (`anvil-eval-ros`)
+
+Replays raw MCAP recordings through the full inference Docker stack — the same inference node that runs on the real robot — and records predicted vs ground-truth actions over ROS2 topics. This mode catches integration issues that dataset replay cannot (topic remapping, timing, action chunking in the live loop).
+
+```bash
+uv run anvil-eval-ros \
+  --checkpoint model_zoo/my-task/checkpoints/last \
+  --mcap-root data/raw/my-task \
+  --num-eps 3
+```
+
+**How it works:**
+
+```
+Host: anvil-eval-ros
+  │  generates eval_plan.json → launches docker compose
+  │
+  ├─ [inference]      model running on GPU, publishing to /eval/* topics
+  ├─ [mcap-player]    replays one MCAP per episode; coordinates via /eval/episode_start|done
+  └─ [eval-recorder]  records GT + predicted actions → computes metrics → saves results
+```
+
+- **Auto arm detection:** reads the model's `config.json` (action_dim) and the dataset's `conversion_config.yaml` to determine which arm topics to subscribe to — no manual YAML editing required.
+- **Topic isolation:** inference publishes to `/eval/follower_*/commands` while GT actions replay on the original topic names, so both coexist on the same ROS2 network.
+- **Graceful failures:** metrics are always saved even if plotting fails (e.g. matplotlib not available in the container).
+
+**Common flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--checkpoint PATH` | Checkpoint directory (reads `split_info.json` + `anvil_config.json`) |
+| `--mcap-root PATH` | Raw MCAP directory (e.g. `data/raw/my-task`) |
+| `--num-eps N` | Sample up to N episodes per split (train/val/test) |
+| `--episodes "0,3,5"` | Manually specify episode indices (overrides split sampling) |
+| `--output-dir PATH` | Override default output directory |
+| `--seed N` | Random seed for episode sampling (default: 42) |
+
+Results are saved to `eval_results/{dataset}/{job}/{checkpoint}/ros/`.
+
+> **Requires Docker with NVIDIA GPU support.** The inference container is built automatically on first run. Set `LEROBOT_EXTRAS` if your model needs extra dependencies (e.g. `pi`, `smolvla`).
 
 ### 4. Run Inference
 
@@ -386,7 +440,8 @@ Use `docker-compose.fake-hardware.yml` to simulate this 2-PC setup locally (brid
 anvil-embodied-ai/
 ├── packages/
 │   ├── mcap_converter/            # MCAP to LeRobot conversion
-│   └── anvil_trainer/             # Training utilities & transforms
+│   ├── anvil_trainer/             # Training utilities & transforms
+│   └── anvil_eval/                # Offline evaluation: dataset replay (anvil-eval) + ROS2 MCAP replay (anvil-eval-ros)
 ├── ros2/
 │   └── src/lerobot_control/       # ROS2 inference node (Jazzy)
 ├── configs/
@@ -397,6 +452,7 @@ anvil-embodied-ai/
 │   └── inference/                 # Dockerfile + entrypoint
 ├── docker-compose.yml                    # Production inference (GPU PC)
 ├── docker-compose.fake-hardware.yml      # Fake hardware: simulate 2-PC DDS cooperation (monitor / inference profiles)
+├── docker-compose.eval.yml               # ROS2 MCAP replay eval: 3-service stack (inference + mcap-player + eval-recorder)
 ├── material/                      # Logo and visual assets
 ├── .env.example                   # Environment template
 └── model_zoo/                     # Trained model weights (gitignored)
@@ -450,7 +506,8 @@ MODEL_PATH=./model_zoo/pick-and-place/checkpoints/last
 | Command              | Description                                 |
 | -------------------- | ------------------------------------------- |
 | `anvil-trainer`    | Train ML models                             |
-| `anvil-eval`       | Offline raw model evaluation (MSE/MAE/plots) |
+| `anvil-eval`       | Offline dataset replay evaluation — feed dataset observations into model, compare predictions against GT (MAE/RMSE/plots) |
+| `anvil-eval-ros`   | ROS2 MCAP replay evaluation — replay raw recordings through full inference Docker stack, record predicted vs GT actions |
 | `mcap-convert`     | Convert MCAP recordings to LeRobot datasets |
 | `mcap-inspect`     | Inspect MCAP file structure, topics, and message counts — useful before conversion to check what's inside a recording |
 | `mcap-to-video`    | Extract MCAP image topics to MP4 videos — useful for visually reviewing raw recordings |
