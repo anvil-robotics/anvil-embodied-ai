@@ -118,4 +118,5 @@ docs/claude_journal/
 rsync_raw_dataset.sh
 
 # 3rd Party libraries
-lerobot/eval_results/
+lerobot/
+eval_results/
