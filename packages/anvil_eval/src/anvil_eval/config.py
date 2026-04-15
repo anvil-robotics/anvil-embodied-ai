@@ -24,9 +24,10 @@ class EvalConfig:
     def resolve_output_dir(self) -> Path:
         """Auto-generate output directory if not provided.
 
-        Convention: eval_results/{dataset_name}/{job_name}/{checkpoint}
+        Convention: eval_results/{dataset_name}/{job_name}/{checkpoint}/raw
         where job_name is the training run directory (parent of 'checkpoints/')
         and checkpoint is the step identifier (e.g. '000015' or 'last').
+        The /raw suffix distinguishes offline dataset eval from ROS2 replay eval (/ros).
         """
         if self.output_dir:
             return self.output_dir
@@ -41,4 +42,4 @@ class EvalConfig:
         else:
             job_name = parent.name
 
-        return Path("eval_results") / dataset_name / job_name / checkpoint_name
+        return Path("eval_results") / dataset_name / job_name / checkpoint_name / "raw"

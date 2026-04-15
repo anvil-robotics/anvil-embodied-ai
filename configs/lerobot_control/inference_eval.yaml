@@ -1,0 +1,102 @@
+# =============================================================================
+# LeRobot Inference Configuration — EVAL MODE
+# =============================================================================
+# Same as inference_default.yaml, except action output topics are remapped to
+# /eval/* so GT actions from MCAP replay can coexist on the original topics.
+#
+# Used by docker-compose.eval.yml when running the inference service.
+# Do NOT use this config for live robot control.
+
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
+model:
+  task_description: null
+
+# -----------------------------------------------------------------------------
+# Inference Tuning (per model type)
+# -----------------------------------------------------------------------------
+inference_tuning:
+
+  act:
+    n_action_steps: null
+    temporal_ensemble_coeff: null
+
+  diffusion:
+    n_action_steps: null
+    num_inference_steps: 10
+
+  rtc:
+    inference_delay: 10
+    queue_trigger_threshold: 50
+    execution_horizon: 12
+    max_guidance_weight: 10.0
+    prefix_attention_schedule: EXP
+
+# -----------------------------------------------------------------------------
+# Joint Configuration
+# -----------------------------------------------------------------------------
+joint_state_topic: "/joint_states"
+
+joint_names:
+  model_joint_order:
+    - finger_joint1
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - joint7
+
+  controller_joint_order:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - joint7
+    - finger_joint1
+
+  arm_mapping:
+    l: left
+    r: right
+
+  state_features:
+    - position
+    - velocity
+    - effort
+
+# -----------------------------------------------------------------------------
+# Arm Configuration — REMAPPED for eval
+# -----------------------------------------------------------------------------
+# Inference node publishes to /eval/* so the recorder can distinguish
+# predicted actions from the GT actions replayed by mcap_player_node.
+
+arms:
+  left:
+    ros_prefix: "follower_l"
+    command_topic: "/eval/follower_l_forward_position_controller/commands"
+    action_start: 0
+    action_end: 8
+  right:
+    ros_prefix: "follower_r"
+    command_topic: "/eval/follower_r_forward_position_controller/commands"
+    action_start: 8
+    action_end: 16
+
+# -----------------------------------------------------------------------------
+# Camera Mapping
+# -----------------------------------------------------------------------------
+camera_mapping:
+  "/cam_waist/image_raw/compressed": "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed": "chest"
+  "/cam_wrist_l/image_raw/compressed": "wrist_l"
+
+# -----------------------------------------------------------------------------
+# Safety Parameters
+# -----------------------------------------------------------------------------
+# safety:
+#   max_position_delta: 0.1

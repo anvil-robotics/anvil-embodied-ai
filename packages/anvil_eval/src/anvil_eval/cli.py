@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=str,
-        help="Output directory (default: eval_results/{dataset_name}/{job_name}/{checkpoint})",
+        help="Output directory (default: eval_results/{dataset_name}/{job_name}/{checkpoint}/raw)",
     )
     parser.add_argument(
         "--device",

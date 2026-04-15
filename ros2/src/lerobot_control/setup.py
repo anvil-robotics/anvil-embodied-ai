@@ -31,6 +31,8 @@ setup(
         "console_scripts": [
             "inference_node = lerobot_control.inference_node:main",
             "mock_controller_node = lerobot_control.test.fake_hardware.fake_hardware_node:main",
+            "mcap_player_node = lerobot_control.mcap_player_node:main",
+            "eval_recorder_node = lerobot_control.eval_recorder_node:main",
         ],
     },
 )

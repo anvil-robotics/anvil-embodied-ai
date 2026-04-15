@@ -25,7 +25,7 @@ WORKDIR /workspace
 
 # Base lerobot install — cached as long as version doesn't change
 RUN pip3 install --break-system-packages --no-cache-dir --ignore-installed \
-    numpy packaging "lerobot==${LEROBOT_VERSION}" && \
+    numpy packaging "lerobot==${LEROBOT_VERSION}" matplotlib && \
     pip3 install --break-system-packages --no-cache-dir "setuptools<80"
 
 # Extras — separate layer, only rebuilt when LEROBOT_EXTRAS changes

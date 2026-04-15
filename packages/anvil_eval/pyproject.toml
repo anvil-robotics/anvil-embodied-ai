@@ -41,7 +41,8 @@ pi      = ["lerobot[pi]~=0.5.1"]
 all     = ["lerobot[smolvla,pi]~=0.5.1", "wandb~=0.24"]
 
 [project.scripts]
-anvil-eval = "anvil_eval.cli:main"
+anvil-eval     = "anvil_eval.cli:main"
+anvil-eval-ros = "anvil_eval.cli_ros_eval:main"
 
 [build-system]
 requires = ["hatchling"]
