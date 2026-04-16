@@ -72,6 +72,8 @@ class TrainingConfig:
         task_override: Override task string for all samples (for SmolVLA)
         use_delta_actions: Convert actions to delta (action - observation.state)
         dataset_root: Path to local dataset (for validation)
+        note: Free-text note attached to this run (stored in anvil_config.json and wandb)
+        note_append: Text to append to the existing note when resuming a run
     """
 
     exclude_observation: list[str] | None = None
@@ -84,6 +86,8 @@ class TrainingConfig:
     split_ratio: list[float] = field(default_factory=lambda: [8.0, 1.0, 1.0])  # train/val/test episode split ratios
     # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50 (VLA models ignore this)
     backbone: str = "resnet18"
+    note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
+    note_append: str | None = None  # Append to existing note during --resume-job
 
     @classmethod
     def from_env_and_args(cls) -> TrainingConfig:
@@ -218,6 +222,22 @@ class TrainingConfig:
                 sys.argv.remove(arg)
                 break
 
+        # Free-text note for this run (stored in anvil_config.json + wandb)
+        note: str | None = None
+        for arg in sys.argv:
+            if arg.startswith("--note="):
+                note = arg.split("=", 1)[1]
+                sys.argv.remove(arg)
+                break
+
+        # Append text to existing note when resuming (--note-append=TEXT)
+        note_append: str | None = None
+        for arg in sys.argv:
+            if arg.startswith("--note-append="):
+                note_append = arg.split("=", 1)[1]
+                sys.argv.remove(arg)
+                break
+
         # Defaults injection — skip if resuming to avoid draccus decoding errors
         if not is_resume:
             # Default push_to_hub=false unless explicitly set
@@ -275,6 +295,8 @@ class TrainingConfig:
             resume_job_path=resume_job_path,
             split_ratio=split_ratio,
             backbone=backbone,
+            note=note,
+            note_append=note_append,
         )
 
     @classmethod
@@ -312,6 +334,53 @@ class TrainingConfig:
             full_key = f"observation.{suffix}"
             if full_key not in available:
                 log.warning("[anvil_trainer] --exclude-observation key not in dataset: %s", full_key)
+
+
+# =============================================================================
+# Note resolution helper
+# =============================================================================
+
+
+def _resolve_note(config: TrainingConfig) -> str | None:
+    """
+    Resolve the final note string for this run.
+
+    During a new run (no --resume-job):
+      - --note=TEXT        → use TEXT
+      - --note-append=TEXT → treat as plain note (no old note to append to)
+      - neither            → None
+
+    During --resume-job:
+      - neither            → auto-preserve: read old note from last checkpoint
+      - --note=TEXT        → replace: discard old note, use TEXT
+      - --note-append=TEXT → append: old note + "\\n[YYYY-MM-DD] TEXT"
+    """
+    if not config.resume_job_path:
+        if config.note_append and not config.note:
+            return config.note_append
+        return config.note
+
+    # Resume: read old note from last checkpoint's anvil_config.json
+    old_note: str | None = None
+    last_anvil = (
+        Path(config.resume_job_path) / "checkpoints" / "last"
+        / "pretrained_model" / "anvil_config.json"
+    )
+    if last_anvil.exists():
+        try:
+            data = json.loads(last_anvil.read_text())
+            old_note = data.get("note") or None
+        except Exception:
+            pass
+
+    if config.note is not None:
+        return config.note  # explicit replace
+    if config.note_append is not None:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        if old_note:
+            return f"{old_note}\n[{date_str}] {config.note_append}"
+        return f"[{date_str}] {config.note_append}"
+    return old_note  # auto-preserve
 
 
 # =============================================================================
@@ -390,8 +459,9 @@ class ExcludeObservationTransform(Transform):
 
     def patch_metadata(self, config: TrainingConfig) -> None:
         """Patch dataset_to_policy_features to exclude the specified observation keys."""
-        import lerobot.datasets.utils
-        from lerobot.datasets.utils import dataset_to_policy_features
+        import lerobot.datasets.feature_utils
+        import lerobot.policies.factory
+        from lerobot.datasets.feature_utils import dataset_to_policy_features
 
         original_func = dataset_to_policy_features
         excluded = self._full_keys(config)
@@ -405,7 +475,9 @@ class ExcludeObservationTransform(Transform):
                 filtered[key] = value
             return original_func(filtered)
 
-        lerobot.datasets.utils.dataset_to_policy_features = filtered_func
+        # Patch both the definition module and the importer (policies/factory.py)
+        lerobot.datasets.feature_utils.dataset_to_policy_features = filtered_func
+        lerobot.policies.factory.dataset_to_policy_features = filtered_func
 
 
 class TaskOverrideTransform(Transform):
@@ -427,13 +499,21 @@ class TaskOverrideTransform(Transform):
 class DeltaActionTransform(Transform):
     """Convert absolute actions to delta actions (action - observation.state).
 
-    Joints listed in config.delta_exclude_joints are kept in absolute space
-    (their delta is not applied). Joint names are resolved from the dataset's
-    meta/info.json on first call and cached.
+    For each joint i: delta[i] = target_position[i] - current_position[i]
+    where current_position comes from observation.state (most recent step).
+
+    Joints listed in config.delta_exclude_joints are kept in absolute space —
+    useful for grippers whose targets are better expressed as absolute positions.
+    Joint names are resolved by name from meta/info.json and cached.
+
+    The configuration is persisted to anvil_config.json in each checkpoint so
+    the inference node can apply the correct inverse transform automatically.
     """
 
     def __init__(self):
         self._exclude_indices: list[int] | None = None  # cached after first lookup
+        self._shape_mismatch_warned: bool = False
+        self._first_apply: bool = True  # gate for one-time logging
 
     @property
     def name(self) -> str:
@@ -481,12 +561,51 @@ class DeltaActionTransform(Transform):
         if "action" not in item or "observation.state" not in item:
             return item
 
-        original_action = item["action"].clone()
-        item["action"] = item["action"] - item["observation.state"]
+        action = item["action"]
+        state = item["observation.state"]
+
+        # When state has multiple observation steps (e.g. [n_obs_steps, n_joints]),
+        # use only the most recent step as the reference for the delta.
+        if state.dim() > 1:
+            state = state[-1]
+
+        original_action = action.clone()
+
+        action_last = action.shape[-1]
+        state_last = state.shape[-1]
+
+        if action_last == state_last:
+            # Last dims match — state broadcasts to action (e.g. [n_joints] → [chunk, n_joints])
+            item["action"] = action - state
+        else:
+            # Partial delta: apply only to the leading min(action_dim, state_dim) joints;
+            # remaining joints are kept in absolute space.
+            n = min(action_last, state_last)
+            if not self._shape_mismatch_warned:
+                log.warning(
+                    "[delta_actions] action has %d joints but state has %d — "
+                    "applying delta to first %d joint(s); remainder kept absolute",
+                    action_last, state_last, n,
+                )
+                self._shape_mismatch_warned = True
+            delta = original_action.clone()
+            delta[..., :n] = action[..., :n] - state[..., :n]
+            item["action"] = delta
 
         # Restore excluded joints to their original absolute values
-        for idx in self._resolve_exclude_indices(config):
+        exclude = self._resolve_exclude_indices(config)
+        for idx in exclude:
             item["action"][..., idx] = original_action[..., idx]
+
+        if self._first_apply:
+            log.info(
+                "[delta_actions] active — %d joints total: %d get delta, %d kept absolute %s",
+                action_last,
+                action_last - len(exclude),
+                len(exclude),
+                config.delta_exclude_joints or [],
+            )
+            self._first_apply = False
 
         return item
 
@@ -745,6 +864,8 @@ class TransformRunner:
             anvil_cfg_base["delta_exclude_joints"] = self.config.delta_exclude_joints
         if self.config.task_override:
             anvil_cfg_base["task_description"] = self.config.task_override
+        if self.config.note:
+            anvil_cfg_base["note"] = self.config.note
 
         val_state = self
 
@@ -940,6 +1061,13 @@ def train(config: TrainingConfig | None = None) -> None:
     # Patch update_policy for periodic val loss
     runner.apply_val_loss_hook()
 
+    # Resolve final note (auto-preserve / replace / append during resume)
+    resolved_note = _resolve_note(config)
+    config.note = resolved_note  # propagate to anvil_config.json writer
+    if resolved_note:
+        os.environ["WANDB_NOTES"] = resolved_note
+        log.info("[anvil_trainer] Note: %s", resolved_note)
+
     # Run training
     if config.resume_job_path:
         # LeRobot 0.5.1 saves train_config.json inside each checkpoint
@@ -994,6 +1122,18 @@ Anvil-specific flags (stripped before passing to LeRobot):
   --camera-filter=CAM1,CAM2,...
       Train using only the specified cameras. Overrides LEROBOT_CAMERA_FILTER.
       Example: --camera-filter=chest,waist
+
+  --note=TEXT
+      Free-text note attached to this run.
+      Stored in anvil_config.json in each checkpoint and sent to wandb as run notes.
+      During --resume-job: replaces the previous note.
+      Example: --note="lr=1e-4, wider backbone, retrain from scratch"
+
+  --note-append=TEXT
+      Append TEXT to the existing note when using --resume-job.
+      Prefixes TEXT with the current date: "[YYYY-MM-DD] TEXT".
+      On a new run (no --resume-job), treated as plain --note.
+      Example: --note-append="switched to resnet34, bumped lr to 3e-4"
 
   --split-ratio=TRAIN,VAL,TEST
       Episode split ratios for train/val/test (default: 8,1,1).
