@@ -3,7 +3,7 @@ Anvil Trainer Package
 
 Training utilities for Anvil robotics workflows, supporting lerobot and other platforms.
 Provides pluggable transforms for dataset preprocessing:
-- Camera filtering: Train with a subset of cameras
+- Observation exclude: Drop cameras or non-image observations by suffix
 - Task override: Override dataset task for SmolVLA
 - Delta actions: Convert actions to relative (action - observation.state)
 
@@ -15,8 +15,8 @@ Usage:
 """
 
 from anvil_trainer.train import (
-    CameraFilterTransform,
     DeltaActionTransform,
+    ExcludeObservationTransform,
     TaskOverrideTransform,
     TrainingConfig,
     Transform,
@@ -30,7 +30,7 @@ __version__ = "0.1.0"
 __all__ = [
     "TrainingConfig",
     "Transform",
-    "CameraFilterTransform",
+    "ExcludeObservationTransform",
     "TaskOverrideTransform",
     "DeltaActionTransform",
     "TransformRunner",

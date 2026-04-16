@@ -77,6 +77,7 @@ class LeRobotInferenceNode(Node):
                 model_joint_order=self.joint_names_config.get("model_joint_order", []),
                 controller_joint_order=self.joint_names_config.get("controller_joint_order", []),
                 use_delta_actions=self.use_delta_actions,
+                delta_exclude_joints=self.delta_exclude_joints,
                 logger=self.get_logger(),
             )
 
@@ -183,8 +184,9 @@ class LeRobotInferenceNode(Node):
         model_cfg = self.config.get("model", {})
         self.model_type = model_cfg.get("type") or meta.get("model_type")
 
-        # use_delta_actions: from anvil_config.json — must match training, no YAML override
+        # use_delta_actions / delta_exclude_joints: from anvil_config.json — must match training
         self.use_delta_actions = meta.get("use_delta_actions", False)
+        self.delta_exclude_joints: list[str] = meta.get("delta_exclude_joints", [])
 
         # task_description: anvil_config.json first, YAML overrides if explicitly set
         self.task_description = meta.get("task_description", "")
@@ -264,6 +266,7 @@ class LeRobotInferenceNode(Node):
         if anvil_path.exists():
             anvil = json.loads(anvil_path.read_text())
             meta["use_delta_actions"] = anvil.get("use_delta_actions", False)
+            meta["delta_exclude_joints"] = anvil.get("delta_exclude_joints", [])
             if "task_description" in anvil:
                 meta["task_description"] = anvil["task_description"]
         return meta
@@ -346,6 +349,8 @@ class LeRobotInferenceNode(Node):
             logger.info(f"Model:      {self.model_path}")
             logger.info(f"Type:       {self.model_type or 'unknown'}")
             logger.info(f"Delta acts: {self.use_delta_actions}")
+            if self.use_delta_actions and self.delta_exclude_joints:
+                logger.info(f"Delta excl: {self.delta_exclude_joints}")
             if self.model_type in {"smolvla", "pi0", "pi05"}:
                 logger.info(f"Task:       '{self.task_description}'")
         logger.info(f"Device:     {self.device}")

@@ -88,13 +88,13 @@ Two teleop modes are supported — pick the config that matches your recording:
 
 ```bash
 # For data recorded with leader-follower
-uv run mcap-convert --input data/raw/my-sessions --config configs/mcap_converter/openarm_bimanual.yaml
+uv run mcap-convert --input-dir data/raw/my-sessions --config configs/mcap_converter/openarm_bimanual.yaml
 
 # For data recorded with Quest
-uv run mcap-convert --input data/raw/my-sessions --config configs/mcap_converter/openarm_bimanual_quest.yaml
+uv run mcap-convert --input-dir data/raw/my-sessions --config configs/mcap_converter/openarm_bimanual_quest.yaml
 ```
 
-> **Output path:** the dataset is always saved to `<output-dir>/<input-dir-name>/`. With the default setting (--output data/datasets), the result is `data/datasets/my-sessions/`.
+> **Output path:** the dataset is always saved to `<output-dir>/<input-dir-name>/`. With the default setting (`--output-dir data/datasets`), the result is `data/datasets/my-sessions/`.
 
 **Common flags:**
 
@@ -137,7 +137,7 @@ Checkpoints are saved to `model_zoo/<dataset>/<policy>_<timestamp>/` by default.
 | `--dataset.root=PATH` | Path to converted LeRobot dataset |
 | `--policy.type=TYPE` | Policy type (see table above) |
 | `--job_name=NAME` | Run name — auto-generated as `<policy>_<timestamp>` if omitted |
-| `--camera-filter=chest,waist` | Train with a subset of cameras (e.g. drop `wrist_l` if unused) |
+| `--exclude-observation=KEY1,KEY2` | Drop observation keys from training. Use the suffix after `observation.` — supports both images and non-image keys: `images.chest`, `images.wrist_l`, `velocity`, `effort`. Can also be set via `LEROBOT_EXCLUDE_OBSERVATION`. |
 | `--backbone=resnet18` | Vision backbone for ACT / Diffusion: `resnet18` (default) · `resnet34` · `resnet50` |
 | `--split-ratio=8,1,1` | Dataset split (train,val,test). Val loss is logged regularly; test loss is logged at every checkpoint |
 | `--task-description="..."` | Task prompt — required for SmolVLA / Pi0 / Pi0.5 |
@@ -149,7 +149,8 @@ Checkpoints are saved to `model_zoo/<dataset>/<policy>_<timestamp>/` by default.
 | `--steps=100000` | 100k | Total training steps |
 | `--batch_size=8` | 8 | Reduce if GPU OOM |
 | `--save_freq=10000` | 10k | Checkpoint interval |
-| `--use-delta-actions` | off | Relative actions (target − state) |
+| `--use-delta-actions` | off | Convert actions to delta form (action − observation.state). Persisted to `anvil_config.json` so inference applies the inverse automatically. |
+| `--delta-exclude-joints=JOINT1,JOINT2` | none | Joints to keep in absolute space when `--use-delta-actions` is on. Resolved by name from the dataset's `meta/info.json`. Useful for grippers, which often train better in absolute space (e.g. `--delta-exclude-joints=left_finger,right_finger`). |
 | `--policy.normalization_mapping='{...}'` | policy default | e.g. `{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}`<br><br>Keys:<br>`ACTION` · `STATE` · `VISUAL`<br>Values:<br>`MEAN_STD`   — normalise by μ/σ<br>`MIN_MAX`    — normalise to [0,1]<br>`QUANTILE10` — normalise by p10/p90 (Pi0.5 default; requires quantile stats\*)<br>`IDENTITY`   — passthrough (always use for images)<br><br>mcap-convert datasets lack quantile stats — use `MEAN_STD` for `ACTION`/`STATE`. |
 | `--resume=true` | off | Resume from `--output_dir` checkpoint |
 
@@ -268,10 +269,10 @@ model:
 #### Resume a run
 
 ```bash
-uv run anvil-trainer --resume=true --output_dir=model_zoo/pick-and-place
+uv run anvil-trainer --resume-job=model_zoo/pick-and-place
 ```
 
-Only pass `--resume=true` and `--output_dir` — all other settings are restored from the saved `train_config.json`.
+Only pass `--resume-job` — all other settings are restored from the saved `train_config.json` in the checkpoint.
 
 ### 3. Offline Evaluation
 
@@ -465,7 +466,7 @@ anvil-embodied-ai/
 **ACT (TL;DR)**
 - Match `chunk_size` and `n_action_steps` to your task speed (50 for precise, 100 for sweeping)
 - Enable temporal ensemble at inference for smoother execution — no retraining needed
-- Use `--camera-filter` to drop cameras that don't add signal
+- Use `--exclude-observation` to drop cameras or non-image observations (e.g. `images.wrist_l`, `velocity`) that don't add signal
 - 100k steps / batch 16 is a solid default; drop to 50k for small datasets
 
 **Diffusion (TL;DR)**

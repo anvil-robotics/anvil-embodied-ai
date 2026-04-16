@@ -23,6 +23,7 @@ class ActionLimiter:
         model_joint_order: list[str] | None = None,
         controller_joint_order: list[str] | None = None,
         use_delta_actions: bool = False,
+        delta_exclude_joints: list[str] | None = None,
         logger=None,
     ):
         """
@@ -33,6 +34,8 @@ class ActionLimiter:
             model_joint_order: Order the ML model outputs actions
             controller_joint_order: Order the ROS2 controller expects
             use_delta_actions: If True, model outputs deltas to add to current position
+            delta_exclude_joints: Joint names kept in absolute space during training
+                (these joints must NOT have current_position added at inference)
             logger: Optional ROS2 logger
         """
         self.max_delta = max_delta
@@ -43,6 +46,15 @@ class ActionLimiter:
 
         # Build reorder indices
         self.reorder_indices = self._build_reorder_indices()
+
+        # Resolve excluded joint names → indices in controller order (post-reorder space).
+        # Fall back to model order when controller order is not configured.
+        ref_order = self.controller_joint_order or self.model_joint_order
+        self._delta_exclude_indices: set[int] = {
+            ref_order.index(name)
+            for name in (delta_exclude_joints or [])
+            if name in ref_order
+        }
 
     def _log(self, level: str, msg: str):
         """Log message using ROS2 logger or print."""
@@ -145,9 +157,14 @@ class ActionLimiter:
         # Reorder from model order to controller order
         action = self.reorder(action)
 
-        # Convert delta actions to absolute if needed
+        # Convert delta actions to absolute if needed.
+        # Joints in _delta_exclude_indices were trained as absolute — keep their
+        # model output as-is and only add current_position for the remaining joints.
         if self.use_delta_actions and current_positions is not None:
-            action = current_positions + action
+            restored = current_positions + action
+            for idx in self._delta_exclude_indices:
+                restored[idx] = action[idx]
+            action = restored
 
         # Apply delta limiting
         if current_positions is not None:
