@@ -667,6 +667,105 @@ class TransformRunner:
             return "action = action - observation.state"
         return "enabled"
 
+    def _compute_delta_action_stats(self, full_dataset: Any) -> dict | None:
+        """Compute delta action stats when DeltaActionTransform is active.
+
+        LeRobot reads ``dataset.meta.stats`` after ``make_dataset()`` returns
+        and uses those stats to build the normalizer.  Because
+        ``DeltaActionTransform`` runs at ``__getitem__`` time (after stats are
+        read), a vanilla setup normalises delta actions with *absolute* action
+        statistics — producing a large constant offset in normalised space
+        (e.g. −2.66 σ for joint j4) that causes early overfitting.
+
+        This method computes delta action stats from the HF dataset arrays
+        (vectorised, fast — ~5 MB for 69K frames) and returns the dict.  It
+        also patches ``full_dataset.meta.stats["action"]`` in place so that
+        the early-return path (``n_train < 1`` case) inherits the correct
+        stats.
+
+        Args:
+            full_dataset: LeRobotDataset spanning all episodes.
+
+        Returns:
+            Patched action stats dict, or ``None`` when DeltaActionTransform
+            is inactive or the computation fails (logged as a warning).
+        """
+        delta_transform = next(
+            (t for t in self.active_transforms if isinstance(t, DeltaActionTransform)),
+            None,
+        )
+        if delta_transform is None:
+            return None
+
+        import numpy as np  # numpy is not top-level; keep import local
+        try:
+            hf = full_dataset.hf_dataset
+            actions_np = np.array(hf["action"], dtype=np.float64)
+            states_np = np.array(hf["observation.state"], dtype=np.float64)
+            # Use most recent obs step if states are stacked (n_obs_steps > 1)
+            if states_np.ndim == 3:
+                states_np = states_np[:, -1, :]
+            d_action = actions_np.shape[-1]
+            d_state = states_np.shape[-1]
+            n = min(d_action, d_state)
+
+            deltas = actions_np.copy()
+            deltas[:, :n] = actions_np[:, :n] - states_np[:, :n]
+
+            exclude_indices = delta_transform._resolve_exclude_indices(self.config)
+            orig = full_dataset.meta.stats.get("action", {})
+            orig_mean = np.array(orig.get("mean", deltas.mean(axis=0)))
+            orig_std = np.array(orig.get("std", deltas.std(axis=0)))
+            orig_min = np.array(orig.get("min", deltas.min(axis=0)))
+            orig_max = np.array(orig.get("max", deltas.max(axis=0)))
+
+            # Keep excluded joints' values in absolute space before taking stats
+            for idx in exclude_indices:
+                if idx < d_action:
+                    deltas[:, idx] = actions_np[:, idx]
+
+            delta_mean = deltas.mean(axis=0)
+            delta_std = np.where(deltas.std(axis=0) < 1e-6, 1e-6, deltas.std(axis=0))
+            delta_min = deltas.min(axis=0)
+            delta_max = deltas.max(axis=0)
+
+            # Restore excluded joints to their original absolute stats
+            for idx in exclude_indices:
+                if idx < d_action:
+                    delta_mean[idx] = orig_mean[idx]
+                    delta_std[idx] = orig_std[idx]
+                    delta_min[idx] = orig_min[idx]
+                    delta_max[idx] = orig_max[idx]
+
+            patched_stats = {
+                "mean": delta_mean.tolist(),
+                "std": delta_std.tolist(),
+                "min": delta_min.tolist(),
+                "max": delta_max.tolist(),
+                "count": orig.get("count", len(deltas)),
+            }
+            # Patch full_dataset in place so the early-return path is covered
+            full_dataset.meta.stats["action"] = patched_stats
+
+            log.info(
+                "[delta_stats] Computed delta action stats over %d frames, %d joints "
+                "(%d kept absolute: %s). "
+                "j4 abs_mean=%.3f → delta_mean=%.4f, abs_std=%.3f → delta_std=%.4f",
+                len(deltas), d_action, len(exclude_indices),
+                self.config.delta_exclude_joints or [],
+                orig_mean[4] if len(orig_mean) > 4 else float("nan"),
+                delta_mean[4] if len(delta_mean) > 4 else float("nan"),
+                orig_std[4] if len(orig_std) > 4 else float("nan"),
+                delta_std[4] if len(delta_std) > 4 else float("nan"),
+            )
+            return patched_stats
+        except Exception as e:
+            log.warning(
+                "[delta_stats] Failed to compute delta action stats: %s — "
+                "falling back to absolute stats (training may be suboptimal)", e
+            )
+            return None
+
     def apply_metadata_patches(self) -> None:
         """Apply metadata patches before importing lerobot training."""
         for transform in self.active_transforms:
@@ -749,75 +848,13 @@ class TransformRunner:
             full_dataset = original_make_dataset(cfg)
             total_ep = full_dataset.num_episodes
 
-            # Compute delta action stats if DeltaActionTransform is active.
-            # LeRobot reads dataset.meta.stats AFTER make_dataset() returns and uses
-            # those stats to build the normalizer.  Without this patch, the normalizer
-            # uses absolute action stats even though actions are delta-transformed at
-            # __getitem__ time, creating a large constant offset in normalised space
-            # (e.g. −2.66 σ for joint j4) that causes early overfitting.
-            _delta_transform = next(
-                (t for t in val_state.active_transforms if isinstance(t, DeltaActionTransform)),
-                None,
-            )
-            _patched_action_stats: dict | None = None
-            if _delta_transform is not None:
-                import numpy as _np
-                try:
-                    _hf = full_dataset.hf_dataset
-                    _actions_np = _np.array(_hf["action"], dtype=_np.float64)
-                    _states_np  = _np.array(_hf["observation.state"], dtype=_np.float64)
-                    # Use most recent obs step if states are stacked (n_obs_steps > 1)
-                    if _states_np.ndim == 3:
-                        _states_np = _states_np[:, -1, :]
-                    _D_action = _actions_np.shape[-1]
-                    _D_state  = _states_np.shape[-1]
-                    _n = min(_D_action, _D_state)
-                    _deltas = _actions_np.copy()
-                    _deltas[:, :_n] = _actions_np[:, :_n] - _states_np[:, :_n]
-                    # Restore excluded joints to absolute values (same as DeltaActionTransform)
-                    _excl = _delta_transform._resolve_exclude_indices(val_state.config)
-                    _orig = full_dataset.meta.stats.get("action", {})
-                    _orig_mean = _np.array(_orig.get("mean", _deltas.mean(axis=0)))
-                    _orig_std  = _np.array(_orig.get("std",  _deltas.std(axis=0)))
-                    _orig_min  = _np.array(_orig.get("min",  _deltas.min(axis=0)))
-                    _orig_max  = _np.array(_orig.get("max",  _deltas.max(axis=0)))
-                    for _idx in _excl:
-                        if _idx < _D_action:
-                            _deltas[:, _idx] = _actions_np[:, _idx]
-                    _dm = _deltas.mean(axis=0)
-                    _ds = _np.where(_deltas.std(axis=0) < 1e-6, 1e-6, _deltas.std(axis=0))
-                    _dmin = _deltas.min(axis=0)
-                    _dmax = _deltas.max(axis=0)
-                    # Restore excluded joint stats to original absolute values
-                    for _idx in _excl:
-                        if _idx < _D_action:
-                            _dm[_idx]   = _orig_mean[_idx]
-                            _ds[_idx]   = _orig_std[_idx]
-                            _dmin[_idx] = _orig_min[_idx]
-                            _dmax[_idx] = _orig_max[_idx]
-                    _patched_action_stats = {
-                        "mean":  _dm.tolist(),
-                        "std":   _ds.tolist(),
-                        "min":   _dmin.tolist(),
-                        "max":   _dmax.tolist(),
-                        "count": _orig.get("count", len(_deltas)),
-                    }
-                    full_dataset.meta.stats["action"] = _patched_action_stats
-                    log.info(
-                        "[delta_stats] Computed delta action stats over %d frames, %d joints "
-                        "(%d kept absolute: %s). "
-                        "j4 abs_mean=%.3f → delta_mean=%.4f, abs_std=%.3f → delta_std=%.4f",
-                        len(_deltas), _D_action, len(_excl),
-                        val_state.config.delta_exclude_joints or [],
-                        _orig_mean[4] if len(_orig_mean) > 4 else float("nan"),
-                        _dm[4]        if len(_dm) > 4        else float("nan"),
-                        _orig_std[4]  if len(_orig_std) > 4  else float("nan"),
-                        _ds[4]        if len(_ds) > 4        else float("nan"),
-                    )
-                except Exception as _e:
-                    log.warning("[delta_stats] Failed to compute delta action stats: %s — "
-                                "falling back to absolute stats (training may be suboptimal)", _e)
-                    _patched_action_stats = None
+            # Compute delta action stats when DeltaActionTransform is active so
+            # that lerobot's normalizer is built against delta statistics rather
+            # than the absolute-action stats stored in meta/stats.json.  The
+            # helper patches full_dataset.meta.stats in place for the early-
+            # return path and returns the dict so we can re-apply it to the
+            # filtered train_dataset below.
+            _patched_action_stats = val_state._compute_delta_action_stats(full_dataset)
 
             # Check if split_info.json already exists in last checkpoint (for resume)
             split_info_path = Path(cfg.output_dir) / "checkpoints" / "last" / "pretrained_model" / "split_info.json"
