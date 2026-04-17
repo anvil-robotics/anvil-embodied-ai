@@ -749,6 +749,76 @@ class TransformRunner:
             full_dataset = original_make_dataset(cfg)
             total_ep = full_dataset.num_episodes
 
+            # Compute delta action stats if DeltaActionTransform is active.
+            # LeRobot reads dataset.meta.stats AFTER make_dataset() returns and uses
+            # those stats to build the normalizer.  Without this patch, the normalizer
+            # uses absolute action stats even though actions are delta-transformed at
+            # __getitem__ time, creating a large constant offset in normalised space
+            # (e.g. −2.66 σ for joint j4) that causes early overfitting.
+            _delta_transform = next(
+                (t for t in val_state.active_transforms if isinstance(t, DeltaActionTransform)),
+                None,
+            )
+            _patched_action_stats: dict | None = None
+            if _delta_transform is not None:
+                import numpy as _np
+                try:
+                    _hf = full_dataset.hf_dataset
+                    _actions_np = _np.array(_hf["action"], dtype=_np.float64)
+                    _states_np  = _np.array(_hf["observation.state"], dtype=_np.float64)
+                    # Use most recent obs step if states are stacked (n_obs_steps > 1)
+                    if _states_np.ndim == 3:
+                        _states_np = _states_np[:, -1, :]
+                    _D_action = _actions_np.shape[-1]
+                    _D_state  = _states_np.shape[-1]
+                    _n = min(_D_action, _D_state)
+                    _deltas = _actions_np.copy()
+                    _deltas[:, :_n] = _actions_np[:, :_n] - _states_np[:, :_n]
+                    # Restore excluded joints to absolute values (same as DeltaActionTransform)
+                    _excl = _delta_transform._resolve_exclude_indices(val_state.config)
+                    _orig = full_dataset.meta.stats.get("action", {})
+                    _orig_mean = _np.array(_orig.get("mean", _deltas.mean(axis=0)))
+                    _orig_std  = _np.array(_orig.get("std",  _deltas.std(axis=0)))
+                    _orig_min  = _np.array(_orig.get("min",  _deltas.min(axis=0)))
+                    _orig_max  = _np.array(_orig.get("max",  _deltas.max(axis=0)))
+                    for _idx in _excl:
+                        if _idx < _D_action:
+                            _deltas[:, _idx] = _actions_np[:, _idx]
+                    _dm = _deltas.mean(axis=0)
+                    _ds = _np.where(_deltas.std(axis=0) < 1e-6, 1e-6, _deltas.std(axis=0))
+                    _dmin = _deltas.min(axis=0)
+                    _dmax = _deltas.max(axis=0)
+                    # Restore excluded joint stats to original absolute values
+                    for _idx in _excl:
+                        if _idx < _D_action:
+                            _dm[_idx]   = _orig_mean[_idx]
+                            _ds[_idx]   = _orig_std[_idx]
+                            _dmin[_idx] = _orig_min[_idx]
+                            _dmax[_idx] = _orig_max[_idx]
+                    _patched_action_stats = {
+                        "mean":  _dm.tolist(),
+                        "std":   _ds.tolist(),
+                        "min":   _dmin.tolist(),
+                        "max":   _dmax.tolist(),
+                        "count": _orig.get("count", len(_deltas)),
+                    }
+                    full_dataset.meta.stats["action"] = _patched_action_stats
+                    log.info(
+                        "[delta_stats] Computed delta action stats over %d frames, %d joints "
+                        "(%d kept absolute: %s). "
+                        "j4 abs_mean=%.3f → delta_mean=%.4f, abs_std=%.3f → delta_std=%.4f",
+                        len(_deltas), _D_action, len(_excl),
+                        val_state.config.delta_exclude_joints or [],
+                        _orig_mean[4] if len(_orig_mean) > 4 else float("nan"),
+                        _dm[4]        if len(_dm) > 4        else float("nan"),
+                        _orig_std[4]  if len(_orig_std) > 4  else float("nan"),
+                        _ds[4]        if len(_ds) > 4        else float("nan"),
+                    )
+                except Exception as _e:
+                    log.warning("[delta_stats] Failed to compute delta action stats: %s — "
+                                "falling back to absolute stats (training may be suboptimal)", _e)
+                    _patched_action_stats = None
+
             # Check if split_info.json already exists in last checkpoint (for resume)
             split_info_path = Path(cfg.output_dir) / "checkpoints" / "last" / "pretrained_model" / "split_info.json"
             if split_info_path.exists():
@@ -772,6 +842,7 @@ class TransformRunner:
 
                 if n_train < 1:
                     log.warning("[split] Not enough episodes (%d) for split %s, using all for training", total_ep, s)
+                    # full_dataset already has patched action stats if _patched_action_stats is set
                     return full_dataset
 
                 all_eps = list(range(total_ep))
@@ -827,6 +898,12 @@ class TransformRunner:
             # frame indices; val/test dataloaders use relative indices and must NOT
             # be remapped.
             train_dataset._anvil_uses_abs_sampler = True
+            # Inject delta action stats so lerobot's normalizer uses the correct
+            # distribution.  train_dataset is a fresh LeRobotDataset instance that
+            # re-reads stats.json, so we must patch it explicitly here.
+            if _patched_action_stats is not None:
+                train_dataset.meta.stats["action"] = _patched_action_stats
+                log.info("[delta_stats] Patched train_dataset.meta.stats['action'] with delta stats")
             log.info("[split] train=%d ep (randomly selected)", len(train_ep))
             return train_dataset
 

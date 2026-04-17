@@ -68,6 +68,10 @@ class LeRobotInferenceNode(Node):
 
         # Non-VLA action buffer (ACT/Diffusion put actions here from obs timer)
         self._classic_action_deque: deque = deque(maxlen=10)
+        # Reference joint state captured at the moment each action chunk was
+        # generated (in model/observation order).  All queued steps in the chunk
+        # share this reference so delta restoration is consistent with training.
+        self._delta_ref_state: np.ndarray | None = None
 
         if not self.monitor_only:
             self._setup_model()
@@ -553,12 +557,35 @@ class LeRobotInferenceNode(Node):
                 with self._obs_lock:
                     self._latest_obs = obs
             else:
+                # Keep a reference to the raw (unnormalised) observation so we can
+                # capture the joint-state baseline when a new chunk is generated.
+                _raw_obs = observation
+
+                # Detect whether a new action chunk is about to be generated.
+                # When the queue is empty, select_action will run the model and fill
+                # it with n_action_steps new predictions, all computed relative to
+                # the current state.  We capture that state as the delta reference.
+                _is_new_chunk = (
+                    self.use_delta_actions
+                    and hasattr(self.model, "_queues")
+                    and len(self.model._queues.get("action", [])) == 0
+                )
+
                 if self.preprocessor:
                     observation = self.preprocessor(dict(observation))
                 observation = self._move_to_device(observation)
 
                 with torch.inference_mode():
                     action = self.model.select_action(observation)
+
+                # Capture reference state right after chunk generation
+                if _is_new_chunk and "observation.state" in _raw_obs:
+                    _s = _raw_obs["observation.state"]
+                    if hasattr(_s, "numpy"):
+                        _s = (_s.squeeze(0).numpy() if _s.dim() > 1 else _s.numpy())
+                    elif hasattr(_s, "cpu"):
+                        _s = _s.cpu().numpy()
+                    self._delta_ref_state = np.asarray(_s, dtype=np.float64).flatten()
 
                 if self.postprocessor:
                     action = self.postprocessor.process_action(action)
@@ -643,7 +670,12 @@ class LeRobotInferenceNode(Node):
                     ]
                 )
 
-            arm_action = self.action_limiter.process(arm_action, arm_current)
+            # Slice the per-chunk reference state for this arm so that queued
+            # actions are restored relative to the state at generation time.
+            arm_ref = None
+            if self.use_delta_actions and self._delta_ref_state is not None:
+                arm_ref = self._delta_ref_state[start_idx:end_idx]
+            arm_action = self.action_limiter.process(arm_action, arm_current, ref_state=arm_ref)
 
             msg = Float64MultiArray()
             msg.data = arm_action.tolist()
