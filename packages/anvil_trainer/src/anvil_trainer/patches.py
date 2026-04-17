@@ -22,6 +22,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from anvil_shared.splits import compute_split_episodes, load_split_info, save_split_info
+
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.transforms import (
     DeltaActionTransform,
@@ -234,8 +236,6 @@ class TransformRunner:
         if total_r <= 0 or (s[1] <= 0 and (len(s) < 3 or s[2] <= 0)):
             return  # no val or test, skip patching
 
-        import random
-
         import lerobot.datasets.factory as factory_mod
         import lerobot.policies.factory as policy_factory_mod
         import lerobot.scripts.lerobot_train as lerobot_train_mod
@@ -275,38 +275,26 @@ class TransformRunner:
 
             # Check if split_info.json already exists in last checkpoint (for resume)
             split_info_path = Path(cfg.output_dir) / "checkpoints" / "last" / "pretrained_model" / "split_info.json"
-            if split_info_path.exists():
-                try:
-                    loaded_split = json.loads(split_info_path.read_text())
-                    train_ep = loaded_split.get("train_episodes", [])
-                    val_ep = loaded_split.get("val_episodes", [])
-                    test_ep = loaded_split.get("test_episodes", [])
-                    log.info("[split] Loaded random splits from %s", split_info_path)
-                except Exception as e:
-                    log.warning("[split] Failed to load %s: %s. Re-splitting...", split_info_path, e)
-                    train_ep = val_ep = test_ep = None
+            loaded_split = load_split_info(split_info_path)
+            if loaded_split is not None:
+                train_ep = loaded_split.get("train_episodes", [])
+                val_ep = loaded_split.get("val_episodes", [])
+                test_ep = loaded_split.get("test_episodes", [])
+                log.info("[split] Loaded random splits from %s", split_info_path)
             else:
                 train_ep = val_ep = test_ep = None
 
             if train_ep is None:
-                # Random three-way split
-                n_test = max(1, round(total_ep * s[2] / total_r)) if len(s) > 2 and s[2] > 0 else 0
-                n_val = max(1, round(total_ep * s[1] / total_r)) if s[1] > 0 else 0
-                n_train = total_ep - n_val - n_test
+                # Random three-way split via shared helper (seeded for reproducibility)
+                splits = compute_split_episodes(total_ep, s, seed=cfg.seed)
+                train_ep = splits["train"]
+                val_ep = splits["val"]
+                test_ep = splits["test"]
 
-                if n_train < 1:
+                if len(train_ep) < 1:
                     log.warning("[split] Not enough episodes (%d) for split %s, using all for training", total_ep, s)
                     # full_dataset already has patched action stats if _patched_action_stats is set
                     return full_dataset
-
-                all_eps = list(range(total_ep))
-                # Use a fixed seed for splitting to ensure consistency if re-run without split_info.json
-                rng = random.Random(cfg.seed)
-                rng.shuffle(all_eps)
-
-                train_ep = sorted(all_eps[:n_train])
-                val_ep = sorted(all_eps[n_train : n_train + n_val])
-                test_ep = sorted(all_eps[n_train + n_val :])
                 log.info("[split] Generated random splits")
 
             # Store split info for anvil_config.json (as full lists now)
@@ -458,7 +446,7 @@ class TransformRunner:
 
                 # 2. split_info.json: all split metadata
                 if val_state._split_info:
-                    (pretrained_dir / "split_info.json").write_text(json.dumps(val_state._split_info, indent=2))
+                    save_split_info(pretrained_dir / "split_info.json", val_state._split_info)
 
                 log.info("[anvil_trainer] Saved configs to %s", pretrained_dir)
 

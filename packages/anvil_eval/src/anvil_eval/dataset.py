@@ -8,6 +8,7 @@ import random
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from anvil_shared.splits import load_split_info
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 if TYPE_CHECKING:
@@ -51,23 +52,19 @@ class EvaluationDataset:
         # 1. Try loading from split_info.json inside the checkpoint's pretrained_model dir
         if checkpoint_path:
             # Priority A: Directly inside pretrained_model (new standard)
-            split_info_path = checkpoint_path / "pretrained_model" / "split_info.json"
-            
             # Priority B: Job root (for older updated-trainer runs)
-            if not split_info_path.exists():
-                split_info_path = checkpoint_path.parent.parent / "split_info.json"
-
-            if split_info_path.exists():
-                try:
-                    split_data = json.loads(split_info_path.read_text())
-                    log.info("[anvil-eval] Loaded split info from %s", split_info_path)
+            for candidate in (
+                checkpoint_path / "pretrained_model" / "split_info.json",
+                checkpoint_path.parent.parent / "split_info.json",
+            ):
+                split_data = load_split_info(candidate)
+                if split_data is not None:
+                    log.info("[anvil-eval] Loaded split info from %s", candidate)
                     return {
                         "train": split_data.get("train_episodes", []),
                         "val": split_data.get("val_episodes", []),
                         "test": split_data.get("test_episodes", []),
                     }
-                except Exception as e:
-                    log.warning("[anvil-eval] Failed to read %s: %s", split_info_path, e)
 
         # 2. Priority 1: Explicit episode info from anvil_config.json (legacy fallback)
         for split_key in ("train", "val", "test"):
