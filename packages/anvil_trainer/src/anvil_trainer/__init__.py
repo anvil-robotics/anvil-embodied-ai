@@ -14,15 +14,14 @@ Usage:
     # anvil-trainer --dataset.repo_id=local --dataset.root=/path/to/dataset
 """
 
-from anvil_trainer.train import (
+from anvil_trainer.config import TrainingConfig
+from anvil_trainer.patches import TransformRunner
+from anvil_trainer.train import main, train
+from anvil_trainer.transforms import (
     DeltaActionTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
-    TrainingConfig,
     Transform,
-    TransformRunner,
-    main,
-    train,
 )
 
 __version__ = "0.1.0"
