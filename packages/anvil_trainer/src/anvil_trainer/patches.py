@@ -14,9 +14,16 @@
           loss computation.
         - ``apply_metadata_patches`` — runs ``Transform.patch_metadata`` hooks
           (currently used by ``ExcludeObservationTransform``).
+
+Patches are installed via :meth:`TransformRunner._patch` which tracks the
+original attribute so :meth:`restore_all_patches` can put everything back.
+For the typical ``train()`` entry point, use the
+:func:`patched_lerobot` context manager which guarantees cleanup even when
+training raises.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -31,6 +38,10 @@ from anvil_trainer.transforms import (
 )
 
 log = logging.getLogger(__name__)
+
+# Sentinel used to mark "patch already installed" in the originals list so we
+# can keep insertion order + detect re-entrancy without wrapping in tuples.
+_PATCHED_MARKER = object()
 
 
 class TransformRunner:
@@ -62,6 +73,51 @@ class TransformRunner:
         self._preprocessor = None     # captured from make_pre_post_processors
         self._val_freq = 0            # set from cfg.log_freq * 5 inside patched_make_dataset
         self._resume_step = 0         # for absolute step tracking in wandb
+        # List of (module, attr_name, original_value) — populated by _patch in
+        # insertion order so restore_all_patches can revert in reverse.
+        self._saved_originals: list[tuple[Any, str, Any]] = []
+
+    # -------------------------------------------------------------------------
+    # Patch install / restore infrastructure
+    # -------------------------------------------------------------------------
+
+    def _patch(self, module: Any, attr_name: str, new_value: Any) -> None:
+        """Install a monkey-patch and remember the original for later restoration.
+
+        Calling this twice with the same ``(module, attr_name)`` from the same
+        TransformRunner instance is a no-op (with a debug log) — it will not
+        re-wrap and lose the true original.  Use :meth:`restore_all_patches`
+        to put things back; the :func:`patched_lerobot` context manager does
+        this automatically.
+        """
+        already_patched = any(
+            m is module and n == attr_name for m, n, _ in self._saved_originals
+        )
+        if already_patched:
+            log.debug(
+                "[anvil_trainer] Skipping duplicate patch %s.%s",
+                getattr(module, "__name__", module), attr_name,
+            )
+            return
+        original = getattr(module, attr_name)
+        self._saved_originals.append((module, attr_name, original))
+        setattr(module, attr_name, new_value)
+
+    def restore_all_patches(self) -> None:
+        """Restore every attribute touched by :meth:`_patch` (LIFO).
+
+        Called by :func:`patched_lerobot` on context exit.  Safe to call more
+        than once — the originals list is cleared after restoration.
+        """
+        while self._saved_originals:
+            module, attr_name, original = self._saved_originals.pop()
+            try:
+                setattr(module, attr_name, original)
+            except Exception as e:  # pragma: no cover — extremely defensive
+                log.warning(
+                    "[anvil_trainer] Failed to restore %s.%s: %s",
+                    getattr(module, "__name__", module), attr_name, e,
+                )
 
     def log_config(self) -> None:
         """Log active transforms."""
@@ -185,7 +241,7 @@ class TransformRunner:
     def apply_metadata_patches(self) -> None:
         """Apply metadata patches before importing lerobot training."""
         for transform in self.active_transforms:
-            transform.patch_metadata(self.config)
+            transform.patch_metadata(self.config, runner=self)
 
     def apply_dataset_patches(self) -> None:
         """Patch LeRobotDataset.__getitem__ to apply transforms and fix index mapping.
@@ -224,7 +280,7 @@ class TransformRunner:
                 item = transform.apply(item, config)
             return item
 
-        LeRobotDataset.__getitem__ = patched_getitem
+        self._patch(LeRobotDataset, "__getitem__", patched_getitem)
         log.info("[anvil_trainer] Patched LeRobotDataset.__getitem__ (%d transform(s))", len(transforms))
 
     def apply_val_loss_patch(self) -> None:
@@ -361,8 +417,8 @@ class TransformRunner:
             log.info("[split] train=%d ep (randomly selected)", len(train_ep))
             return train_dataset
 
-        factory_mod.make_dataset = patched_make_dataset
-        lerobot_train_mod.make_dataset = patched_make_dataset
+        self._patch(factory_mod, "make_dataset", patched_make_dataset)
+        self._patch(lerobot_train_mod, "make_dataset", patched_make_dataset)
         log.info("[split] Patched make_dataset (split_ratio=%s, random=True)", s)
 
         # Capture preprocessor when it's created by lerobot
@@ -373,8 +429,8 @@ class TransformRunner:
             val_state._preprocessor = preprocessor
             return preprocessor, postprocessor
 
-        policy_factory_mod.make_pre_post_processors = capturing_make_processors
-        lerobot_train_mod.make_pre_post_processors = capturing_make_processors
+        self._patch(policy_factory_mod, "make_pre_post_processors", capturing_make_processors)
+        self._patch(lerobot_train_mod, "make_pre_post_processors", capturing_make_processors)
         log.info("[split] Patched make_pre_post_processors to capture preprocessor")
 
     def apply_checkpoint_patch(self) -> None:
@@ -463,8 +519,8 @@ class TransformRunner:
                 log.info("[anvil_trainer] Saved configs to %s", pretrained_dir)
 
         # Patch both the module and the already-imported reference in lerobot_train
-        train_utils_mod.save_checkpoint = patched_save_checkpoint
-        lerobot_train_mod.save_checkpoint = patched_save_checkpoint
+        self._patch(train_utils_mod, "save_checkpoint", patched_save_checkpoint)
+        self._patch(lerobot_train_mod, "save_checkpoint", patched_save_checkpoint)
         log.info("[anvil_trainer] Patched save_checkpoint for test loss + anvil_config.json")
 
     def apply_val_loss_hook(self) -> None:
@@ -545,5 +601,42 @@ class TransformRunner:
 
             return result
 
-        lerobot_train_mod.update_policy = patched_update_policy
+        self._patch(lerobot_train_mod, "update_policy", patched_update_policy)
         log.info("[eval] Patched update_policy for periodic val loss (val_freq will be log_freq*5)")
+
+
+# =============================================================================
+# Context manager
+# =============================================================================
+
+
+@contextlib.contextmanager
+def patched_lerobot(config: TrainingConfig):
+    """Install every anvil-trainer patch for the duration of the ``with`` block.
+
+    Yields the constructed :class:`TransformRunner` so the caller can inspect
+    split info, the captured preprocessor, etc.  On exit (normal or via an
+    exception), every touched lerobot attribute is restored — so training
+    failures no longer leave lerobot's module state permanently mutated, and
+    tests run back-to-back without polluting each other.
+
+    Example::
+
+        with patched_lerobot(config) as runner:
+            from lerobot.scripts.lerobot_train import train as lerobot_train
+            lerobot_train()
+    """
+    runner = TransformRunner(config)
+    runner.log_config()
+    runner.apply_metadata_patches()
+    # Note: the dataset/val_loss/checkpoint patches need lerobot imported,
+    # which apply_metadata_patches typically triggers indirectly via
+    # Transform.patch_metadata.  Keep the same install order as train().
+    runner.apply_dataset_patches()
+    runner.apply_val_loss_patch()
+    runner.apply_checkpoint_patch()
+    runner.apply_val_loss_hook()
+    try:
+        yield runner
+    finally:
+        runner.restore_all_patches()
