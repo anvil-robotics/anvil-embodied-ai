@@ -53,12 +53,16 @@ class Transform(ABC):
             Transformed item
         """
 
-    def patch_metadata(self, config: TrainingConfig) -> None:  # noqa: B027
+    def patch_metadata(self, config: TrainingConfig, runner: Any = None) -> None:  # noqa: B027
         """
         Optional: Patch LeRobot metadata/utils before training.
 
         Override this method if the transform needs to modify how
         LeRobot builds the policy (e.g., filtering input features).
+
+        ``runner`` (when provided) is the owning ``TransformRunner``; use its
+        ``_patch(module, attr, new_value)`` method so patches are reverted
+        when the :func:`patched_lerobot` context manager exits.
         """
 
 
@@ -91,7 +95,7 @@ class ExcludeObservationTransform(Transform):
             item.pop(full_key, None)
         return item
 
-    def patch_metadata(self, config: TrainingConfig) -> None:
+    def patch_metadata(self, config: TrainingConfig, runner: Any = None) -> None:
         """Patch dataset_to_policy_features to exclude the specified observation keys."""
         import lerobot.datasets.feature_utils
         import lerobot.policies.factory
@@ -109,9 +113,16 @@ class ExcludeObservationTransform(Transform):
                 filtered[key] = value
             return original_func(filtered)
 
-        # Patch both the definition module and the importer (policies/factory.py)
-        lerobot.datasets.feature_utils.dataset_to_policy_features = filtered_func
-        lerobot.policies.factory.dataset_to_policy_features = filtered_func
+        # Patch both the definition module and the importer (policies/factory.py).
+        # Use runner._patch so patches are reverted by patched_lerobot(); fall
+        # back to direct assignment for backward compatibility when a transform
+        # is used standalone without a runner.
+        if runner is not None:
+            runner._patch(lerobot.datasets.feature_utils, "dataset_to_policy_features", filtered_func)
+            runner._patch(lerobot.policies.factory, "dataset_to_policy_features", filtered_func)
+        else:
+            lerobot.datasets.feature_utils.dataset_to_policy_features = filtered_func
+            lerobot.policies.factory.dataset_to_policy_features = filtered_func
 
 
 # =============================================================================

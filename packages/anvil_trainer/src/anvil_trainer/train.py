@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 from anvil_trainer.config import TrainingConfig, _resolve_note
-from anvil_trainer.patches import TransformRunner
+from anvil_trainer.patches import TransformRunner, patched_lerobot
 
 # Backward-compat re-exports: symbols that previously lived in this module.
 # Existing tests and user code may import them from `anvil_trainer.train`.
@@ -55,6 +55,10 @@ def train(config: TrainingConfig | None = None) -> None:
     """
     Run LeRobot training with custom transforms.
 
+    All monkey-patches are installed by :func:`patched_lerobot` and removed on
+    exit (including on exception), so repeated calls do not compound patches
+    and test runs don't pollute lerobot module state.
+
     Args:
         config: Training configuration. If None, parsed from env/args.
     """
@@ -65,29 +69,6 @@ def train(config: TrainingConfig | None = None) -> None:
     # Warn about unknown --exclude-observation keys
     config.warn_unknown_exclude_keys()
 
-    # Initialize transform runner
-    runner = TransformRunner(config)
-    runner.log_config()
-
-    # Apply metadata patches BEFORE importing lerobot training
-    # (required for camera filtering to affect policy input features)
-    runner.apply_metadata_patches()
-
-    # Import lerobot training module
-    from lerobot.scripts.lerobot_train import train as lerobot_train
-
-    # Apply dataset transforms
-    runner.apply_dataset_patches()
-
-    # Patch make_dataset for train/val/test split + capture preprocessor
-    runner.apply_val_loss_patch()
-
-    # Patch save_checkpoint for test loss + anvil_config.json
-    runner.apply_checkpoint_patch()
-
-    # Patch update_policy for periodic val loss
-    runner.apply_val_loss_hook()
-
     # Resolve final note (auto-preserve / replace / append during resume)
     resolved_note = _resolve_note(config)
     config.note = resolved_note  # propagate to anvil_config.json writer
@@ -95,7 +76,7 @@ def train(config: TrainingConfig | None = None) -> None:
         os.environ["WANDB_NOTES"] = resolved_note
         log.info("[anvil_trainer] Note: %s", resolved_note)
 
-    # Run training
+    # Resume path injection (requires patches-free access to sys.argv)
     if config.resume_job_path:
         # LeRobot 0.5.1 saves train_config.json inside each checkpoint
         last_cfg_path = Path(config.resume_job_path) / "checkpoints" / "last" / "pretrained_model" / "train_config.json"
@@ -103,7 +84,11 @@ def train(config: TrainingConfig | None = None) -> None:
             sys.argv.append(f"--config_path={last_cfg_path}")
             log.info("[anvil_trainer] Resuming with config from last checkpoint: %s", last_cfg_path)
 
-    lerobot_train()
+    # Install all lerobot patches; they are torn down on block exit even if
+    # lerobot_train() raises.
+    with patched_lerobot(config):
+        from lerobot.scripts.lerobot_train import train as lerobot_train
+        lerobot_train()
 
 
 # =============================================================================
