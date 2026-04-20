@@ -19,9 +19,20 @@ from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 
 log = logging.getLogger(__name__)
+
+# Coordination handshake topics must latch so late-joining peers (cross-container
+# DDS discovery can lag the `depends_on: service_healthy` gate) still receive
+# the most recent sample — otherwise episode_start/ack can be dropped on the floor.
+_EVAL_CTRL_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 
 
 class McapPlayerNode(Node):
@@ -33,13 +44,17 @@ class McapPlayerNode(Node):
         # Parameters
         self.declare_parameter("eval_plan_file", "/workspace/eval_plan.json")
         self.declare_parameter("warmup_sec", 5.0)
-        self.declare_parameter("inter_episode_sec", 2.0)
+        self.declare_parameter("inter_episode_sec", 1.0)
         self.declare_parameter("ack_timeout_sec", 120.0)
+        self.declare_parameter("post_start_sleep_sec", 0.2)
 
         eval_plan_file = self.get_parameter("eval_plan_file").get_parameter_value().string_value
         self._warmup_sec = self.get_parameter("warmup_sec").get_parameter_value().double_value
         self._inter_episode_sec = self.get_parameter("inter_episode_sec").get_parameter_value().double_value
         self._ack_timeout_sec = self.get_parameter("ack_timeout_sec").get_parameter_value().double_value
+        self._post_start_sleep_sec = (
+            self.get_parameter("post_start_sleep_sec").get_parameter_value().double_value
+        )
 
         # Load eval plan
         plan_path = Path(eval_plan_file)
@@ -64,16 +79,16 @@ class McapPlayerNode(Node):
         episodes = self._plan.get("episodes", [])
         self.get_logger().info(f"[mcap-player] Loaded eval plan: {len(episodes)} episodes")
 
-        # Publishers
-        self._ep_start_pub = self.create_publisher(String, "/eval/episode_start", 10)
-        self._ep_done_pub = self.create_publisher(String, "/eval/episode_done", 10)
-        self._eval_complete_pub = self.create_publisher(Bool, "/eval/eval_complete", 10)
+        # Publishers (TRANSIENT_LOCAL so late subscribers still catch the latest sample)
+        self._ep_start_pub = self.create_publisher(String, "/eval/episode_start", _EVAL_CTRL_QOS)
+        self._ep_done_pub = self.create_publisher(String, "/eval/episode_done", _EVAL_CTRL_QOS)
+        self._eval_complete_pub = self.create_publisher(Bool, "/eval/eval_complete", _EVAL_CTRL_QOS)
 
         # Ack subscriber
         self._ack_event = threading.Event()
         self._last_ack_idx: int | None = None
         self._ack_sub = self.create_subscription(
-            String, "/eval/episode_ack", self._ack_callback, 10
+            String, "/eval/episode_ack", self._ack_callback, _EVAL_CTRL_QOS
         )
 
         # Start the playback loop in a background thread so rclpy can spin
@@ -139,7 +154,7 @@ class McapPlayerNode(Node):
         self.get_logger().info(f"[mcap-player] Published episode_start for ep {ep_idx}")
 
         # Brief pause for recorder to reset
-        time.sleep(0.5)
+        time.sleep(self._post_start_sleep_sec)
 
         # 2. Run ros2 bag play
         self.get_logger().info(f"[mcap-player] Playing {mcap_path}")

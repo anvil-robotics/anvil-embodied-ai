@@ -82,8 +82,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--inference-drain-sec",
         type=float,
-        default=3.0,
-        help="Seconds to wait after bag ends for inference pipeline to drain (default: 3.0)",
+        default=1.5,
+        help="Seconds to wait after bag ends for inference pipeline to drain (default: 1.5)",
+    )
+    parser.add_argument(
+        "--inter-episode-sec",
+        type=float,
+        default=1.0,
+        help="Seconds to sleep between episodes (default: 1.0)",
+    )
+    parser.add_argument(
+        "--silence-timeout-sec",
+        type=float,
+        default=1.0,
+        help="Seconds of GT topic silence before declaring episode done (default: 1.0)",
+    )
+    parser.add_argument(
+        "--ack-timeout-sec",
+        type=float,
+        default=20.0,
+        help="Max seconds the mcap-player waits for episode_ack before giving up (default: 20.0)",
     )
     parser.add_argument(
         "--image-tag",
@@ -157,23 +175,39 @@ def _read_action_dim(checkpoint_path: Path) -> int | None:
     return shape[0] if shape else None
 
 
-def _detect_arms_from_conversion_config(mcap_root: Path) -> list[str] | None:
+def _detect_arms_from_conversion_config(
+    mcap_root: Path, mcap_root_arg: Path | None = None
+) -> list[str] | None:
     """Read conversion_config.yaml to find which arms are used for actions.
 
     Returns ordered list of arm names (e.g. ["right"]) or None if not found.
     The dataset conversion config lives at data/datasets/{dataset_name}/conversion_config.yaml.
+
+    Two candidate roots are tried so symlinked data dirs still work:
+      1. the path as given on the CLI (e.g. workspace/data/raw/<name>)
+      2. the symlink-resolved path (e.g. /media/.../<name>)
     """
     try:
         import yaml
     except ImportError:
         return None
 
-    # mcap_root is data/raw/{dataset_name}/ → datasets dir is two levels up
-    dataset_name = mcap_root.name
-    config_path = mcap_root.parent.parent / "datasets" / dataset_name / "conversion_config.yaml"
-    if not config_path.exists():
+    candidates: list[Path] = []
+    if mcap_root_arg is not None:
+        candidates.append(mcap_root_arg)
+    candidates.append(mcap_root)
+
+    config_path: Path | None = None
+    for root in candidates:
+        candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
+        if candidate.exists():
+            config_path = candidate
+            break
+
+    if config_path is None:
         return None
 
+    log.info("[anvil-eval-ros] conversion_config: %s", config_path)
     cfg = yaml.safe_load(config_path.read_text())
     action_topics: dict = cfg.get("action_topics", {})
     if not action_topics:
@@ -189,6 +223,7 @@ def generate_inference_config(
     base_yaml_path: Path,
     output_dir: Path,
     mcap_root: Path | None = None,
+    mcap_root_arg: Path | None = None,
 ) -> tuple[Path, dict]:
     """Generate a model-aware inference YAML and return (path, arm_info).
 
@@ -227,7 +262,7 @@ def generate_inference_config(
     # Determine arm names: prefer conversion_config.yaml (exact training mapping)
     arm_names_ordered: list[str] | None = None
     if mcap_root is not None:
-        arm_names_ordered = _detect_arms_from_conversion_config(mcap_root)
+        arm_names_ordered = _detect_arms_from_conversion_config(mcap_root, mcap_root_arg)
         if arm_names_ordered:
             log.info(
                 "[anvil-eval-ros] Arm config from conversion_config.yaml: %s", arm_names_ordered
@@ -339,7 +374,8 @@ def main() -> None:
     args = parse_args()
 
     checkpoint_path = Path(args.checkpoint).resolve()
-    mcap_root = Path(args.mcap_root).resolve()
+    mcap_root_arg = Path(args.mcap_root)
+    mcap_root = mcap_root_arg.resolve()
 
     if not checkpoint_path.exists():
         log.error("[anvil-eval-ros] Checkpoint not found: %s", checkpoint_path)
@@ -457,7 +493,11 @@ def main() -> None:
     # 5b. Auto-generate inference config from model's action shape
     base_inference_yaml = repo_root / "configs" / "lerobot_control" / "inference_eval.yaml"
     inference_config_path, arm_info = generate_inference_config(
-        checkpoint_path, base_inference_yaml, output_dir, mcap_root=mcap_root
+        checkpoint_path,
+        base_inference_yaml,
+        output_dir,
+        mcap_root=mcap_root,
+        mcap_root_arg=mcap_root_arg,
     )
 
     # 6. Build docker compose command
@@ -471,6 +511,9 @@ def main() -> None:
         # Pass tuning params to nodes via env (picked up by compose)
         "EVAL_WARMUP_SEC": str(args.warmup_sec),
         "EVAL_DRAIN_SEC": str(args.inference_drain_sec),
+        "EVAL_INTER_EPISODE_SEC": str(args.inter_episode_sec),
+        "EVAL_SILENCE_TIMEOUT_SEC": str(args.silence_timeout_sec),
+        "EVAL_ACK_TIMEOUT_SEC": str(args.ack_timeout_sec),
         # Auto-generated inference config (arm count derived from model)
         "INFERENCE_CONFIG_FILE": str(inference_config_path),
         # eval-recorder topics derived from arm config
