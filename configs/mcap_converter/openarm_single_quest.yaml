@@ -53,6 +53,10 @@ action_topics:
     arm: "right"
     joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
 
+# When the action command topic is not present in the MCAP (e.g., topic was not
+# recorded), fall back to using the follower observation positions as the action.
+action_from_observation: true
+
 
 # =============================================================================
 # Camera Configuration
@@ -83,8 +87,6 @@ image_resolution: [640, 480]
 observation_feature_mapping:
   state: "position"      # Primary feature -> observation.state
   others: []             # Uncomment to add velocity/effort:
-  #   - "velocity"         # -> observation.velocity
-  #   - "effort"           # -> observation.effort
 
 # What to extract from action commands
 # Note: Float64MultiArray only contains position commands,
@@ -92,7 +94,6 @@ observation_feature_mapping:
 action_feature_mapping:
   state: "position"      # Primary feature -> action
   others: []             # No additional action features
-
 
 # =============================================================================
 # Quick Reference

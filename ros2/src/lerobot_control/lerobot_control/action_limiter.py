@@ -139,6 +139,7 @@ class ActionLimiter:
         action: np.ndarray,
         current_positions: np.ndarray | None = None,
         joint_order: list[str] | None = None,
+        ref_state: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Process action: reorder and apply delta limiting.
@@ -147,6 +148,11 @@ class ActionLimiter:
             action: Raw action from model (in model joint order)
             current_positions: Current joint positions (in controller order)
             joint_order: Joint order for delta action conversion
+            ref_state: Reference joint positions from when the action chunk was
+                generated (in controller order).  When provided, delta restoration
+                uses ref_state as the baseline instead of current_positions, so
+                that all queued steps in a chunk share the same reference.  Falls
+                back to current_positions when None (backward-compatible).
 
         Returns:
             Processed action ready for publishing (in controller order, delta-limited)
@@ -159,14 +165,18 @@ class ActionLimiter:
 
         # Convert delta actions to absolute if needed.
         # Joints in _delta_exclude_indices were trained as absolute — keep their
-        # model output as-is and only add current_position for the remaining joints.
-        if self.use_delta_actions and current_positions is not None:
-            restored = current_positions + action
-            for idx in self._delta_exclude_indices:
-                restored[idx] = action[idx]
-            action = restored
+        # model output as-is and only add the baseline for the remaining joints.
+        # Use ref_state (state at chunk generation) when available so that all
+        # queued steps share the same reference; fall back to current_positions.
+        if self.use_delta_actions:
+            _base = ref_state if ref_state is not None else current_positions
+            if _base is not None:
+                restored = _base + action
+                for idx in self._delta_exclude_indices:
+                    restored[idx] = action[idx]
+                action = restored
 
-        # Apply delta limiting
+        # Apply delta limiting (always against current position for safety)
         if current_positions is not None:
             action = self.apply_delta_limit(action, current_positions)
 

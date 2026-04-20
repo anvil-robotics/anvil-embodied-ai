@@ -68,6 +68,13 @@ class LeRobotInferenceNode(Node):
 
         # Non-VLA action buffer (ACT/Diffusion put actions here from obs timer)
         self._classic_action_deque: deque = deque(maxlen=10)
+        # Reference joint state captured at the moment each action chunk was
+        # generated (in model/observation order).  All queued steps in the chunk
+        # share this reference so delta restoration is consistent with training.
+        self._delta_ref_state: np.ndarray | None = None
+
+        self._shutting_down: bool = False
+        self._has_published: bool = False
 
         if not self.monitor_only:
             self._setup_model()
@@ -543,6 +550,8 @@ class LeRobotInferenceNode(Node):
         VLA: preprocess and update shared snapshot for background inference thread.
         ACT/Diffusion: preprocess, run select_action, push result to deque.
         """
+        if self._shutting_down:
+            return
         observation = self.strategy.get_observation(self.camera_names)
         if observation is None:
             return
@@ -553,12 +562,35 @@ class LeRobotInferenceNode(Node):
                 with self._obs_lock:
                     self._latest_obs = obs
             else:
+                # Keep a reference to the raw (unnormalised) observation so we can
+                # capture the joint-state baseline when a new chunk is generated.
+                _raw_obs = observation
+
+                # Detect whether a new action chunk is about to be generated.
+                # When the queue is empty, select_action will run the model and fill
+                # it with n_action_steps new predictions, all computed relative to
+                # the current state.  We capture that state as the delta reference.
+                _is_new_chunk = (
+                    self.use_delta_actions
+                    and hasattr(self.model, "_queues")
+                    and len(self.model._queues.get("action", [])) == 0
+                )
+
                 if self.preprocessor:
                     observation = self.preprocessor(dict(observation))
                 observation = self._move_to_device(observation)
 
                 with torch.inference_mode():
                     action = self.model.select_action(observation)
+
+                # Capture reference state right after chunk generation
+                if _is_new_chunk and "observation.state" in _raw_obs:
+                    _s = _raw_obs["observation.state"]
+                    if hasattr(_s, "numpy"):
+                        _s = (_s.squeeze(0).numpy() if _s.dim() > 1 else _s.numpy())
+                    elif hasattr(_s, "cpu"):
+                        _s = _s.cpu().numpy()
+                    self._delta_ref_state = np.asarray(_s, dtype=np.float64).flatten()
 
                 if self.postprocessor:
                     action = self.postprocessor.process_action(action)
@@ -582,6 +614,8 @@ class LeRobotInferenceNode(Node):
         VLA: pop from ActionQueue (filled by background inference thread).
         ACT/Diffusion: pop from deque (filled by _obs_update).
         """
+        if self._shutting_down:
+            return
         self.metrics.record_control_loop()
 
         if self._is_vla:
@@ -643,7 +677,16 @@ class LeRobotInferenceNode(Node):
                     ]
                 )
 
-            arm_action = self.action_limiter.process(arm_action, arm_current)
+            # Slice the per-chunk reference state for this arm so that queued
+            # actions are restored relative to the state at generation time.
+            arm_ref = None
+            if self.use_delta_actions and self._delta_ref_state is not None:
+                arm_ref = self._delta_ref_state[start_idx:end_idx]
+            arm_action = self.action_limiter.process(arm_action, arm_current, ref_state=arm_ref)
+
+            if self._debug:
+                formatted = ", ".join(f"{v:.4f}" for v in arm_action)
+                self.get_logger().info(f"[DEBUG] cmd [{arm_name}]: [{formatted}]")
 
             msg = Float64MultiArray()
             msg.data = arm_action.tolist()
@@ -654,6 +697,7 @@ class LeRobotInferenceNode(Node):
         if self._smooth_tracker is not None:
             self._smooth_tracker.record(action)
         self.metrics.record_action_output()
+        self._has_published = True
 
     def _log_input_stats(self) -> None:
         """Periodically log input reception statistics with windowed rates."""
@@ -795,17 +839,52 @@ class LeRobotInferenceNode(Node):
         """Get input reception statistics."""
         return self.metrics.get_stats()
 
+    def _publish_hold_position(self) -> None:
+        """Publish current joint positions to hold the robot in place on shutdown."""
+        if not hasattr(self, "arm_publishers"):
+            return
+        current = self.strategy.get_current_joint_positions()
+        if not current:
+            return
+        joint_order = self.joint_names_config.get(
+            "controller_joint_order",
+            self.joint_names_config.get("joint_order", []),
+        )
+        for arm_name, arm_config in self.arms_config.items():
+            ros_prefix = arm_config.get("ros_prefix", arm_name)
+            start_idx = arm_config.get("action_start", 0)
+            end_idx = arm_config.get("action_end", len(joint_order))
+            arm_joints = joint_order[start_idx:end_idx]
+            positions = [current.get(f"{ros_prefix}_{j}", 0.0) for j in arm_joints]
+            msg = Float64MultiArray()
+            msg.data = positions
+            if arm_name in self.arm_publishers:
+                self.arm_publishers[arm_name].publish(msg)
+        self.get_logger().info("Shutdown: hold-position command sent to controllers")
+
     def destroy_node(self) -> None:
         """Cleanup timers, inference thread, strategy, and destroy node."""
-        # Stop background RTC inference thread before cancelling timers
-        if hasattr(self, "_inference_stop"):
-            self._inference_stop.set()
-        if hasattr(self, "_inference_thread"):
-            self._inference_thread.join(timeout=2.0)
+        # Block any new publishes first — timers may still fire during executor shutdown
+        self._shutting_down = True
+
+        # Cancel timers before stopping the inference thread so no new callbacks
+        # are scheduled while we wait for the thread to join.
         for timer_name in ("control_timer", "_obs_timer", "_publish_timer", "_stats_timer"):
             timer = getattr(self, timer_name, None)
             if timer:
                 timer.cancel()
+
+        # Stop background RTC inference thread
+        if hasattr(self, "_inference_stop"):
+            self._inference_stop.set()
+        if hasattr(self, "_inference_thread"):
+            self._inference_thread.join(timeout=2.0)
+
+        # Hold position before publisher is torn down — only if we actually
+        # commanded the robot at least once during this session.
+        if not self.monitor_only and self._has_published:
+            self._publish_hold_position()
+
         self.strategy.cleanup()
         super().destroy_node()
 

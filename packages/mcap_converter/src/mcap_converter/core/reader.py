@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from mcap.exceptions import McapError
 from mcap.reader import make_reader as make_mcap_reader
 from mcap_ros2.reader import read_ros2_messages
 
@@ -132,9 +133,12 @@ class McapReader:
         Returns:
             Estimated fps as a float, or None if not enough data
         """
-        with open(self.mcap_path, "rb") as f:
-            reader = make_mcap_reader(f)
-            summary = reader.get_summary()
+        try:
+            with open(self.mcap_path, "rb") as f:
+                reader = make_mcap_reader(f)
+                summary = reader.get_summary()
+        except McapError:
+            return None
 
         if summary is None or summary.statistics is None:
             return None

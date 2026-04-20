@@ -65,6 +65,7 @@ class EpisodeEvaluator:
         self.joint_names = joint_names
         self._is_vla = model_type in ("pi0", "pi05", "smolvla")
         self._exclude_indices: set[int] | None = None
+        self._delta_ref_state: np.ndarray | None = None
 
     def evaluate_episode(
         self,
@@ -82,6 +83,7 @@ class EpisodeEvaluator:
 
         # Reset model state (clears action queues for ACT)
         reset_model_state(self.model)
+        self._delta_ref_state = None  # reset per-episode delta reference state
 
         for rel_idx in tqdm(frame_indices, desc=f"Episode {episode_idx}", leave=False):
             item = dataset[rel_idx]
@@ -94,6 +96,19 @@ class EpisodeEvaluator:
 
             # Observation state for delta restore (raw, before preprocessing)
             obs_state = item["observation.state"].numpy() if "observation.state" in item else None
+
+            # Detect whether a new action chunk is about to be generated.
+            # DiffusionPolicy caches n_action_steps actions relative to the state at
+            # the time the chunk was generated (state_t0).  Restoring queued steps
+            # with the current obs_state (state_t0+k) introduces a drift error of
+            # state_{t0+k} − state_t0.  We therefore capture obs_state_t0 once per
+            # chunk and reuse it for all subsequent restorations in that chunk.
+            # Models without _queues (e.g. ACT) fall back to per-frame obs_state.
+            _is_new_chunk = (
+                self.use_delta_actions
+                and hasattr(self.model, "_queues")
+                and len(self.model._queues.get("action", [])) == 0
+            )
 
             # Preprocess + inference
             with torch.inference_mode():
@@ -108,6 +123,11 @@ class EpisodeEvaluator:
 
                 action = self.model.select_action(processed)
 
+            # Capture reference state right after new chunk is generated
+            if _is_new_chunk and obs_state is not None:
+                _ref = obs_state[-1] if obs_state.ndim > 1 else obs_state
+                self._delta_ref_state = _ref.copy()
+
             # Postprocess
             if self.postprocessor:
                 action = self.postprocessor.process_action(action)
@@ -118,9 +138,15 @@ class EpisodeEvaluator:
                     action = action.squeeze(0)
                 action = action.cpu().numpy()
 
-            # Delta action restore
-            if self.use_delta_actions and obs_state is not None:
-                action = self._restore_delta_action(action, obs_state)
+            # Delta action restore — use the reference state from when the current
+            # chunk was generated (state_t0) rather than the current obs_state, so
+            # that all 8 queued steps share the same reference.
+            if self.use_delta_actions:
+                _obs_ref = (obs_state[-1] if obs_state is not None and obs_state.ndim > 1
+                            else obs_state)
+                _ref = self._delta_ref_state if self._delta_ref_state is not None else _obs_ref
+                if _ref is not None:
+                    action = self._restore_delta_action(action, _ref)
 
             predicted_actions.append(action)
             ground_truth_actions.append(gt_action)

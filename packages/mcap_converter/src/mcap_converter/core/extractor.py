@@ -818,7 +818,13 @@ class BufferedStreamExtractor:
 
         # Align joint states
         if joint_buffers:
-            joint_aligned = self._align_joint_states(joint_buffers, main_ts)
+            has_action_buffer = any(role == "action" for (role, _) in joint_buffers)
+            action_ts = (
+                main_ts + self.frame_interval
+                if self.config.action_from_observation and not has_action_buffer
+                else None
+            )
+            joint_aligned = self._align_joint_states(joint_buffers, main_ts, action_ts=action_ts)
             if joint_aligned is None:
                 return None  # Skip frame if joint states not available
             frame.update(joint_aligned)
@@ -830,6 +836,7 @@ class BufferedStreamExtractor:
         self,
         joint_buffers: Dict[Tuple[str, str], Dict],
         target_ts: float,
+        action_ts: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Align joint states to target timestamp.
@@ -840,7 +847,10 @@ class BufferedStreamExtractor:
 
         Args:
             joint_buffers: Joint state buffers keyed by (role, robot)
-            target_ts: Target timestamp to align to
+            target_ts: Target timestamp for observation alignment
+            action_ts: If provided, look up observation data at this timestamp as
+                       the action (used with action_from_observation=True so that
+                       action[t] = observation[t+1] rather than observation[t]).
 
         Returns:
             Dictionary with aligned joint state features, or None if data missing
@@ -855,7 +865,7 @@ class BufferedStreamExtractor:
             if len(buffer) == 0:
                 return None  # Required joint data missing
 
-            # Find nearest joint state sample
+            # Find nearest joint state sample for observation
             nearest_idx = self._find_nearest_in_buffer(buffer, target_ts)
             if nearest_idx is None:
                 return None
@@ -869,6 +879,23 @@ class BufferedStreamExtractor:
                     "eff": eff.copy() if eff.size > 0 else None,
                 }
             else:  # action
+                action_data[robot] = {"pos": pos.copy()}
+
+        # Fallback: use observation at action_ts (t+1) as action when action_topics
+        # are configured but not recorded in this MCAP.
+        if not action_data and obs_data and self.config.action_from_observation:
+            if action_ts is None:
+                # No next timestamp available (last frame) — skip this frame
+                return None
+            action_data = {}
+            for (role, robot), data in joint_buffers.items():
+                if role != "observation":
+                    continue
+                buffer = data["buffer"]
+                action_idx = self._find_nearest_in_buffer(buffer, action_ts)
+                if action_idx is None:
+                    return None
+                _, pos, _, _ = buffer[action_idx]
                 action_data[robot] = {"pos": pos.copy()}
 
         # Check if multi-robot (has named robots like 'left', 'right')
@@ -891,23 +918,25 @@ class BufferedStreamExtractor:
             if obs_positions:
                 result["observation.state"] = np.concatenate(obs_positions)
 
-            # Concatenate observation velocity (if available)
-            obs_velocities = [
-                obs_data[r]["vel"]
-                for r in robots
-                if obs_data[r]["vel"] is not None
-            ]
-            if obs_velocities:
-                result["observation.velocity"] = np.concatenate(obs_velocities)
+            # Concatenate observation velocity (only if enabled in config)
+            if "velocity" in self.config.observation_feature_mapping.others:
+                obs_velocities = [
+                    obs_data[r]["vel"]
+                    for r in robots
+                    if obs_data[r]["vel"] is not None
+                ]
+                if obs_velocities:
+                    result["observation.velocity"] = np.concatenate(obs_velocities)
 
-            # Concatenate observation effort (if available)
-            obs_efforts = [
-                obs_data[r]["eff"]
-                for r in robots
-                if obs_data[r]["eff"] is not None
-            ]
-            if obs_efforts:
-                result["observation.effort"] = np.concatenate(obs_efforts)
+            # Concatenate observation effort (only if enabled in config)
+            if "effort" in self.config.observation_feature_mapping.others:
+                obs_efforts = [
+                    obs_data[r]["eff"]
+                    for r in robots
+                    if obs_data[r]["eff"] is not None
+                ]
+                if obs_efforts:
+                    result["observation.effort"] = np.concatenate(obs_efforts)
 
             # Concatenate action
             action_positions = [action_data[r]["pos"] for r in robots]
@@ -921,10 +950,12 @@ class BufferedStreamExtractor:
 
             if "" in obs_data:
                 result["observation.state"] = obs_data[""]["pos"]
-                if obs_data[""]["vel"] is not None:
-                    result["observation.velocity"] = obs_data[""]["vel"]
-                if obs_data[""]["eff"] is not None:
-                    result["observation.effort"] = obs_data[""]["eff"]
+                if "velocity" in self.config.observation_feature_mapping.others:
+                    if obs_data[""]["vel"] is not None:
+                        result["observation.velocity"] = obs_data[""]["vel"]
+                if "effort" in self.config.observation_feature_mapping.others:
+                    if obs_data[""]["eff"] is not None:
+                        result["observation.effort"] = obs_data[""]["eff"]
 
             if "" in action_data:
                 result["action"] = action_data[""]["pos"]
