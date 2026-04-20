@@ -1,0 +1,8 @@
+{
+  "type": "diffusion",
+  "output_features": {
+    "action": {
+      "shape": [8]
+    }
+  }
+}

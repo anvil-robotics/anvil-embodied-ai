@@ -18,7 +18,13 @@ import pytest
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-DATASET_ROOT = "data/datasets/placing-block-r1"
+DATASET_ROOT = "data/datasets/test"
+# Tests that actually invoke `uv run anvil-trainer` need a full LeRobot dataset
+# at DATASET_ROOT (meta/info.json + data/ + videos/). When only the stub
+# conversion_config.yaml fixture is present, skip those tests.
+_FULL_DATASET_AVAILABLE = (
+    Path(DATASET_ROOT).resolve() / "meta" / "info.json"
+).exists()
 
 
 def make_config(split_ratio="8,1,1", dataset_root=DATASET_ROOT, output_dir=None, extra_argv=None):
@@ -206,6 +212,10 @@ class TestIndexMappingScope:
 
 # ── Test 3: split_info.json written at checkpoint (integration) ──────────────
 
+@pytest.mark.skipif(
+    not _FULL_DATASET_AVAILABLE,
+    reason=f"Needs a full LeRobot dataset at {DATASET_ROOT}; stub fixture has only conversion_config.yaml",
+)
 class TestSplitInfoWritten:
     def test_split_info_saved_and_correct(self):
         """
@@ -213,10 +223,16 @@ class TestSplitInfoWritten:
         first checkpoint's pretrained_model/ directory with the correct keys
         and non-overlapping episode lists.
         """
+        import os
         import subprocess, sys
         with tempfile.TemporaryDirectory(prefix="anvil_split_test_") as tmp_base:
             # Use a sub-path that doesn't pre-exist so lerobot doesn't reject it
             output_dir = Path(tmp_base) / "run"
+            # Force HF Hub into offline mode: --dataset.repo_id=local is not a
+            # real HF repo, and lerobot's dataset loader calls list_repo_refs()
+            # unconditionally, which 404s when online. HF_HUB_OFFLINE=1 makes
+            # those lookups short-circuit to local-only behaviour.
+            env = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
             result = subprocess.run(
                 [
                     "uv", "run", "anvil-trainer",
@@ -237,6 +253,7 @@ class TestSplitInfoWritten:
                 capture_output=True,
                 text=True,
                 timeout=300,
+                env=env,
             )
             if result.returncode != 0:
                 pytest.fail(

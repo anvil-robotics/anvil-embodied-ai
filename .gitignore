@@ -62,6 +62,11 @@ data/datasets/*
 !data/raw/.gitkeep
 !data/datasets/.gitkeep
 !data/README.md
+# Test fixtures — checked-in stubs so tests run without downloading data
+!data/raw/test-session/
+!data/raw/test-session/**
+!data/datasets/test/
+!data/datasets/test/**
 
 # Model weights (users download their own)
 model_zoo/*
@@ -120,3 +125,6 @@ rsync_raw_dataset.sh
 # 3rd Party libraries
 lerobot/
 eval_results/
+
+# Debug artifacts (inference_node debug_image_dir dump)
+debug_images/

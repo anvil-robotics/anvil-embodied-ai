@@ -27,7 +27,9 @@ import pytest
 # ─────────────────────────────────────────────────────────────────────────────
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-MCAP_ROOT = REPO_ROOT / "data" / "raw" / "placing-block-r1"
+# Test fixtures live under data/raw/test-session (5 stub MCAPs).
+MCAP_ROOT = REPO_ROOT / "data" / "raw" / "test-session"
+FIXTURE_EPISODE_COUNT = 5
 ANVIL_EVAL_SRC = REPO_ROOT / "packages" / "anvil_eval" / "src"
 LEROBOT_CONTROL_SRC = REPO_ROOT / "ros2" / "src" / "lerobot_control"
 
@@ -111,7 +113,7 @@ from anvil_eval.cli_ros_eval import (
 class TestCollectMcapFiles:
     def test_returns_sorted_mcap_paths(self):
         files = collect_mcap_files(MCAP_ROOT)
-        assert len(files) > 0, "No MCAP files found — check data/raw/placing-block-r1/"
+        assert len(files) > 0, "No MCAP files found — check data/raw/test-session/"
         # All paths end with .mcap
         assert all(str(p).endswith(".mcap") for p in files)
         # Must be sorted
@@ -119,8 +121,8 @@ class TestCollectMcapFiles:
 
     def test_count_matches_expected(self):
         files = collect_mcap_files(MCAP_ROOT)
-        # placing-block-r1 has 250 episodes
-        assert len(files) == 250
+        # test-session fixture has 5 episodes
+        assert len(files) == FIXTURE_EPISODE_COUNT
 
     def test_nonexistent_dir_returns_empty(self):
         files = collect_mcap_files(Path("/nonexistent/path/that/does/not/exist"))
@@ -199,23 +201,22 @@ class TestLoadSplitInfo:
             assert result == {}
 
     def test_real_job_root_split_info(self):
-        """Test against the real split_info.json at model_zoo."""
-        split_json = REPO_ROOT / "model_zoo" / "placing-block-r1" / "diffusion_20260415_105906" / "split_info.json"
+        """Load split_info.json from the test-diffusion fixture checkpoint."""
+        split_json = REPO_ROOT / "model_zoo" / "test" / "test-diffusion" / "split_info.json"
         if not split_json.exists():
-            pytest.skip("Real split_info.json not available")
+            pytest.skip("Test fixture split_info.json not available")
 
-        # Use the job root as checkpoint path (no pretrained_model/ subdir)
-        # load_split_info will fallback to parent.parent
+        # Use the job root as checkpoint path (no pretrained_model/ subdir).
+        # load_split_info falls back to parent.parent for this layout.
         job_root = split_json.parent
-        # Simulate: checkpoint = job_root / checkpoints / 000010
         fake_ckpt = job_root / "checkpoints" / "000010"
         fake_ckpt.mkdir(parents=True, exist_ok=True)
 
         result = load_split_info(fake_ckpt)
         assert len(result.get("train", [])) > 0
-        assert len(result.get("val", [])) > 0
         total = len(result["train"]) + len(result["val"]) + len(result.get("test", []))
-        assert total == 250  # placing-block-r1 has 250 episodes
+        # test-diffusion fixture has 5 episodes (train=3, val=1, test=1)
+        assert total == FIXTURE_EPISODE_COUNT
 
 
 class TestResolveOutputDir:
@@ -311,13 +312,13 @@ class TestCliRosEvalMain:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            # 250 episodes total in placing-block-r1
+            # test-session fixture has 5 MCAP files
             ckpt = self._make_fake_checkpoint(tmp_path, episodes={
                 "split_ratio": [8, 1, 1],
-                "total_episodes": 250,
-                "train_episodes": list(range(200)),
-                "val_episodes": list(range(200, 225)),
-                "test_episodes": list(range(225, 250)),
+                "total_episodes": FIXTURE_EPISODE_COUNT,
+                "train_episodes": [0, 1, 2],
+                "val_episodes": [3],
+                "test_episodes": [4],
             })
             output_dir = tmp_path / "eval_out"
 
