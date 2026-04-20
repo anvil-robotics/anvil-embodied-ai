@@ -41,7 +41,7 @@ members = [
     "packages/mcap_converter",
     "packages/anvil_trainer",
     "packages/anvil_eval",
-    "packages/anvil_shared",
+    "packages/anvil_eval_ros",
 ]
 
 # PyTorch index — required for torch+cu* packages with bundled CUDA libs.

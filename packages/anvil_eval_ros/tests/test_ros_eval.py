@@ -1,8 +1,8 @@
 """Unit tests for anvil-eval-ros components.
 
 Coverage:
-  1. cli_ros_eval — collect_mcap_files, build_episode_map, load_split_info, resolve_output_dir
-  2. cli_ros_eval — main() end-to-end with --no-docker flag
+  1. anvil_eval_ros.cli — collect_mcap_files, build_episode_map, load_split_info, resolve_output_dir
+  2. anvil_eval_ros.cli — main() end-to-end with --no-docker flag
   3. eval_recorder_node — _align_and_stack (pure numpy logic, tested via ROS2 mock)
   4. mcap_player_node — eval_plan loading (tested via ROS2 mock)
 
@@ -29,11 +29,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MCAP_ROOT = REPO_ROOT / "data" / "raw" / "placing-block-r1"
 ANVIL_EVAL_SRC = REPO_ROOT / "packages" / "anvil_eval" / "src"
+ANVIL_EVAL_ROS_SRC = REPO_ROOT / "packages" / "anvil_eval_ros" / "src"
 LEROBOT_CONTROL_SRC = REPO_ROOT / "ros2" / "src" / "lerobot_control"
 
-# Make cli_ros_eval importable
-if str(ANVIL_EVAL_SRC) not in sys.path:
-    sys.path.insert(0, str(ANVIL_EVAL_SRC))
+# Make anvil_eval + anvil_eval_ros importable
+for src in (ANVIL_EVAL_SRC, ANVIL_EVAL_ROS_SRC):
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
 
 # Make lerobot_control importable (for ROS2 node modules)
 if str(LEROBOT_CONTROL_SRC) not in sys.path:
@@ -97,10 +99,10 @@ _install_ros2_mocks()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Section 1: cli_ros_eval — file collection and mapping
+# Section 1: anvil_eval_ros.cli — file collection and mapping
 # ─────────────────────────────────────────────────────────────────────────────
 
-from anvil_eval.cli_ros_eval import (
+from anvil_eval_ros.cli import (
     build_episode_map,
     collect_mcap_files,
     load_split_info,
@@ -240,7 +242,7 @@ class TestResolveOutputDir:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Section 2: cli_ros_eval — main() end-to-end with --no-docker
+# Section 2: anvil_eval_ros.cli — main() end-to-end with --no-docker
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestCliRosEvalMain:
