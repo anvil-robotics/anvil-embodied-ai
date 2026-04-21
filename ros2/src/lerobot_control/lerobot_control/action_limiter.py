@@ -149,10 +149,12 @@ class ActionLimiter:
             current_positions: Current joint positions (in controller order)
             joint_order: Joint order for delta action conversion
             ref_state: Reference joint positions from when the action chunk was
-                generated (in controller order).  When provided, delta restoration
-                uses ref_state as the baseline instead of current_positions, so
-                that all queued steps in a chunk share the same reference.  Falls
-                back to current_positions when None (backward-compatible).
+                generated (in model joint order, i.e. from observation.state).
+                Automatically reordered to controller order internally.  When
+                provided, delta restoration uses ref_state as the baseline instead
+                of current_positions, so that all queued steps in a chunk share
+                the same reference.  Falls back to current_positions when None
+                (backward-compatible).
 
         Returns:
             Processed action ready for publishing (in controller order, delta-limited)
@@ -162,6 +164,10 @@ class ActionLimiter:
 
         # Reorder from model order to controller order
         action = self.reorder(action)
+        # ref_state is in model order (from observation.state) — reorder it to
+        # controller order so it aligns with the reordered action before addition.
+        if ref_state is not None:
+            ref_state = self.reorder(ref_state)
 
         # Convert delta actions to absolute if needed.
         # Joints in _delta_exclude_indices were trained as absolute — keep their

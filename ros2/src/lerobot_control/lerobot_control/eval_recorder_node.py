@@ -30,9 +30,18 @@ from pathlib import Path
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float64MultiArray, String
 
 log = logging.getLogger(__name__)
+
+# Must match mcap_player_node._EVAL_CTRL_QOS so DDS matches pub↔sub.
+_EVAL_CTRL_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 
 
 def _ensure_anvil_eval_importable() -> None:
@@ -77,8 +86,9 @@ class EvalRecorderNode(Node):
             ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"],
         )
         self.declare_parameter("output_dir", "/workspace/eval_results")
-        self.declare_parameter("inference_drain_sec", 3.0)
-        self.declare_parameter("silence_timeout_sec", 2.0)
+        self.declare_parameter("inference_drain_sec", 1.5)
+        self.declare_parameter("silence_timeout_sec", 1.0)
+        self.declare_parameter("silence_poll_sec", 0.05)
 
         gt_topics = self.get_parameter("gt_topics").get_parameter_value().string_array_value
         pred_topics = self.get_parameter("pred_topics").get_parameter_value().string_array_value
@@ -96,6 +106,9 @@ class EvalRecorderNode(Node):
         )
         self._silence_timeout_sec = (
             self.get_parameter("silence_timeout_sec").get_parameter_value().double_value
+        )
+        silence_poll_sec = (
+            self.get_parameter("silence_poll_sec").get_parameter_value().double_value
         )
 
         # Build full joint name list: [left_joint1, ..., right_joint1, ...]
@@ -123,11 +136,20 @@ class EvalRecorderNode(Node):
         self._last_gt_time: float = 0.0
         self._last_pred_time: float = 0.0
         self._all_metrics: list = []
+        # Track first-message arrival per arm for diagnostics
+        self._gt_seen: set[str] = set()
+        self._pred_seen: set[str] = set()
+        # Rate-limit "still waiting for GT" warnings (monotonic seconds)
+        self._last_waiting_warn: float = 0.0
 
-        # Control topics
-        self._ep_ack_pub = self.create_publisher(String, "/eval/episode_ack", 10)
-        self.create_subscription(String, "/eval/episode_start", self._on_episode_start, 10)
-        self.create_subscription(Bool, "/eval/eval_complete", self._on_eval_complete, 10)
+        # Control topics (TRANSIENT_LOCAL — matches mcap_player_node QoS)
+        self._ep_ack_pub = self.create_publisher(String, "/eval/episode_ack", _EVAL_CTRL_QOS)
+        self.create_subscription(
+            String, "/eval/episode_start", self._on_episode_start, _EVAL_CTRL_QOS
+        )
+        self.create_subscription(
+            Bool, "/eval/eval_complete", self._on_eval_complete, _EVAL_CTRL_QOS
+        )
 
         # GT action subscribers
         for i, topic in enumerate(gt_topics):
@@ -149,12 +171,18 @@ class EvalRecorderNode(Node):
                 10,
             )
 
-        # Silence detection timer (100ms)
-        self._silence_timer = self.create_timer(0.1, self._check_silence)
+        # Silence detection timer (controls end-of-episode detection latency)
+        self._silence_timer = self.create_timer(silence_poll_sec, self._check_silence)
 
         self.get_logger().info(
             f"[eval-recorder] Ready. Output: {self._output_dir}. "
             f"Joints ({len(self._joint_names)}): {self._joint_names}"
+        )
+        self.get_logger().info(
+            f"[eval-recorder] GT topics:   {list(gt_topics)}"
+        )
+        self.get_logger().info(
+            f"[eval-recorder] Pred topics: {list(pred_topics)}"
         )
 
     # ──────────────────────────────────────────────────────────────────────
@@ -190,34 +218,69 @@ class EvalRecorderNode(Node):
     # ──────────────────────────────────────────────────────────────────────
 
     def _on_gt_action(self, arm: str, msg: Float64MultiArray) -> None:
+        first_seen = False
         with self._lock:
+            if arm not in self._gt_seen:
+                self._gt_seen.add(arm)
+                first_seen = True
             if not self._recording:
                 return
             ts = self.get_clock().now().nanoseconds
             self._gt_buf[arm].append((ts, list(msg.data)))
             self._last_gt_time = time.monotonic()
+        if first_seen:
+            self.get_logger().info(
+                f"[eval-recorder] First GT sample on arm '{arm}' (dim={len(msg.data)})"
+            )
 
     def _on_pred_action(self, arm: str, msg: Float64MultiArray) -> None:
+        first_seen = False
         with self._lock:
+            if arm not in self._pred_seen:
+                self._pred_seen.add(arm)
+                first_seen = True
             if not self._recording:
                 return
             ts = self.get_clock().now().nanoseconds
             self._pred_buf[arm].append((ts, list(msg.data)))
             self._last_pred_time = time.monotonic()
+        if first_seen:
+            self.get_logger().info(
+                f"[eval-recorder] First pred sample on arm '{arm}' (dim={len(msg.data)})"
+            )
 
     # ──────────────────────────────────────────────────────────────────────
     # Silence detection → episode finalization
     # ──────────────────────────────────────────────────────────────────────
 
     def _check_silence(self) -> None:
+        now = time.monotonic()
+        warn_no_gt = False
         with self._lock:
             if not self._recording:
                 return
             if self._last_gt_time == 0.0:
-                return  # Not started yet
+                # Still waiting for the first GT sample — warn every 5s so a
+                # topic-name / QoS mismatch surfaces fast instead of silently
+                # hitting the ack timeout.
+                if now - self._last_waiting_warn > 5.0:
+                    self._last_waiting_warn = now
+                    warn_no_gt = True
+                if warn_no_gt:
+                    pass
+                # Fall through to release the lock before logging.
 
-            gt_silent_for = time.monotonic() - self._last_gt_time
-            pred_silent_for = time.monotonic() - self._last_pred_time
+            gt_silent_for = now - self._last_gt_time
+            pred_silent_for = now - self._last_pred_time
+
+        if warn_no_gt:
+            self.get_logger().warning(
+                f"[eval-recorder] Ep {self._current_ep_idx}: still waiting for first GT sample — "
+                "check that MCAP GT topic matches eval-recorder gt_topics parameter"
+            )
+            return
+        if self._last_gt_time == 0.0:
+            return
 
         # GT topic has gone silent (bag finished) AND inference has drained
         gt_done = gt_silent_for > self._silence_timeout_sec

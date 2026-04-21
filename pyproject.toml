@@ -42,6 +42,7 @@ members = [
     "packages/anvil_trainer",
     "packages/anvil_eval",
     "packages/anvil_eval_ros",
+    "packages/anvil_shared",
 ]
 
 # PyTorch index — required for torch+cu* packages with bundled CUDA libs.
@@ -92,5 +93,5 @@ reportMissingTypeStubs = false
 testpaths = ["packages"]
 python_files = ["test_*.py", "*_test.py"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short -p no:launch_testing -p no:launch_testing_ros2 -p no:launch_testing_ros -p no:ament_lint -p no:ament_pep257 -p no:ament_flake8 -p no:ament_copyright -p no:ament_xmllint"
+addopts = "-v --tb=short --import-mode=importlib -p no:launch_testing -p no:launch_testing_ros2 -p no:launch_testing_ros -p no:ament_lint -p no:ament_pep257 -p no:ament_flake8 -p no:ament_copyright -p no:ament_xmllint"
 asyncio_mode = "auto"

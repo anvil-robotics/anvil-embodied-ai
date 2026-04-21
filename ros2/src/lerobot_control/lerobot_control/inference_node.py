@@ -575,8 +575,26 @@ class LeRobotInferenceNode(Node):
                     observation = self.preprocessor(dict(observation))
                 observation = self._move_to_device(observation)
 
+                # [DEBUG] Point 1: obs.state after preprocessor (check normalization)
+                if self._debug and _is_new_chunk and "observation.state" in observation:
+                    _dbg_s = observation["observation.state"]
+                    if isinstance(_dbg_s, torch.Tensor):
+                        _dbg_s = _dbg_s.cpu().numpy()
+                    _dbg_s = np.asarray(_dbg_s).flatten()
+                    self.get_logger().info(
+                        f"[DEBUG] obs.state (post-preproc): [{', '.join(f'{v:.4f}' for v in _dbg_s)}]"
+                    )
+
                 with torch.inference_mode():
                     action = self.model.select_action(observation)
+
+                # [DEBUG] Point 2: raw model output before postprocessor
+                if self._debug and _is_new_chunk:
+                    _dbg_a = action.cpu().numpy() if isinstance(action, torch.Tensor) else np.asarray(action)
+                    _dbg_a = _dbg_a.flatten()
+                    self.get_logger().info(
+                        f"[DEBUG] raw_action (pre-postproc): [{', '.join(f'{v:.4f}' for v in _dbg_a)}]"
+                    )
 
                 # Capture reference state right after chunk generation
                 if _is_new_chunk and "observation.state" in _raw_obs:
@@ -594,6 +612,12 @@ class LeRobotInferenceNode(Node):
                     if action.dim() > 1:
                         action = action.squeeze(0)
                     action = action.cpu().numpy()
+
+                # [DEBUG] Point 3: action after postprocessor, before delta restore
+                if self._debug and _is_new_chunk:
+                    self.get_logger().info(
+                        f"[DEBUG] action (post-postproc): [{', '.join(f'{v:.4f}' for v in action)}]"
+                    )
 
                 self._classic_action_deque.append(action)
                 self.metrics.record_inference()

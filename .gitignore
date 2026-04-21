@@ -120,3 +120,6 @@ rsync_raw_dataset.sh
 # 3rd Party libraries
 lerobot/
 eval_results/
+
+# Debug artifacts (inference_node debug_image_dir dump)
+debug_images/

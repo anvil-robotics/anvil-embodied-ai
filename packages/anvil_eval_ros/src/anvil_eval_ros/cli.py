@@ -82,8 +82,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--inference-drain-sec",
         type=float,
-        default=3.0,
-        help="Seconds to wait after bag ends for inference pipeline to drain (default: 3.0)",
+        default=1.5,
+        help="Seconds to wait after bag ends for inference pipeline to drain (default: 1.5)",
+    )
+    parser.add_argument(
+        "--inter-episode-sec",
+        type=float,
+        default=1.0,
+        help="Seconds to sleep between episodes (default: 1.0)",
+    )
+    parser.add_argument(
+        "--silence-timeout-sec",
+        type=float,
+        default=1.0,
+        help="Seconds of GT topic silence before declaring episode done (default: 1.0)",
+    )
+    parser.add_argument(
+        "--ack-timeout-sec",
+        type=float,
+        default=20.0,
+        help="Max seconds the mcap-player waits for episode_ack before giving up (default: 20.0)",
     )
     parser.add_argument(
         "--image-tag",
@@ -96,6 +114,68 @@ def parse_args() -> argparse.Namespace:
 # ──────────────────────────────────────────────────────────────────────────────
 # MCAP collection (mirrors mcap_converter.collect_mcap_files)
 # ──────────────────────────────────────────────────────────────────────────────
+
+def _mcap_has_commands_topic(mcap_path: Path) -> bool:
+    """Return True if the MCAP file contains any .../commands topic."""
+    try:
+        from mcap.reader import make_reader
+        with mcap_path.open("rb") as f:
+            reader = make_reader(f)
+            for _, channel in reader.get_summary().channels.items():
+                if channel.topic.endswith("/commands"):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _read_synthesis_info(
+    mcap_root: Path, mcap_root_arg: Path | None = None
+) -> dict | None:
+    """Return synthesize info when conversion_config has action_from_observation=true.
+
+    Returns {"command_topic": str, "joint_names": list[str]} or None.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+
+    candidates: list[Path] = []
+    if mcap_root_arg is not None:
+        candidates.append(mcap_root_arg)
+    candidates.append(mcap_root)
+
+    config_path: Path | None = None
+    for root in candidates:
+        candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
+        if candidate.exists():
+            config_path = candidate
+            break
+
+    if config_path is None:
+        return None
+
+    cfg = yaml.safe_load(config_path.read_text())
+    if not cfg.get("action_from_observation"):
+        return None
+
+    action_topics: dict = cfg.get("action_topics", {})
+    if not action_topics:
+        return None
+
+    topic, info = next(iter(action_topics.items()))
+    arm: str = info.get("arm", "right")
+    joint_order: list[str] = info.get("joint_order", [])
+    _ARM_PREFIX = {"right": "follower_r", "left": "follower_l"}
+    prefix = _ARM_PREFIX.get(arm, f"follower_{arm[0]}")
+    joint_names = [f"{prefix}_{j}" for j in joint_order]
+
+    log.info(
+        "[anvil-eval-ros] action_from_observation: topic=%s joints=%s", topic, joint_names
+    )
+    return {"command_topic": topic, "joint_names": joint_names}
+
 
 def collect_mcap_files(mcap_root: Path) -> list[Path]:
     """Recursively collect and sort MCAP files — same order as mcap_converter."""
@@ -157,23 +237,39 @@ def _read_action_dim(checkpoint_path: Path) -> int | None:
     return shape[0] if shape else None
 
 
-def _detect_arms_from_conversion_config(mcap_root: Path) -> list[str] | None:
+def _detect_arms_from_conversion_config(
+    mcap_root: Path, mcap_root_arg: Path | None = None
+) -> list[str] | None:
     """Read conversion_config.yaml to find which arms are used for actions.
 
     Returns ordered list of arm names (e.g. ["right"]) or None if not found.
     The dataset conversion config lives at data/datasets/{dataset_name}/conversion_config.yaml.
+
+    Two candidate roots are tried so symlinked data dirs still work:
+      1. the path as given on the CLI (e.g. workspace/data/raw/<name>)
+      2. the symlink-resolved path (e.g. /media/.../<name>)
     """
     try:
         import yaml
     except ImportError:
         return None
 
-    # mcap_root is data/raw/{dataset_name}/ → datasets dir is two levels up
-    dataset_name = mcap_root.name
-    config_path = mcap_root.parent.parent / "datasets" / dataset_name / "conversion_config.yaml"
-    if not config_path.exists():
+    candidates: list[Path] = []
+    if mcap_root_arg is not None:
+        candidates.append(mcap_root_arg)
+    candidates.append(mcap_root)
+
+    config_path: Path | None = None
+    for root in candidates:
+        candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
+        if candidate.exists():
+            config_path = candidate
+            break
+
+    if config_path is None:
         return None
 
+    log.info("[anvil-eval-ros] conversion_config: %s", config_path)
     cfg = yaml.safe_load(config_path.read_text())
     action_topics: dict = cfg.get("action_topics", {})
     if not action_topics:
@@ -189,6 +285,7 @@ def generate_inference_config(
     base_yaml_path: Path,
     output_dir: Path,
     mcap_root: Path | None = None,
+    mcap_root_arg: Path | None = None,
 ) -> tuple[Path, dict]:
     """Generate a model-aware inference YAML and return (path, arm_info).
 
@@ -227,7 +324,7 @@ def generate_inference_config(
     # Determine arm names: prefer conversion_config.yaml (exact training mapping)
     arm_names_ordered: list[str] | None = None
     if mcap_root is not None:
-        arm_names_ordered = _detect_arms_from_conversion_config(mcap_root)
+        arm_names_ordered = _detect_arms_from_conversion_config(mcap_root, mcap_root_arg)
         if arm_names_ordered:
             log.info(
                 "[anvil-eval-ros] Arm config from conversion_config.yaml: %s", arm_names_ordered
@@ -339,7 +436,8 @@ def main() -> None:
     args = parse_args()
 
     checkpoint_path = Path(args.checkpoint).resolve()
-    mcap_root = Path(args.mcap_root).resolve()
+    mcap_root_arg = Path(args.mcap_root)
+    mcap_root = mcap_root_arg.resolve()
 
     if not checkpoint_path.exists():
         log.error("[anvil-eval-ros] Checkpoint not found: %s", checkpoint_path)
@@ -354,6 +452,23 @@ def main() -> None:
         log.error("[anvil-eval-ros] No MCAP files found under %s", mcap_root)
         sys.exit(1)
     log.info("[anvil-eval-ros] Found %d MCAP files in %s", len(ep_map), mcap_root)
+
+    # 1b. Check if we need to synthesize GT commands from joint_states
+    synthesize_info: dict | None = None
+    first_mcap = next(iter(ep_map.values()), None)
+    if first_mcap is not None and not _mcap_has_commands_topic(first_mcap):
+        synthesize_info = _read_synthesis_info(mcap_root, mcap_root_arg)
+        if synthesize_info:
+            log.info(
+                "[anvil-eval-ros] No commands topic in MCAP + action_from_observation=true — "
+                "synthesizing GT from joint_states → %s",
+                synthesize_info["command_topic"],
+            )
+        else:
+            log.warning(
+                "[anvil-eval-ros] No commands topic in MCAP and no action_from_observation "
+                "configured — GT metrics may be unavailable."
+            )
 
     # 2. Determine episodes to evaluate
     rng = random.Random(args.seed)
@@ -457,7 +572,11 @@ def main() -> None:
     # 5b. Auto-generate inference config from model's action shape
     base_inference_yaml = repo_root / "configs" / "lerobot_control" / "inference_eval.yaml"
     inference_config_path, arm_info = generate_inference_config(
-        checkpoint_path, base_inference_yaml, output_dir, mcap_root=mcap_root
+        checkpoint_path,
+        base_inference_yaml,
+        output_dir,
+        mcap_root=mcap_root,
+        mcap_root_arg=mcap_root_arg,
     )
 
     # 6. Build docker compose command
@@ -471,12 +590,25 @@ def main() -> None:
         # Pass tuning params to nodes via env (picked up by compose)
         "EVAL_WARMUP_SEC": str(args.warmup_sec),
         "EVAL_DRAIN_SEC": str(args.inference_drain_sec),
+        "EVAL_INTER_EPISODE_SEC": str(args.inter_episode_sec),
+        "EVAL_SILENCE_TIMEOUT_SEC": str(args.silence_timeout_sec),
+        "EVAL_ACK_TIMEOUT_SEC": str(args.ack_timeout_sec),
         # Auto-generated inference config (arm count derived from model)
         "INFERENCE_CONFIG_FILE": str(inference_config_path),
         # eval-recorder topics derived from arm config
         "EVAL_GT_TOPICS": _ros2_list(arm_info["gt_topics"]),
         "EVAL_PRED_TOPICS": _ros2_list(arm_info["pred_topics"]),
         "EVAL_ARM_NAMES": _ros2_list(arm_info["arm_names"]),
+        # action_from_observation: synthesize GT commands from joint_states
+        "EVAL_SYNTHESIZE_COMMANDS": "true" if synthesize_info else "false",
+        **(
+            {
+                "EVAL_SYNTHESIZE_COMMAND_TOPIC": synthesize_info["command_topic"],
+                "EVAL_SYNTHESIZE_ARM_JOINT_NAMES": _ros2_list(synthesize_info["joint_names"]),
+            }
+            if synthesize_info
+            else {}
+        ),
     }
 
     compose_cmd = [
