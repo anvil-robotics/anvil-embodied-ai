@@ -64,6 +64,14 @@ def _run(cmd: list[str], env_extra: dict | None = None) -> int:
     return proc.returncode
 
 
+def _rmtree(path: Path) -> None:
+    """Remove a directory tree, falling back to sudo for Docker-owned (root) files."""
+    try:
+        shutil.rmtree(path)
+    except PermissionError:
+        subprocess.run(["sudo", "rm", "-rf", str(path)], check=True)
+
+
 def _missing(path: Path) -> StepResult:
     return StepResult(ok=False, duration_s=0.0, artifact=path, notes=f"missing: {path.relative_to(REPO)}")
 
@@ -215,7 +223,7 @@ def run_step_eval_ros(force: bool, steps_override: int, with_docker: bool) -> St
     #   --with-docker: full run produces metrics_summary.json
     expected = (EVAL_ROS_OUT / "metrics_summary.json") if with_docker else (EVAL_ROS_OUT / "eval_plan.json")
     if force and EVAL_ROS_OUT.exists():
-        shutil.rmtree(EVAL_ROS_OUT)
+        _rmtree(EVAL_ROS_OUT)
     if expected.exists() and not force:
         return StepResult(ok=True, duration_s=0.0, artifact=expected, notes="cached")
 

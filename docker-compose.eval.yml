@@ -33,6 +33,9 @@
 #   EVAL_GT_TOPICS        — ROS2 array of GT action topics (auto-set by anvil-eval-ros)
 #   EVAL_PRED_TOPICS      — ROS2 array of predicted action topics (auto-set)
 #   EVAL_ARM_NAMES        — ROS2 array of arm names (auto-set)
+#   EVAL_SYNTHESIZE_COMMANDS     — "true" to republish joint_states as GT commands (auto-set)
+#   EVAL_SYNTHESIZE_COMMAND_TOPIC — topic to publish synthesized commands (auto-set)
+#   EVAL_SYNTHESIZE_ARM_JOINT_NAMES — ROS2 array of joint names to extract (auto-set)
 
 x-base: &base
   image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}

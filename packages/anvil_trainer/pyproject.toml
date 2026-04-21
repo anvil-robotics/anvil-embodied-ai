@@ -22,6 +22,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "anvil-shared",             # shared pure-python helpers (splits, etc.)
     "lerobot~=0.5.1",
     "torch>=2.2.1,<2.11.0",     # lerobot v0.5.0 official range; install from pytorch-cu128 index (see root pyproject.toml)
     "numpy>=2.0.0,<2.3.0",
@@ -57,6 +58,9 @@ all     = ["lerobot[smolvla,pi]~=0.5.1"]  # all policies
 
 [project.scripts]
 anvil-trainer = "anvil_trainer.train:main"
+
+[tool.uv.sources]
+anvil-shared = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

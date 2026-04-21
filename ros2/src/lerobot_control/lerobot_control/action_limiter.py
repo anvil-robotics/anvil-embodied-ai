@@ -162,6 +162,10 @@ class ActionLimiter:
 
         # Reorder from model order to controller order
         action = self.reorder(action)
+        # ref_state is in model order (from observation.state) — reorder it to
+        # controller order so it aligns with the reordered action before addition.
+        if ref_state is not None:
+            ref_state = self.reorder(ref_state)
 
         # Convert delta actions to absolute if needed.
         # Joints in _delta_exclude_indices were trained as absolute — keep their

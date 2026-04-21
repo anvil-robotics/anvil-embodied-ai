@@ -99,6 +99,24 @@ class McapPlayerNode(Node):
     # Callbacks
     # ──────────────────────────────────────────────────────────────────────
 
+    def _on_joint_state(self, msg: JointState) -> None:
+        """Synthesize GT commands: action[t] = observation[t+1].
+
+        When the previous frame exists, extract its arm joint positions and
+        publish them as the commanded positions for that timestep.
+        """
+        if self._prev_joint_state is not None and self._synth_pub is not None:
+            prev_name_to_pos: dict[str, float] = dict(
+                zip(self._prev_joint_state.name, self._prev_joint_state.position)
+            )
+            positions = [
+                prev_name_to_pos.get(j, 0.0) for j in self._synthesize_arm_joint_names
+            ]
+            cmd = Float64MultiArray()
+            cmd.data = positions
+            self._synth_pub.publish(cmd)
+        self._prev_joint_state = msg
+
     def _ack_callback(self, msg: String) -> None:
         try:
             data = json.loads(msg.data)

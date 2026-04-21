@@ -18,7 +18,7 @@ import pytest
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-DATASET_ROOT = "data/datasets/test"
+DATASET_ROOT = "data/datasets/test-session-1arm"
 # Tests that actually invoke `uv run anvil-trainer` need a full LeRobot dataset
 # at DATASET_ROOT (meta/info.json + data/ + videos/). When only the stub
 # conversion_config.yaml fixture is present, skip those tests.
@@ -238,7 +238,7 @@ class TestSplitInfoWritten:
                     "uv", "run", "anvil-trainer",
                     f"--dataset.root={DATASET_ROOT}",
                     "--policy.type=diffusion",
-                    "--split-ratio=8,1,1",
+                    "--split-ratio=3,1,1",
                     "--steps=15",
                     "--save_freq=10",
                     "--log_freq=5",

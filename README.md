@@ -442,7 +442,8 @@ anvil-embodied-ai/
 ├── packages/
 │   ├── mcap_converter/            # MCAP to LeRobot conversion
 │   ├── anvil_trainer/             # Training utilities & transforms
-│   └── anvil_eval/                # Offline evaluation: dataset replay (anvil-eval) + ROS2 MCAP replay (anvil-eval-ros)
+│   ├── anvil_eval/                # Offline evaluation: dataset replay (anvil-eval)
+│   └── anvil_eval_ros/            # ROS2 MCAP replay evaluation CLI (anvil-eval-ros)
 ├── ros2/
 │   └── src/lerobot_control/       # ROS2 inference node (Jazzy)
 ├── configs/

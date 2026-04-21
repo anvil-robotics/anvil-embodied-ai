@@ -115,6 +115,68 @@ def parse_args() -> argparse.Namespace:
 # MCAP collection (mirrors mcap_converter.collect_mcap_files)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _mcap_has_commands_topic(mcap_path: Path) -> bool:
+    """Return True if the MCAP file contains any .../commands topic."""
+    try:
+        from mcap.reader import make_reader
+        with mcap_path.open("rb") as f:
+            reader = make_reader(f)
+            for _, channel in reader.get_summary().channels.items():
+                if channel.topic.endswith("/commands"):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _read_synthesis_info(
+    mcap_root: Path, mcap_root_arg: Path | None = None
+) -> dict | None:
+    """Return synthesize info when conversion_config has action_from_observation=true.
+
+    Returns {"command_topic": str, "joint_names": list[str]} or None.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+
+    candidates: list[Path] = []
+    if mcap_root_arg is not None:
+        candidates.append(mcap_root_arg)
+    candidates.append(mcap_root)
+
+    config_path: Path | None = None
+    for root in candidates:
+        candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
+        if candidate.exists():
+            config_path = candidate
+            break
+
+    if config_path is None:
+        return None
+
+    cfg = yaml.safe_load(config_path.read_text())
+    if not cfg.get("action_from_observation"):
+        return None
+
+    action_topics: dict = cfg.get("action_topics", {})
+    if not action_topics:
+        return None
+
+    topic, info = next(iter(action_topics.items()))
+    arm: str = info.get("arm", "right")
+    joint_order: list[str] = info.get("joint_order", [])
+    _ARM_PREFIX = {"right": "follower_r", "left": "follower_l"}
+    prefix = _ARM_PREFIX.get(arm, f"follower_{arm[0]}")
+    joint_names = [f"{prefix}_{j}" for j in joint_order]
+
+    log.info(
+        "[anvil-eval-ros] action_from_observation: topic=%s joints=%s", topic, joint_names
+    )
+    return {"command_topic": topic, "joint_names": joint_names}
+
+
 def collect_mcap_files(mcap_root: Path) -> list[Path]:
     """Recursively collect and sort MCAP files — same order as mcap_converter."""
     mcap_paths = []
@@ -391,6 +453,23 @@ def main() -> None:
         sys.exit(1)
     log.info("[anvil-eval-ros] Found %d MCAP files in %s", len(ep_map), mcap_root)
 
+    # 1b. Check if we need to synthesize GT commands from joint_states
+    synthesize_info: dict | None = None
+    first_mcap = next(iter(ep_map.values()), None)
+    if first_mcap is not None and not _mcap_has_commands_topic(first_mcap):
+        synthesize_info = _read_synthesis_info(mcap_root, mcap_root_arg)
+        if synthesize_info:
+            log.info(
+                "[anvil-eval-ros] No commands topic in MCAP + action_from_observation=true — "
+                "synthesizing GT from joint_states → %s",
+                synthesize_info["command_topic"],
+            )
+        else:
+            log.warning(
+                "[anvil-eval-ros] No commands topic in MCAP and no action_from_observation "
+                "configured — GT metrics may be unavailable."
+            )
+
     # 2. Determine episodes to evaluate
     rng = random.Random(args.seed)
 
@@ -520,6 +599,16 @@ def main() -> None:
         "EVAL_GT_TOPICS": _ros2_list(arm_info["gt_topics"]),
         "EVAL_PRED_TOPICS": _ros2_list(arm_info["pred_topics"]),
         "EVAL_ARM_NAMES": _ros2_list(arm_info["arm_names"]),
+        # action_from_observation: synthesize GT commands from joint_states
+        "EVAL_SYNTHESIZE_COMMANDS": "true" if synthesize_info else "false",
+        **(
+            {
+                "EVAL_SYNTHESIZE_COMMAND_TOPIC": synthesize_info["command_topic"],
+                "EVAL_SYNTHESIZE_ARM_JOINT_NAMES": _ros2_list(synthesize_info["joint_names"]),
+            }
+            if synthesize_info
+            else {}
+        ),
     }
 
     compose_cmd = [
