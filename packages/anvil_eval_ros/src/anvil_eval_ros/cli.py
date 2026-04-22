@@ -466,22 +466,24 @@ def main() -> None:
         sys.exit(1)
     log.info("[anvil-eval-ros] Found %d MCAP files in %s", len(ep_map), mcap_root)
 
-    # 1b. Check if we need to synthesize GT commands from joint_states
-    synthesize_info: dict | None = None
+    # 1b. Determine GT source: synthesize from joint_states (action_from_observation=true)
+    # or use the recorded commands topic from the MCAP (action_from_observation=false).
+    # We always check the conversion_config first so that datasets recorded WITH a commands
+    # topic but converted with action_from_observation=true still produce correct GT.
     first_mcap = next(iter(ep_map.values()), None)
-    if first_mcap is not None and not _mcap_has_commands_topic(first_mcap):
-        synthesize_info = _read_synthesis_info(mcap_root, mcap_root_arg)
-        if synthesize_info:
-            log.info(
-                "[anvil-eval-ros] No commands topic in MCAP + action_from_observation=true — "
-                "synthesizing GT from joint_states → %s",
-                synthesize_info["command_topic"],
-            )
-        else:
-            log.warning(
-                "[anvil-eval-ros] No commands topic in MCAP and no action_from_observation "
-                "configured — GT metrics may be unavailable."
-            )
+    synthesize_info: dict | None = _read_synthesis_info(mcap_root, mcap_root_arg)
+
+    if synthesize_info:
+        log.info(
+            "[anvil-eval-ros] action_from_observation=true → synthesizing GT from "
+            "joint_states → %s",
+            synthesize_info["command_topic"],
+        )
+    elif first_mcap is not None and not _mcap_has_commands_topic(first_mcap):
+        log.warning(
+            "[anvil-eval-ros] No commands topic in MCAP and action_from_observation not "
+            "configured — GT metrics may be unavailable."
+        )
 
     # 2. Determine episodes to evaluate
     rng = random.Random(args.seed)

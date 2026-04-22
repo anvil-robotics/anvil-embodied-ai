@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 """End-to-end CLI smoke test for the anvil training / eval stack.
 
-Exercises mcap-convert → anvil-trainer → anvil-eval → anvil-eval-ros against the
-fixture at data/raw/test-session (5 stub MCAPs, single right arm, uses
-action_from_observation fallback in openarm_single_quest.yaml).
+Two scenarios are tested against the fixture at data/raw/test-session (5 stub MCAPs,
+single right arm):
+
+  AFO  — action_from_observation=true  (openarm_single_quest.yaml)
+          action[t] = obs[t+N]; command topics in MCAP are ignored.
+          Mirrors datasets recorded without action-command topics.
+
+  CMD  — action_from_observation=false (openarm_single_quest_cmd.yaml)
+          action sourced from the recorded /commands topic.
+          Mirrors datasets recorded with action-command topics.
+
+Each scenario runs all 4 steps: mcap-convert → anvil-trainer → anvil-eval → anvil-eval-ros
 
 Usage:
-  uv run python scripts/pipeline_smoke_test.py               # run all 4 steps (step 4 launches Docker)
-  uv run python scripts/pipeline_smoke_test.py --no-docker   # step 4 only generates eval_plan.json
-  uv run python scripts/pipeline_smoke_test.py --select 3,4  # run only 3 and 4
-  uv run python scripts/pipeline_smoke_test.py --select 1 --force   # wipe + rerun
-  uv run python scripts/pipeline_smoke_test.py --keep-going         # don't stop on failure
+  uv run python scripts/pipeline_smoke_test.py               # both scenarios, all 4 steps
+  uv run python scripts/pipeline_smoke_test.py --scenario afo   # AFO scenario only
+  uv run python scripts/pipeline_smoke_test.py --select 1,2     # steps 1+2 for both scenarios
+  uv run python scripts/pipeline_smoke_test.py --force          # wipe + rerun
+  uv run python scripts/pipeline_smoke_test.py --no-docker      # step 4 skips Docker
+  uv run python scripts/pipeline_smoke_test.py --keep-going     # don't stop on failure
 
 Each step reads its inputs from stable artifact paths produced by earlier steps,
 so you can rerun a subset after fixing a later stage without redoing the whole
@@ -30,18 +40,82 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-# ── Stable artifact paths ────────────────────────────────────────────────────
-MCAP_ROOT = REPO / "data" / "raw" / "test-session"
-DATASET_DIR = REPO / "data" / "datasets" / "test-session"
-TRAIN_OUT = REPO / "model_zoo" / "test-session" / "smoke"
-CHECKPOINT = TRAIN_OUT / "checkpoints" / "000010"
-PRETRAINED = CHECKPOINT / "pretrained_model"
-EVAL_OUT = REPO / "eval_results" / "test-session" / "smoke" / "raw"
-EVAL_ROS_OUT = REPO / "eval_results" / "test-session" / "smoke" / "ros"
-CONVERT_CONFIG = REPO / "configs" / "mcap_converter" / "openarm_single_quest.yaml"
+# ── Smoke test root ───────────────────────────────────────────────────────────
+# All test fixtures and generated outputs live under tests/smoke/ for a clean
+# directory structure:
+#
+#   tests/smoke/
+#     fixtures/
+#       test-session/          ← stub MCAP recordings (committed)
+#       configs/
+#         openarm_single_quest_cmd.yaml  ← CMD-mode test config (committed)
+#     outputs/                 ← gitignored generated artifacts
+#       datasets/afo/   datasets/cmd/
+#       model_zoo/afo/  model_zoo/cmd/
+#       eval_results/afo/  eval_results/cmd/
+#
+# The production AFO config (openarm_single_quest.yaml) is kept in
+# configs/mcap_converter/ since it is also used in real conversions.
+
+SMOKE_ROOT = REPO / "tests" / "smoke"
+FIXTURES = SMOKE_ROOT / "fixtures"
+OUTPUTS = SMOKE_ROOT / "outputs"
+
+MCAP_ROOT = FIXTURES / "test-session"
+
+
+# ── Scenario definition ──────────────────────────────────────────────────────
+
+@dataclass
+class Scenario:
+    key: str
+    label: str
+    mcap_root: Path
+    dataset_dir: Path
+    train_out: Path
+    eval_out: Path
+    eval_ros_out: Path
+    convert_config: Path
+
+    @property
+    def checkpoint(self) -> Path:
+        return self.train_out / "checkpoints"
+
+    def ckpt_dir(self, steps: int) -> Path:
+        return self.train_out / "checkpoints" / f"{steps:06d}"
+
+
+# mcap-convert appends the input directory name to the output path, so the dataset
+# ends up at <output_parent>/<mcap_root_name>/.  Use scenario-specific parent dirs
+# (afo / cmd) under outputs/ to keep artifacts separate.
+_MCAP_NAME = MCAP_ROOT.name  # "test-session"
+
+SCENARIOS: dict[str, Scenario] = {
+    "afo": Scenario(
+        key="afo",
+        label="AFO (action_from_observation=true)",
+        mcap_root=MCAP_ROOT,
+        dataset_dir=OUTPUTS / "datasets" / "afo" / _MCAP_NAME,
+        train_out=OUTPUTS / "model_zoo" / "afo" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "afo" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "afo" / "ros",
+        convert_config=REPO / "configs" / "mcap_converter" / "openarm_single_quest.yaml",
+    ),
+    "cmd": Scenario(
+        key="cmd",
+        label="CMD (action_from_observation=false)",
+        mcap_root=MCAP_ROOT,
+        dataset_dir=OUTPUTS / "datasets" / "cmd" / _MCAP_NAME,
+        train_out=OUTPUTS / "model_zoo" / "cmd" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "cmd" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "cmd" / "ros",
+        convert_config=FIXTURES / "configs" / "openarm_single_quest_cmd.yaml",
+    ),
+}
 
 
 # ── Step result ──────────────────────────────────────────────────────────────
+
 @dataclass
 class StepResult:
     ok: bool
@@ -51,11 +125,6 @@ class StepResult:
 
 
 def _run(cmd: list[str], env_extra: dict | None = None) -> int:
-    """Run a subprocess, streaming its stdout/stderr directly to the console.
-
-    Returns the exit code. Full CLI output is shown live; the summary at the
-    end only prints PASS/FAIL per step since the user already saw the details.
-    """
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
@@ -65,7 +134,6 @@ def _run(cmd: list[str], env_extra: dict | None = None) -> int:
 
 
 def _rmtree(path: Path) -> None:
-    """Remove a directory tree, falling back to sudo for Docker-owned (root) files."""
     try:
         shutil.rmtree(path)
     except PermissionError:
@@ -73,49 +141,50 @@ def _rmtree(path: Path) -> None:
 
 
 def _missing(path: Path) -> StepResult:
-    return StepResult(ok=False, duration_s=0.0, artifact=path, notes=f"missing: {path.relative_to(REPO)}")
+    return StepResult(ok=False, duration_s=0.0, artifact=path,
+                      notes=f"missing: {path.relative_to(REPO)}")
 
 
 # ── Step 1: mcap-convert ─────────────────────────────────────────────────────
-def run_step_convert(force: bool) -> StepResult:
-    if not any(MCAP_ROOT.rglob("*.mcap")):
-        return _missing(MCAP_ROOT)
-    expected = DATASET_DIR / "meta" / "info.json"
-    if force and DATASET_DIR.exists():
-        shutil.rmtree(DATASET_DIR)
+
+def run_step_convert(sc: Scenario, force: bool) -> StepResult:
+    if not any(sc.mcap_root.rglob("*.mcap")):
+        return _missing(sc.mcap_root)
+    expected = sc.dataset_dir / "meta" / "info.json"
+    if force and sc.dataset_dir.exists():
+        shutil.rmtree(sc.dataset_dir)
     if expected.exists() and not force:
-        return StepResult(ok=True, duration_s=0.0, artifact=DATASET_DIR, notes="cached")
+        return StepResult(ok=True, duration_s=0.0, artifact=sc.dataset_dir, notes="cached")
 
     t0 = time.monotonic()
     rc = _run([
         "uv", "run", "mcap-convert",
-        "-i", str(MCAP_ROOT),
-        "-o", str(DATASET_DIR.parent),
-        "--config", str(CONVERT_CONFIG),
+        "-i", str(sc.mcap_root),
+        "-o", str(sc.dataset_dir.parent),
+        "--config", str(sc.convert_config),
         "--robot-type", "anvil_openarm",
     ])
     dt = time.monotonic() - t0
 
     if rc != 0:
-        return StepResult(ok=False, duration_s=dt, artifact=DATASET_DIR, notes=f"exit {rc}")
+        return StepResult(ok=False, duration_s=dt, artifact=sc.dataset_dir, notes=f"exit {rc}")
     if not expected.exists():
-        return StepResult(ok=False, duration_s=dt, artifact=DATASET_DIR,
+        return StepResult(ok=False, duration_s=dt, artifact=sc.dataset_dir,
                           notes=f"missing {expected.relative_to(REPO)}")
-    return StepResult(ok=True, duration_s=dt, artifact=DATASET_DIR)
+    return StepResult(ok=True, duration_s=dt, artifact=sc.dataset_dir)
 
 
 # ── Step 2: anvil-trainer ────────────────────────────────────────────────────
-def run_step_train(force: bool, steps_override: int) -> StepResult:
-    if not (DATASET_DIR / "meta" / "info.json").exists():
-        return _missing(DATASET_DIR / "meta" / "info.json")
 
-    # Checkpoint directory name depends on --steps; we always save at that step.
-    ckpt_name = f"{steps_override:06d}"
-    ckpt_dir = TRAIN_OUT / "checkpoints" / ckpt_name
+def run_step_train(sc: Scenario, force: bool, steps_override: int) -> StepResult:
+    if not (sc.dataset_dir / "meta" / "info.json").exists():
+        return _missing(sc.dataset_dir / "meta" / "info.json")
+
+    ckpt_dir = sc.ckpt_dir(steps_override)
     expected = ckpt_dir / "pretrained_model" / "model.safetensors"
 
-    if force and TRAIN_OUT.exists():
-        shutil.rmtree(TRAIN_OUT)
+    if force and sc.train_out.exists():
+        shutil.rmtree(sc.train_out)
     if expected.exists() and not force:
         return StepResult(ok=True, duration_s=0.0, artifact=ckpt_dir, notes="cached")
 
@@ -123,7 +192,7 @@ def run_step_train(force: bool, steps_override: int) -> StepResult:
     rc = _run(
         [
             "uv", "run", "anvil-trainer",
-            f"--dataset.root={DATASET_DIR}",
+            f"--dataset.root={sc.dataset_dir}",
             "--dataset.repo_id=local",
             "--policy.type=diffusion",
             "--policy.push_to_hub=false",
@@ -134,7 +203,7 @@ def run_step_train(force: bool, steps_override: int) -> StepResult:
             "--batch_size=1",
             "--num_workers=0",
             "--eval_freq=0",
-            f"--output_dir={TRAIN_OUT}",
+            f"--output_dir={sc.train_out}",
             "--job_name=smoke",
         ],
         env_extra={"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"},
@@ -150,14 +219,15 @@ def run_step_train(force: bool, steps_override: int) -> StepResult:
 
 
 # ── Step 3: anvil-eval ───────────────────────────────────────────────────────
-def run_step_eval(force: bool, steps_override: int) -> StepResult:
-    ckpt_dir = TRAIN_OUT / "checkpoints" / f"{steps_override:06d}"
+
+def run_step_eval(sc: Scenario, force: bool, steps_override: int) -> StepResult:
+    ckpt_dir = sc.ckpt_dir(steps_override)
     if not (ckpt_dir / "pretrained_model" / "config.json").exists():
         return _missing(ckpt_dir / "pretrained_model" / "config.json")
 
-    expected = EVAL_OUT / "metrics_summary.json"
-    if force and EVAL_OUT.exists():
-        shutil.rmtree(EVAL_OUT)
+    expected = sc.eval_out / "metrics_summary.json"
+    if force and sc.eval_out.exists():
+        shutil.rmtree(sc.eval_out)
     if expected.exists() and not force:
         return StepResult(ok=True, duration_s=0.0, artifact=expected, notes="cached")
 
@@ -165,9 +235,9 @@ def run_step_eval(force: bool, steps_override: int) -> StepResult:
     rc = _run([
         "uv", "run", "anvil-eval",
         "--checkpoint", str(ckpt_dir),
-        "--dataset", str(DATASET_DIR),
+        "--dataset", str(sc.dataset_dir),
         "--num-eps", "1",
-        "--output-dir", str(EVAL_OUT),
+        "--output-dir", str(sc.eval_out),
     ])
     dt = time.monotonic() - t0
 
@@ -180,11 +250,7 @@ def run_step_eval(force: bool, steps_override: int) -> StepResult:
 
 
 def _mcap_has_commands_topic(mcap_path: Path) -> bool:
-    """Return True if the MCAP file contains a .../commands topic (any arm).
-
-    Used to fast-fail step 4 docker mode on observation-only bags (which have
-    no action GT to replay, so eval-recorder would time-out on every episode).
-    """
+    """Return True if the MCAP file contains a .../commands topic (any arm)."""
     try:
         from mcap.reader import make_reader
         with mcap_path.open("rb") as f:
@@ -197,49 +263,46 @@ def _mcap_has_commands_topic(mcap_path: Path) -> bool:
     return False
 
 
-# ── Step 4: anvil-eval-ros (full Docker stack by default, --no-docker to skip)
-def run_step_eval_ros(force: bool, steps_override: int, with_docker: bool) -> StepResult:
-    ckpt_dir = TRAIN_OUT / "checkpoints" / f"{steps_override:06d}"
+# ── Step 4: anvil-eval-ros ───────────────────────────────────────────────────
+
+def run_step_eval_ros(sc: Scenario, force: bool, steps_override: int,
+                      with_docker: bool) -> StepResult:
+    ckpt_dir = sc.ckpt_dir(steps_override)
     if not (ckpt_dir / "pretrained_model" / "config.json").exists():
         return _missing(ckpt_dir / "pretrained_model" / "config.json")
 
-    # Pre-flight: docker mode needs a GT `.../commands` topic in the replay
-    # bags. Observation-only recordings cause eval-recorder to hit ack_timeout
-    # on every episode (see diagnostic log "still waiting for first GT sample").
-    if with_docker:
-        sample = next(MCAP_ROOT.rglob("*.mcap"), None)
+    # In CMD scenario (action_from_observation=false) with Docker, the replay
+    # needs a GT /commands topic in the MCAP. Fail fast rather than timing out.
+    if with_docker and sc.key == "cmd":
+        sample = next(sc.mcap_root.rglob("*.mcap"), None)
         if sample is not None and not _mcap_has_commands_topic(sample):
             return StepResult(
-                ok=False, duration_s=0.0, artifact=EVAL_ROS_OUT,
+                ok=False, duration_s=0.0, artifact=sc.eval_ros_out,
                 notes=(
-                    f"MCAP fixture has no `.../commands` GT topic "
-                    f"(observation-only recording). Use --no-docker, or "
-                    f"record new MCAPs that include the action-command topic."
+                    "CMD scenario requires /commands GT topic but none found. "
+                    "Use --no-docker or record MCAPs with the action-command topic."
                 ),
             )
 
-    # Final artifact differs between the two modes:
-    #   --no-docker (default): just eval_plan.json
-    #   --with-docker: full run produces metrics_summary.json
-    expected = (EVAL_ROS_OUT / "metrics_summary.json") if with_docker else (EVAL_ROS_OUT / "eval_plan.json")
-    if force and EVAL_ROS_OUT.exists():
-        _rmtree(EVAL_ROS_OUT)
+    expected = (
+        (sc.eval_ros_out / "metrics_summary.json") if with_docker
+        else (sc.eval_ros_out / "eval_plan.json")
+    )
+    if force and sc.eval_ros_out.exists():
+        _rmtree(sc.eval_ros_out)
     if expected.exists() and not force:
         return StepResult(ok=True, duration_s=0.0, artifact=expected, notes="cached")
 
     cmd = [
         "uv", "run", "anvil-eval-ros",
         "--checkpoint", str(ckpt_dir),
-        "--mcap-root", str(MCAP_ROOT),
+        "--mcap-root", str(sc.mcap_root),
         "--num-eps", "1",
-        "--output-dir", str(EVAL_ROS_OUT),
+        "--output-dir", str(sc.eval_ros_out),
     ]
     if not with_docker:
         cmd.append("--no-docker")
     else:
-        # Remove any stale containers from a previous interrupted run so
-        # docker-compose can recreate them. Container names are hardcoded in
-        # docker-compose.eval.yml, so compose env-var validation is bypassed.
         subprocess.run(
             ["docker", "rm", "-f",
              "lerobot-eval-inference", "lerobot-eval-player", "lerobot-eval-recorder"],
@@ -268,73 +331,121 @@ def run_step_eval_ros(force: bool, steps_override: int, with_docker: bool) -> St
 
 
 # ── Driver ───────────────────────────────────────────────────────────────────
-STEPS: dict[int, tuple[str, callable]] = {
-    1: ("mcap-convert",  run_step_convert),
-    2: ("anvil-trainer", run_step_train),
-    3: ("anvil-eval",    run_step_eval),
-    4: ("anvil-eval-ros",run_step_eval_ros),
+
+STEP_NAMES: dict[int, str] = {
+    1: "mcap-convert",
+    2: "anvil-trainer",
+    3: "anvil-eval",
+    4: "anvil-eval-ros",
 }
 
 
+def run_step(step_no: int, sc: Scenario, force: bool, steps_override: int,
+             with_docker: bool) -> StepResult:
+    if step_no == 1:
+        return run_step_convert(sc, force)
+    elif step_no == 2:
+        return run_step_train(sc, force, steps_override)
+    elif step_no == 3:
+        return run_step_eval(sc, force, steps_override)
+    elif step_no == 4:
+        return run_step_eval_ros(sc, force, steps_override, with_docker)
+    raise ValueError(f"invalid step: {step_no}")
+
+
 def parse_select(raw: str) -> list[int]:
+    valid = set(STEP_NAMES)
     if raw == "all":
-        return list(STEPS)
+        return sorted(valid)
     out = []
     for chunk in raw.split(","):
         chunk = chunk.strip()
         if not chunk:
             continue
         n = int(chunk)
-        if n not in STEPS:
-            raise SystemExit(f"invalid step: {n}; valid: {list(STEPS)}")
+        if n not in valid:
+            raise SystemExit(f"invalid step: {n}; valid: {sorted(valid)}")
         out.append(n)
     return out
 
 
-def format_row(i: int, total: int, name: str, res: StepResult) -> str:
+def format_row(scenario_key: str, step_no: int, step_total: int, name: str,
+               res: StepResult) -> str:
     status = "PASS" if res.ok else "FAIL"
-    rel_art = res.artifact.relative_to(REPO) if res.artifact.is_relative_to(REPO) else res.artifact
+    rel_art = (res.artifact.relative_to(REPO)
+               if res.artifact.is_relative_to(REPO) else res.artifact)
     tail = f"  [{res.notes}]" if res.notes else ""
-    return f"[{i}/{total}] {name:<15} ... {status:<4} ({res.duration_s:5.1f}s)  → {rel_art}{tail}"
+    return (f"  [{scenario_key.upper()}] [{step_no}/{step_total}] "
+            f"{name:<15} ... {status:<4} ({res.duration_s:5.1f}s)  → {rel_art}{tail}")
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--select", default="all", help="comma-separated step numbers or 'all' (default: all)")
-    p.add_argument("--force", action="store_true", help="delete existing artifacts before each selected step")
-    p.add_argument("--keep-going", action="store_true", help="don't stop on first failure")
-    p.add_argument("--steps-override", type=int, default=10, help="training --steps value (default: 10)")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--scenario", default="all",
+                   choices=["all", "afo", "cmd"],
+                   help="which scenario(s) to run: afo, cmd, or all (default: all)")
+    p.add_argument("--select", default="all",
+                   help="comma-separated step numbers or 'all' (default: all)")
+    p.add_argument("--force", action="store_true",
+                   help="delete existing artifacts before each selected step")
+    p.add_argument("--keep-going", action="store_true",
+                   help="don't stop on first failure")
+    p.add_argument("--steps-override", type=int, default=10,
+                   help="training --steps value (default: 10)")
     p.add_argument("--no-docker", action="store_true",
-                   help="step 4 skips the Docker stack and only generates eval_plan.json. "
-                        "Default is to run the full inference + mcap-player + eval-recorder stack "
-                        "(requires GPU + ~3min).")
+                   help="step 4 skips the Docker stack and only generates eval_plan.json")
     args = p.parse_args()
 
-    selected = parse_select(args.select)
-    total = len(selected)
-    results: list[tuple[int, str, StepResult]] = []
+    selected_steps = parse_select(args.select)
+    if args.scenario == "all":
+        scenarios = list(SCENARIOS.values())
+    else:
+        scenarios = [SCENARIOS[args.scenario]]
 
+    all_results: list[tuple[str, int, str, StepResult]] = []
     overall_t0 = time.monotonic()
-    for pos, step_no in enumerate(selected, start=1):
-        name, fn = STEPS[step_no]
-        print(f"\n═══ [{pos}/{total}] Step {step_no}: {name} ═══", flush=True)
-        if step_no == 1:
-            res = fn(args.force)
-        elif step_no == 4:
-            res = fn(args.force, args.steps_override, with_docker=not args.no_docker)
-        else:
-            res = fn(args.force, args.steps_override)
+    abort = False
 
-        print(format_row(pos, total, name, res), flush=True)
-        results.append((pos, name, res))
-        if not res.ok and not args.keep_going:
+    for sc in scenarios:
+        print(f"\n{'═'*70}", flush=True)
+        print(f"  SCENARIO: {sc.label}", flush=True)
+        print(f"{'═'*70}", flush=True)
+
+        for pos, step_no in enumerate(selected_steps, start=1):
+            name = STEP_NAMES[step_no]
+            print(f"\n  ─── Step {step_no}: {name} ───", flush=True)
+            res = run_step(step_no, sc, args.force, args.steps_override,
+                           with_docker=not args.no_docker)
+            row = format_row(sc.key, pos, len(selected_steps), name, res)
+            print(row, flush=True)
+            all_results.append((sc.key, step_no, name, res))
+
+            if not res.ok and not args.keep_going:
+                abort = True
+                break
+
+        if abort:
             break
 
-    passed = sum(1 for _, _, r in results if r.ok)
-    failed = len(results) - passed
+    passed = sum(1 for _, _, _, r in all_results if r.ok)
+    failed = len(all_results) - passed
     dt = time.monotonic() - overall_t0
     print()
-    print(f"{passed} passed, {failed} failed in {dt:.1f}s")
+    print(f"{'─'*70}")
+
+    # Print per-scenario summary
+    for sc in scenarios:
+        sc_results = [(sn, nm, r) for (sk, sn, nm, r) in all_results if sk == sc.key]
+        if not sc_results:
+            continue
+        sc_pass = sum(1 for _, _, r in sc_results if r.ok)
+        sc_fail = len(sc_results) - sc_pass
+        status = "OK" if sc_fail == 0 else "FAIL"
+        print(f"  [{sc.key.upper()}] {sc.label}: {sc_pass} passed, {sc_fail} failed  [{status}]")
+
+    print(f"{'─'*70}")
+    print(f"Total: {passed} passed, {failed} failed in {dt:.1f}s")
     return 0 if failed == 0 else 1
 
 

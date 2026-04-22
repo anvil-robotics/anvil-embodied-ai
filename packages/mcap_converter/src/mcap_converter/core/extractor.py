@@ -582,6 +582,37 @@ class BufferedStreamExtractor:
         # Cache for action topic reorder permutations: {topic: np.ndarray}
         self._action_reorder_cache: Dict[str, np.ndarray] = {}
 
+    @staticmethod
+    def _check_action_topics_present(mcap_path: str, action_topic_set: set) -> None:
+        """Raise DataExtractionError when none of the configured action topics are in the MCAP.
+
+        Uses the MCAP footer index (O(1)) — does not scan all messages.
+        """
+        from mcap.reader import make_reader as _make_mcap_reader
+
+        try:
+            with open(mcap_path, "rb") as _f:
+                _summary = _make_mcap_reader(_f).get_summary()
+        except Exception:
+            return  # Cannot read summary — let streaming fail naturally
+
+        if _summary is None:
+            return
+
+        available = {ch.topic for ch in _summary.channels.values()}
+        if action_topic_set and action_topic_set.isdisjoint(available):
+            raise DataExtractionError(
+                f"\n[ACTION SOURCE ERROR] action_from_observation=false, but none of the "
+                f"configured action topics were found in this MCAP.\n"
+                f"  Expected (from config): {sorted(action_topic_set)}\n"
+                f"  Available in MCAP:      {sorted(available)}\n\n"
+                "Fix options:\n"
+                "  1. Set action_from_observation: true in config to derive actions from "
+                "observations.\n"
+                "  2. Record a new session that captures the action-command topics.\n"
+                "  3. Use a different --config that matches this recording's topic layout.\n"
+            )
+
     def extract_frames(
         self,
         mcap_path: str,
@@ -635,11 +666,29 @@ class BufferedStreamExtractor:
         all_topics = list(all_camera_topics)
         all_topics.append(self.config.robot_state_topic)
 
-        # Include action command topics if configured (quest teleop mode)
+        # Include action command topics if configured (quest teleop mode).
+        # When action_from_observation=True the config explicitly requests
+        # observation-shifted actions — ignore any recorded command topics so
+        # the pipeline is deterministic regardless of what was captured.
         action_topic_set = set()
         if self.config.action_topics:
-            action_topic_set = set(self.config.action_topics.keys())
-            all_topics.extend(action_topic_set)
+            if self.config.action_from_observation:
+                n = self.config.action_from_observation_n
+                ms = int(n / self.fps * 1000)
+                topic_lines = "\n".join(f"    {t}" for t in self.config.action_topics)
+                print(
+                    f"\n[ACTION SOURCE] action_from_observation=true — "
+                    f"command topic(s) in config will be IGNORED:\n"
+                    f"{topic_lines}\n"
+                    f"  → action[t] = observation[t + {n}]  "
+                    f"(≈{ms} ms lookahead at {self.fps} fps)\n"
+                )
+            else:
+                action_topic_set = set(self.config.action_topics.keys())
+                all_topics.extend(action_topic_set)
+                # Fast-fail: verify at least one action topic is recorded in this MCAP.
+                # Reads only the file footer index (O(1)) — no message scanning.
+                self._check_action_topics_present(mcap_path, action_topic_set)
 
         # Get main camera (first one in config)
         main_cam = list(self.config.camera_topic_mapping.values())[0]
