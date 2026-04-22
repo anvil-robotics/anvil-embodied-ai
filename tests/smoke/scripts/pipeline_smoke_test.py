@@ -47,16 +47,14 @@ REPO = Path(__file__).resolve().parents[3]   # tests/smoke/scripts/ → repo roo
 #     scripts/
 #       pipeline_smoke_test.py  ← this file
 #     fixtures/
-#       test-session/           ← stub MCAP recordings (committed)
+#       test-session/                          ← stub MCAP recordings (committed)
 #       configs/
-#         openarm_single_quest_cmd.yaml  ← CMD-mode test config (committed)
+#         mcap-converter-smoke-test-afo.yaml   ← AFO test config (committed)
+#         mcap-converter-smoke-test-cmd.yaml   ← CMD test config (committed)
 #     outputs/                  ← gitignored generated artifacts
 #       datasets/afo/   datasets/cmd/
 #       model_zoo/afo/  model_zoo/cmd/
 #       eval_results/afo/  eval_results/cmd/
-#
-# The production AFO config (openarm_single_quest.yaml) is kept in
-# configs/mcap_converter/ since it is also used in real conversions.
 
 SMOKE_ROOT = Path(__file__).resolve().parents[1]   # tests/smoke/
 FIXTURES = SMOKE_ROOT / "fixtures"
@@ -100,7 +98,7 @@ SCENARIOS: dict[str, Scenario] = {
         train_out=OUTPUTS / "model_zoo" / "afo" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "afo" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "afo" / "ros",
-        convert_config=REPO / "configs" / "mcap_converter" / "openarm_single_quest.yaml",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-afo.yaml",
     ),
     "cmd": Scenario(
         key="cmd",
@@ -110,7 +108,7 @@ SCENARIOS: dict[str, Scenario] = {
         train_out=OUTPUTS / "model_zoo" / "cmd" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "cmd" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "cmd" / "ros",
-        convert_config=FIXTURES / "configs" / "openarm_single_quest_cmd.yaml",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
     ),
 }
 
