@@ -6,11 +6,12 @@ Covers:
   2. apply() is a no-op when action or observation.state is missing
   3. Basic delta: action - state for single-step state, single-joint action
   4. Multi-step state: state[..., -1, :] is used as reference
-  5. Shape mismatch: D_action > D_state leaves trailing joints in absolute space
+  5. Shape mismatch without info.json raises DataIntegrityError
   6. delta_exclude_joints: excluded joints keep absolute values
   7. TransformRunner._compute_delta_action_stats returns None when inactive
   8. TransformRunner._compute_delta_action_stats: delta_mean ≈ 0 for slow-moving
      synthetic data; excluded joints keep absolute stats
+  9. Action joint missing from observation.state raises DataIntegrityError
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ import numpy as np
 import pytest
 import torch
 
+from anvil_trainer.transforms import DataIntegrityError
 from anvil_trainer.train import (
     DeltaActionTransform,
     TrainingConfig,
@@ -111,22 +113,82 @@ class TestMultiStepState:
 
 
 # =============================================================================
-# 5. Shape mismatch — D_action > D_state keeps trailing joints absolute
+# 5. Shape mismatch raises DataIntegrityError
 # =============================================================================
 
 class TestShapeMismatch:
-    def test_action_wider_than_state(self):
-        """action [3], state [2] → first 2 joints get delta, joint 2 stays absolute."""
-        cfg = TrainingConfig(use_delta_actions=True)
+    def test_mismatch_without_info_json_raises(self):
+        """action [3] vs state [2] with no info.json → DataIntegrityError, not silent fallback."""
+        cfg = TrainingConfig(use_delta_actions=True)  # no dataset_root
         item = {
             "action": torch.tensor([1.0, 2.0, 9.9]),
             "observation.state": torch.tensor([0.5, 1.0]),
         }
+        with pytest.raises(DataIntegrityError, match="observation.state"):
+            DeltaActionTransform().apply(item, cfg)
+
+    def test_obs_wider_than_action_is_ok(self, tmp_path):
+        """obs.state may have more joints than action (obs → action match not required)."""
+        meta = tmp_path / "meta"
+        meta.mkdir(parents=True)
+        info = {
+            "features": {
+                "action": {"names": ["j0", "j1"]},
+                "observation.state": {"names": ["j0", "j1", "velocity"]},
+            }
+        }
+        (meta / "info.json").write_text(json.dumps(info))
+        cfg = TrainingConfig(use_delta_actions=True, dataset_root=str(tmp_path))
+        item = {
+            "action": torch.tensor([1.0, 2.0]),
+            "observation.state": torch.tensor([0.5, 1.0, 99.0]),  # extra velocity joint
+        }
         out = DeltaActionTransform().apply(item, cfg)
-        # joint 0: 1.0 - 0.5 = 0.5
-        # joint 1: 2.0 - 1.0 = 1.0
-        # joint 2: stays 9.9 (absolute, no corresponding state dim)
-        expected = torch.tensor([0.5, 1.0, 9.9])
+        expected = torch.tensor([0.5, 1.0])
+        assert torch.allclose(out["action"], expected)
+
+    def test_action_joint_missing_from_state_raises(self, tmp_path):
+        """action joint not in observation.state (and not excluded) → DataIntegrityError."""
+        meta = tmp_path / "meta"
+        meta.mkdir(parents=True)
+        info = {
+            "features": {
+                "action": {"names": ["j0", "j1", "gripper"]},
+                "observation.state": {"names": ["j0", "j1"]},  # gripper missing
+            }
+        }
+        (meta / "info.json").write_text(json.dumps(info))
+        cfg = TrainingConfig(use_delta_actions=True, dataset_root=str(tmp_path))
+        item = {
+            "action": torch.tensor([1.0, 2.0, 0.9]),
+            "observation.state": torch.tensor([0.5, 1.0]),
+        }
+        with pytest.raises(DataIntegrityError, match="gripper"):
+            DeltaActionTransform().apply(item, cfg)
+
+    def test_action_joint_missing_but_excluded_is_ok(self, tmp_path):
+        """action joint missing from state but listed in delta_exclude_joints → no error."""
+        meta = tmp_path / "meta"
+        meta.mkdir(parents=True)
+        info = {
+            "features": {
+                "action": {"names": ["j0", "j1", "gripper"]},
+                "observation.state": {"names": ["j0", "j1"]},
+            }
+        }
+        (meta / "info.json").write_text(json.dumps(info))
+        cfg = TrainingConfig(
+            use_delta_actions=True,
+            dataset_root=str(tmp_path),
+            delta_exclude_joints=["gripper"],
+        )
+        item = {
+            "action": torch.tensor([1.0, 2.0, 0.9]),
+            "observation.state": torch.tensor([0.5, 1.0]),
+        }
+        out = DeltaActionTransform().apply(item, cfg)
+        # j0: 1.0-0.5=0.5, j1: 2.0-1.0=1.0, gripper: stays 0.9
+        expected = torch.tensor([0.5, 1.0, 0.9])
         assert torch.allclose(out["action"], expected)
 
 
@@ -301,3 +363,20 @@ class TestComputeDeltaStats:
         ds.meta = MagicMock()
         ds.meta.stats = {"action": {}}
         assert runner._compute_delta_action_stats(ds) is None
+
+    def test_data_integrity_error_propagates(self, tmp_path):
+        """DataIntegrityError from name mismatch is NOT swallowed by the try/except."""
+        meta = tmp_path / "meta"
+        meta.mkdir(parents=True)
+        # action has 'missing_joint' which is absent from observation.state
+        (meta / "info.json").write_text(json.dumps({
+            "features": {
+                "action": {"names": ["j0", "missing_joint"]},
+                "observation.state": {"names": ["j0"]},
+            }
+        }))
+        cfg = TrainingConfig(use_delta_actions=True, dataset_root=str(tmp_path))
+        runner = TransformRunner(cfg)
+        ds = self._make_fake_dataset(np.zeros((10, 2)), np.zeros((10, 1)))
+        with pytest.raises(DataIntegrityError, match="missing_joint"):
+            runner._compute_delta_action_stats(ds)

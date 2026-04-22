@@ -14,7 +14,12 @@ from typing import Any
 
 from anvil_trainer.config import TrainingConfig
 
+
 log = logging.getLogger(__name__)
+
+
+class DataIntegrityError(ValueError):
+    """Raised when dataset features violate expected contracts (e.g. action joint missing from obs state)."""
 
 
 # =============================================================================
@@ -159,16 +164,22 @@ class DeltaActionTransform(Transform):
 
     Joints listed in config.delta_exclude_joints are kept in absolute space —
     useful for grippers whose targets are better expressed as absolute positions.
-    Joint names are resolved by name from meta/info.json and cached.
+
+    Joint names are resolved from meta/info.json when dataset_root is set.
+    Every action joint (not in delta_exclude_joints) must have a matching name
+    in observation.state — if not, a DataIntegrityError is raised at first use.
+    When info.json is unavailable, shapes must match exactly.
 
     The configuration is persisted to anvil_config.json in each checkpoint so
     the inference node can apply the correct inverse transform automatically.
     """
 
     def __init__(self):
-        self._exclude_indices: list[int] | None = None  # cached after first lookup
-        self._shape_mismatch_warned: bool = False
-        self._first_apply: bool = True  # gate for one-time logging
+        self._mappings_built: bool = False
+        self._exclude_indices: list[int] = []
+        # action_idx → state_idx; None means fall back to positional (no info.json)
+        self._action_to_state_map: list[int] | None = None
+        self._first_apply: bool = True
 
     @property
     def name(self) -> str:
@@ -177,44 +188,75 @@ class DeltaActionTransform(Transform):
     def is_enabled(self, config: TrainingConfig) -> bool:
         return config.use_delta_actions
 
-    def _resolve_exclude_indices(self, config: TrainingConfig) -> list[int]:
-        """Resolve joint names → action tensor indices from dataset metadata (cached)."""
-        if self._exclude_indices is not None:
-            return self._exclude_indices
+    @staticmethod
+    def _parse_names(info: dict, feat_key: str) -> list[str]:
+        names = info.get("features", {}).get(feat_key, {}).get("names", [])
+        if names and isinstance(names[0], dict):
+            names = [n for group in names for n in group.get("motor_names", [])]
+        return names
 
-        if not config.delta_exclude_joints or not config.dataset_root:
-            self._exclude_indices = []
-            return self._exclude_indices
+    def _build_mappings(self, config: TrainingConfig) -> None:
+        """Load info.json once, validate action↔state names, build index maps."""
+        if self._mappings_built:
+            return
+        self._mappings_built = True
+
+        if not config.dataset_root:
+            return  # no info.json — positional fallback; shape validated in apply()
 
         info_path = Path(config.dataset_root) / "meta" / "info.json"
         if not info_path.exists():
-            log.warning("[delta_actions] %s not found — no joints excluded", info_path)
-            self._exclude_indices = []
-            return self._exclude_indices
+            log.warning("[delta_actions] %s not found — using positional mapping", info_path)
+            return
 
         with open(info_path) as f:
             info = json.load(f)
 
-        names = info.get("features", {}).get("action", {}).get("names", [])
-        # Flatten if nested list (e.g. [{"motor_names": [...]}])
-        if names and isinstance(names[0], dict):
-            names = [n for group in names for n in group.get("motor_names", [])]
+        action_names = self._parse_names(info, "action")
+        state_names = self._parse_names(info, "observation.state")
 
-        indices = []
-        for joint in config.delta_exclude_joints:
-            if joint in names:
-                idx = names.index(joint)
-                indices.append(idx)
+        # Resolve exclude indices from action names
+        for joint in (config.delta_exclude_joints or []):
+            if joint in action_names:
+                idx = action_names.index(joint)
+                self._exclude_indices.append(idx)
                 log.info("[delta_actions] Excluding joint '%s' (index %d) from delta", joint, idx)
             else:
-                log.warning("[delta_actions] Joint '%s' not found in action names %s", joint, names)
+                log.warning("[delta_actions] Joint '%s' not found in action names %s", joint, action_names)
 
-        self._exclude_indices = indices
+        if not action_names or not state_names:
+            return  # names missing from info.json — positional fallback
+
+        # Validate: every non-excluded action joint must exist in observation.state
+        exclude_names = set(config.delta_exclude_joints or [])
+        missing = [n for n in action_names if n not in exclude_names and n not in state_names]
+        if missing:
+            raise DataIntegrityError(
+                "[delta_actions] Data integrity error: the following action joints have no "
+                f"matching entry in observation.state:\n"
+                f"  Missing:                 {missing}\n"
+                f"  action names:            {action_names}\n"
+                f"  observation.state names: {state_names}\n"
+                f"  delta_exclude_joints:    {sorted(exclude_names)}\n"
+                "Fix: add the joints to --delta-exclude-joints or correct the dataset."
+            )
+
+        # Build action_idx → state_idx mapping (excluded joints map to -1)
+        state_index = {n: i for i, n in enumerate(state_names)}
+        self._action_to_state_map = [
+            state_index.get(n, -1) for n in action_names
+        ]
+
+    def _resolve_exclude_indices(self, config: TrainingConfig) -> list[int]:
+        """Return cached exclude indices (used by TransformRunner stats computation)."""
+        self._build_mappings(config)
         return self._exclude_indices
 
     def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
         if "action" not in item or "observation.state" not in item:
             return item
+
+        self._build_mappings(config)
 
         action = item["action"]
         state = item["observation.state"]
@@ -225,39 +267,35 @@ class DeltaActionTransform(Transform):
             state = state[-1]
 
         original_action = action.clone()
-
         action_last = action.shape[-1]
         state_last = state.shape[-1]
 
-        if action_last == state_last:
-            # Last dims match — state broadcasts to action (e.g. [n_joints] → [chunk, n_joints])
-            item["action"] = action - state
-        else:
-            # Partial delta: apply only to the leading min(action_dim, state_dim) joints;
-            # remaining joints are kept in absolute space.
-            n = min(action_last, state_last)
-            if not self._shape_mismatch_warned:
-                log.warning(
-                    "[delta_actions] action has %d joints but state has %d — "
-                    "applying delta to first %d joint(s); remainder kept absolute",
-                    action_last, state_last, n,
-                )
-                self._shape_mismatch_warned = True
+        if self._action_to_state_map is not None:
+            # Name-based mapping: each action joint → its counterpart in state by name
             delta = original_action.clone()
-            delta[..., :n] = action[..., :n] - state[..., :n]
+            exclude_set = set(self._exclude_indices)
+            for a_idx, s_idx in enumerate(self._action_to_state_map):
+                if a_idx not in exclude_set:
+                    delta[..., a_idx] = action[..., a_idx] - state[..., s_idx]
             item["action"] = delta
-
-        # Restore excluded joints to their original absolute values
-        exclude = self._resolve_exclude_indices(config)
-        for idx in exclude:
-            item["action"][..., idx] = original_action[..., idx]
+        elif action_last == state_last:
+            # Positional fallback (info.json unavailable) — shapes match, safe to subtract
+            item["action"] = action - state
+            for idx in self._exclude_indices:
+                item["action"][..., idx] = original_action[..., idx]
+        else:
+            raise DataIntegrityError(
+                f"[delta_actions] action has {action_last} joints but observation.state has "
+                f"{state_last} joints and no info.json is available for name-based mapping. "
+                "Provide dataset_root so joint names can be resolved, or fix the dataset."
+            )
 
         if self._first_apply:
             log.info(
                 "[delta_actions] active — %d joints total: %d get delta, %d kept absolute %s",
                 action_last,
-                action_last - len(exclude),
-                len(exclude),
+                action_last - len(self._exclude_indices),
+                len(self._exclude_indices),
                 config.delta_exclude_joints or [],
             )
             self._first_apply = False

@@ -33,6 +33,7 @@ from anvil_shared.splits import compute_split_episodes, load_split_info, save_sp
 
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.transforms import (
+    DataIntegrityError,
     DeltaActionTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
@@ -181,12 +182,25 @@ class TransformRunner:
                 states_np = states_np[:, -1, :]
             d_action = actions_np.shape[-1]
             d_state = states_np.shape[-1]
-            n = min(d_action, d_state)
+
+            # _resolve_exclude_indices triggers _build_mappings which validates names
+            exclude_indices = delta_transform._resolve_exclude_indices(self.config)
+            action_to_state_map = delta_transform._action_to_state_map
+            exclude_set = set(exclude_indices)
 
             deltas = actions_np.copy()
-            deltas[:, :n] = actions_np[:, :n] - states_np[:, :n]
-
-            exclude_indices = delta_transform._resolve_exclude_indices(self.config)
+            if action_to_state_map is not None:
+                # Name-based mapping validated by _build_mappings
+                for a_idx, s_idx in enumerate(action_to_state_map):
+                    if a_idx not in exclude_set:
+                        deltas[:, a_idx] = actions_np[:, a_idx] - states_np[:, s_idx]
+            elif d_action == d_state:
+                deltas = actions_np - states_np
+            else:
+                raise DataIntegrityError(
+                    f"[delta_stats] action has {d_action} joints but observation.state has "
+                    f"{d_state} joints and no info.json is available for name-based mapping."
+                )
             orig = full_dataset.meta.stats.get("action", {})
             orig_mean = np.array(orig.get("mean", deltas.mean(axis=0)))
             orig_std = np.array(orig.get("std", deltas.std(axis=0)))
@@ -233,6 +247,8 @@ class TransformRunner:
                 delta_std[4] if len(delta_std) > 4 else float("nan"),
             )
             return patched_stats
+        except DataIntegrityError:
+            raise
         except Exception as e:
             log.warning(
                 "[delta_stats] Failed to compute delta action stats: %s — "
