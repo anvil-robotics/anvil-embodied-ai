@@ -820,7 +820,7 @@ class BufferedStreamExtractor:
         if joint_buffers:
             has_action_buffer = any(role == "action" for (role, _) in joint_buffers)
             action_ts = (
-                main_ts + self.frame_interval
+                main_ts + self.frame_interval * self.config.action_from_observation_n
                 if self.config.action_from_observation and not has_action_buffer
                 else None
             )

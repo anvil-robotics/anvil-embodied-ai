@@ -196,6 +196,7 @@ def convert_session(
     resume_from: int = 0,
     max_episodes: int = None,
     mcap_files: List[Path] = None,
+    debug_plot_episodes: int = 5,
 ):
     """
     Convert MCAP session to LeRobot dataset
@@ -432,6 +433,17 @@ def convert_session(
         with suppress_fd_output():
             writer.finalize(dataset)
 
+    # Debug plots: always generated after a successful conversion
+    if total_frames > 0:
+        from mcap_converter.utils.debug_plot import plot_conversion_debug
+        with console.status("[bold]Generating debug plots..."):
+            plot_conversion_debug(
+                output_dir,
+                n_episodes=debug_plot_episodes,
+                action_from_observation_n=config.action_from_observation_n,
+            )
+        log(f"Debug plots saved to [dim]{output_dir}/debug_plots/[/dim]")
+
     # Calculate timing statistics
     total_time = time.time() - session_start_time
     avg_episode_time = sum(episode_times) / len(episode_times) if episode_times else 0
@@ -559,7 +571,16 @@ examples:
         metavar="N",
         help="only convert the first N episodes (default: convert all)",
     )
-
+    parser.add_argument(
+        "--act-from-obs-n-step", type=int, default=None,
+        metavar="N",
+        help="override action_from_observation_n in config: action[t] = observation[t+N] (default: use config value, factory default 10)",
+    )
+    parser.add_argument(
+        "--debug-plot-episodes", type=int, default=5,
+        metavar="N",
+        help="number of episodes to include in debug plots (default: 5)",
+    )
     args = parser.parse_args(args)
 
     # Resolve output path: <output-dir>/<input-dir-name>/
@@ -588,6 +609,10 @@ examples:
     else:
         config = ConfigLoader.get_default()
         log("Using default configuration")
+
+    if args.act_from_obs_n_step is not None:
+        config.action_from_observation_n = args.act_from_obs_n_step
+        log(f"action_from_observation_n overridden to [bold]{args.act_from_obs_n_step}[/bold] via --act-from-obs-n-step")
 
     # Collect MCAP files once (reused for fps detection and conversion)
     all_mcap_files = collect_mcap_files(args.input_dir)
@@ -644,6 +669,12 @@ examples:
     banner.add_row("Video codec", args.vcodec)
     banner.add_row("Resume", "yes" if args.resume else "no")
     banner.add_row("Max episodes", str(args.max_episodes) if args.max_episodes else "all")
+    if config.action_from_observation:
+        n_label = str(config.action_from_observation_n)
+        if args.act_from_obs_n_step is not None:
+            n_label += " [yellow](CLI override)[/yellow]"
+        banner.add_row("act-from-obs n", n_label)
+    banner.add_row("Debug plots", f"first {args.debug_plot_episodes} episodes")
 
     console.print(Panel(
         banner,
@@ -685,6 +716,7 @@ examples:
             resume_from=resume_from,
             max_episodes=args.max_episodes,
             mcap_files=all_mcap_files,
+            debug_plot_episodes=args.debug_plot_episodes,
         )
 
         # Upload to Hub if requested

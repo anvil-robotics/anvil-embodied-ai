@@ -139,6 +139,11 @@ class DataConfig:
     # Useful for datasets recorded without a separate command topic.
     action_from_observation: bool = False
 
+    # Number of frames to look ahead when action_from_observation=True.
+    # action[t] = observation[t + n]. Default: 10.
+    action_from_observation_n: int = 10
+
+
     # Separate feature mappings for observation vs action
     # This allows different features for input (observation) and output (action)
     observation_feature_mapping: FeatureMapping = field(

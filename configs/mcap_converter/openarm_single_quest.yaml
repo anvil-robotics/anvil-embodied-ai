@@ -56,6 +56,8 @@ action_topics:
 # When the action command topic is not present in the MCAP (e.g., topic was not
 # recorded), fall back to using the follower observation positions as the action.
 action_from_observation: true
+# action[t] = observation[t + n]. Default: 10 (≈333ms at 30fps).
+# action_from_observation_n: 10
 
 
 # =============================================================================
@@ -121,3 +123,4 @@ action_feature_mapping:
 #   observation.images.chest    = camera2 frames
 #   observation.images.wrist_r  = camera1 frames
 #   observation.images.wrist_l  = camera3 frames
+

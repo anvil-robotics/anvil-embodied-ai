@@ -100,3 +100,4 @@ action_feature_mapping:
 #   observation.images.chest    = camera2 frames
 #   observation.images.wrist_r  = camera1 frames
 #   observation.images.wrist_l  = camera3 frames
+

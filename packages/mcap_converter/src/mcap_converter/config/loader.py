@@ -249,6 +249,9 @@ class ConfigLoader:
             action_from_observation=config_dict.get(
                 "action_from_observation", defaults.action_from_observation
             ),
+            action_from_observation_n=config_dict.get(
+                "action_from_observation_n", defaults.action_from_observation_n
+            ),
             observation_feature_mapping=observation_feature_mapping,
             action_feature_mapping=action_feature_mapping,
             # Camera config
