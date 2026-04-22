@@ -93,7 +93,7 @@ reportMissingImports = true
 reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
-testpaths = ["packages"]
+testpaths = ["tests/unit"]
 python_files = ["test_*.py", "*_test.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short --import-mode=importlib -p no:launch_testing -p no:launch_testing_ros2 -p no:launch_testing_ros -p no:ament_lint -p no:ament_pep257 -p no:ament_flake8 -p no:ament_copyright -p no:ament_xmllint"

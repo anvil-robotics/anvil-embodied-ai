@@ -27,8 +27,8 @@ import pytest
 # ─────────────────────────────────────────────────────────────────────────────
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-# Test fixtures live under data/raw/test-session (5 stub MCAPs).
-MCAP_ROOT = REPO_ROOT / "data" / "raw" / "test-session"
+# Test fixtures live under tests/smoke/fixtures/test-session (5 stub MCAPs).
+MCAP_ROOT = REPO_ROOT / "tests" / "smoke" / "fixtures" / "test-session"
 FIXTURE_EPISODE_COUNT = 5
 ANVIL_EVAL_SRC = REPO_ROOT / "packages" / "anvil_eval" / "src"
 ANVIL_EVAL_ROS_SRC = REPO_ROOT / "packages" / "anvil_eval_ros" / "src"

@@ -15,12 +15,12 @@ single right arm):
 Each scenario runs all 4 steps: mcap-convert → anvil-trainer → anvil-eval → anvil-eval-ros
 
 Usage:
-  uv run python scripts/pipeline_smoke_test.py               # both scenarios, all 4 steps
-  uv run python scripts/pipeline_smoke_test.py --scenario afo   # AFO scenario only
-  uv run python scripts/pipeline_smoke_test.py --select 1,2     # steps 1+2 for both scenarios
-  uv run python scripts/pipeline_smoke_test.py --force          # wipe + rerun
-  uv run python scripts/pipeline_smoke_test.py --no-docker      # step 4 skips Docker
-  uv run python scripts/pipeline_smoke_test.py --keep-going     # don't stop on failure
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py                      # both scenarios, all 4 steps
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario afo       # AFO scenario only
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --select 1,2         # steps 1+2 for both
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --force              # wipe + rerun
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --no-docker          # step 4 skips Docker
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --keep-going         # don't stop on failure
 
 Each step reads its inputs from stable artifact paths produced by earlier steps,
 so you can rerun a subset after fixing a later stage without redoing the whole
@@ -38,18 +38,19 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]   # tests/smoke/scripts/ → repo root
 
 # ── Smoke test root ───────────────────────────────────────────────────────────
-# All test fixtures and generated outputs live under tests/smoke/ for a clean
-# directory structure:
+# Layout under tests/smoke/:
 #
 #   tests/smoke/
+#     scripts/
+#       pipeline_smoke_test.py  ← this file
 #     fixtures/
-#       test-session/          ← stub MCAP recordings (committed)
+#       test-session/           ← stub MCAP recordings (committed)
 #       configs/
 #         openarm_single_quest_cmd.yaml  ← CMD-mode test config (committed)
-#     outputs/                 ← gitignored generated artifacts
+#     outputs/                  ← gitignored generated artifacts
 #       datasets/afo/   datasets/cmd/
 #       model_zoo/afo/  model_zoo/cmd/
 #       eval_results/afo/  eval_results/cmd/
@@ -57,7 +58,7 @@ REPO = Path(__file__).resolve().parents[1]
 # The production AFO config (openarm_single_quest.yaml) is kept in
 # configs/mcap_converter/ since it is also used in real conversions.
 
-SMOKE_ROOT = REPO / "tests" / "smoke"
+SMOKE_ROOT = Path(__file__).resolve().parents[1]   # tests/smoke/
 FIXTURES = SMOKE_ROOT / "fixtures"
 OUTPUTS = SMOKE_ROOT / "outputs"
 

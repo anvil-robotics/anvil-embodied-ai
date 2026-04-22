@@ -60,5 +60,4 @@ select = ["E", "W", "F", "I", "B", "C4", "UP"]
 ignore = ["E501", "B008"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
 python_files = ["test_*.py"]
