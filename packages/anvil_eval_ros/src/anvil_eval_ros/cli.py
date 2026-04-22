@@ -60,7 +60,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-eps",
         type=int,
-        help="Max episodes to sample per split (random, reproducible via --seed)",
+        default=3,
+        help="Max episodes to sample per split (random, reproducible via --seed, default: 3)",
+    )
+    parser.add_argument(
+        "--split",
+        default="all",
+        choices=["train", "val", "test", "all"],
+        help="Which split(s) to evaluate when split_info.json is present (default: all). "
+             "Use 'test' to run only the test split.",
     )
     parser.add_argument(
         "--seed",
@@ -107,6 +115,11 @@ def parse_args() -> argparse.Namespace:
         "--image-tag",
         default="latest",
         help="Docker image tag (default: latest)",
+    )
+    parser.add_argument(
+        "--monitor",
+        action="store_true",
+        help="Enable inference monitor CSV recording. Adds inference-monitor container.",
     )
     return parser.parse_args()
 
@@ -481,8 +494,9 @@ def main() -> None:
         split_info = load_split_info(checkpoint_path)
 
         if split_info:
+            splits_to_run = ("train", "val", "test") if args.split == "all" else (args.split,)
             episodes_to_eval = []
-            for split_name in ("train", "val", "test"):
+            for split_name in splits_to_run:
                 ep_list = split_info.get(split_name, [])
                 if args.num_eps is not None:
                     n = min(len(ep_list), args.num_eps)
@@ -508,8 +522,9 @@ def main() -> None:
                 "(%d train / %d val / %d test). This may NOT match the actual training split.",
                 n_train, n_val, n_test,
             )
+            splits_to_run = ("train", "val", "test") if args.split == "all" else (args.split,)
             episodes_to_eval = []
-            for split_name in ("train", "val", "test"):
+            for split_name in splits_to_run:
                 ep_list = split_info.get(split_name, [])
                 if args.num_eps is not None:
                     n = min(len(ep_list), args.num_eps)
@@ -609,11 +624,18 @@ def main() -> None:
             if synthesize_info
             else {}
         ),
+        # Inference monitor
+        "MONITOR_ENABLE": "true" if args.monitor else "false",
+        "MONITOR_OUTPUT_DIR": str(output_dir / "monitor"),
     }
 
     compose_cmd = [
         "docker", "compose",
         "-f", str(compose_file),
+    ]
+    if args.monitor:
+        compose_cmd += ["--profile", "monitor"]
+    compose_cmd += [
         "up",
         "--build",
         "--abort-on-container-exit",

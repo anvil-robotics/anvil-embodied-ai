@@ -127,21 +127,22 @@ def get_episode_indices(
 ) -> list[tuple[int, str]]:
     """Resolve which episodes to evaluate and their split labels.
 
-    Always evaluates all available splits (train / val / test).
-    When config.num_episodes is set, sample that many from each split.
+    Evaluates config.split ('train', 'val', 'test', or 'all').
+    Samples at most config.num_episodes per split.
     """
     rng = random.Random(config.seed)
-    available_splits = [s for s in ("train", "val", "test") if s in split_info]
+    splits_to_run = (
+        [s for s in ("train", "val", "test") if s in split_info]
+        if config.split == "all"
+        else [config.split]
+    )
 
     result: list[tuple[int, str]] = []
-    for sn in available_splits:
-        eps = split_info[sn]
-        if config.num_episodes is not None:
-            n = min(len(eps), config.num_episodes)
-            sampled = rng.sample(eps, n)
-            result.extend((ep, sn) for ep in sampled)
-        else:
-            result.extend((ep, sn) for ep in eps)
+    for sn in splits_to_run:
+        eps = split_info.get(sn, [])
+        n = min(len(eps), config.num_episodes)
+        sampled = rng.sample(eps, n)
+        result.extend((ep, sn) for ep in sampled)
 
     result.sort(key=lambda x: x[0])
     return result

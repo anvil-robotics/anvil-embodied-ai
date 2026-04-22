@@ -35,9 +35,10 @@ class EpisodeResult:
 
     episode_idx: int
     split_label: str
-    predicted: np.ndarray     # (T, D)
+    predicted: np.ndarray     # (T, D) absolute actions (after delta restore)
     ground_truth: np.ndarray  # (T, D)
     joint_names: list[str]
+    raw_output: np.ndarray | None = None  # (T, D) model raw output before delta restore
 
 
 class EpisodeEvaluator:
@@ -80,6 +81,7 @@ class EpisodeEvaluator:
 
         predicted_actions: list[np.ndarray] = []
         ground_truth_actions: list[np.ndarray] = []
+        raw_actions: list[np.ndarray] = []
 
         # Reset model state (clears action queues for ACT)
         reset_model_state(self.model)
@@ -138,6 +140,9 @@ class EpisodeEvaluator:
                     action = action.squeeze(0)
                 action = action.cpu().numpy()
 
+            # Capture raw model output before delta restore
+            raw_actions.append(action.copy())
+
             # Delta action restore — use the reference state from when the current
             # chunk was generated (state_t0) rather than the current obs_state, so
             # that all 8 queued steps share the same reference.
@@ -157,6 +162,7 @@ class EpisodeEvaluator:
             predicted=np.stack(predicted_actions),
             ground_truth=np.stack(ground_truth_actions),
             joint_names=self.joint_names,
+            raw_output=np.stack(raw_actions) if raw_actions else None,
         )
 
     def _preprocess_vla(self, obs: dict) -> dict:

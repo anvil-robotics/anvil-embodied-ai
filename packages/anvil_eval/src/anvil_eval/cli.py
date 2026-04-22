@@ -53,7 +53,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-eps",
         type=int,
-        help="Randomly sample N episodes from the selected split(s)",
+        default=3,
+        help="Max episodes to sample from the selected split (default: 3)",
+    )
+    parser.add_argument(
+        "--split",
+        default="all",
+        choices=["train", "val", "test", "all"],
+        help="Which split to evaluate (default: all). Use 'test' to evaluate only the test split.",
     )
     parser.add_argument(
         "--output-dir",
@@ -104,6 +111,7 @@ def main() -> None:
         checkpoint_path=checkpoint_path,
         dataset_path=dataset_path,
         num_episodes=args.num_eps,
+        split=args.split,
         device=args.device,
         task_description=args.task_description or anvil_cfg.get("task_description"),
         output_dir=Path(args.output_dir) if args.output_dir else None,
@@ -187,7 +195,10 @@ def main() -> None:
         
         # Plot episode
         plot_path = plots_dir / f"episode_{ep_idx:04d}_{split_label}.png"
-        plot_episode_joints(result.predicted, result.ground_truth, result.joint_names, metrics, plot_path)
+        plot_episode_joints(
+            result.predicted, result.ground_truth, result.joint_names, metrics, plot_path,
+            raw_output=result.raw_output,
+        )
         log.info("[anvil-eval] Episode %d MAE: %.4f", ep_idx, metrics.mae)
 
     # 9. Save Summary Results

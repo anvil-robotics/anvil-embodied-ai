@@ -26,10 +26,12 @@ def plot_episode_joints(
     joint_names: list[str],
     metrics: EpisodeMetrics,
     output_path: Path,
+    raw_output: np.ndarray | None = None,
 ) -> None:
     """Plot predicted vs ground-truth joint trajectories for one episode.
 
-    Creates a grid of subplots, one per joint.
+    Creates a grid of subplots, one per joint. If raw_output is provided,
+    plots it as a third line (model output before delta restore).
     """
     import matplotlib.pyplot as plt
 
@@ -55,6 +57,9 @@ def plot_episode_joints(
         ax = axes[row][col]
         ax.plot(frames, ground_truth[:, orig_idx], "b-", linewidth=1.0, label="GT")
         ax.plot(frames, predicted[:, orig_idx], "r--", linewidth=1.0, label="Pred")
+        if raw_output is not None:
+            ax.plot(frames, raw_output[:, orig_idx], color="darkorange", linewidth=0.8,
+                    linestyle=":", label="Raw")
         joint_mae = metrics.per_joint_mae.get(name, 0.0)
         ax.set_title(f"{name} (MAE: {joint_mae:.4f})", fontsize=9)
         ax.set_xlabel("frame", fontsize=8)

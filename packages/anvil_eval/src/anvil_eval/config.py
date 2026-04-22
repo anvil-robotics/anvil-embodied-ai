@@ -15,7 +15,8 @@ class EvalConfig:
 
     checkpoint_path: Path
     dataset_path: Path
-    num_episodes: int | None = None
+    num_episodes: int = 3
+    split: str = "all"
     device: str = "cuda"
     task_description: str | None = None
     output_dir: Path | None = None
@@ -33,10 +34,13 @@ class EvalConfig:
             return self.output_dir
 
         dataset_name = self.dataset_path.name
-        checkpoint_name = self.checkpoint_path.name  # e.g. '000015' or 'last'
+
+        # Resolve symlinks so 'last' → actual step folder (e.g. '010000')
+        resolved = self.checkpoint_path.resolve()
+        checkpoint_name = resolved.name
 
         # Infer job_name from path: .../checkpoints/000015 → parent.parent
-        parent = self.checkpoint_path.parent
+        parent = resolved.parent
         if parent.name == "checkpoints":
             job_name = parent.parent.name
         else:
