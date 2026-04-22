@@ -4,11 +4,11 @@
 Two scenarios are tested against the fixture at data/raw/test-session (5 stub MCAPs,
 single right arm):
 
-  AFO  — action_from_observation=true  (openarm_single_quest.yaml)
+  AFO  — action_from_observation=true  (mcap-converter-smoke-test-afo.yaml)
           action[t] = obs[t+N]; command topics in MCAP are ignored.
           Mirrors datasets recorded without action-command topics.
 
-  CMD  — action_from_observation=false (openarm_single_quest_cmd.yaml)
+  CMD  — action_from_observation=false (mcap-converter-smoke-test-cmd.yaml)
           action sourced from the recorded /commands topic.
           Mirrors datasets recorded with action-command topics.
 

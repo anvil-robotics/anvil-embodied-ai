@@ -18,13 +18,15 @@ import pytest
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-DATASET_ROOT = "data/datasets/test-session-1arm"
+# Smoke-test generated dataset (produced by tests/smoke/scripts/pipeline_smoke_test.py step 1).
 # Tests that actually invoke `uv run anvil-trainer` need a full LeRobot dataset
-# at DATASET_ROOT (meta/info.json + data/ + videos/). When only the stub
-# conversion_config.yaml fixture is present, skip those tests.
-_FULL_DATASET_AVAILABLE = (
-    Path(DATASET_ROOT).resolve() / "meta" / "info.json"
-).exists()
+# here (meta/info.json + data/ + videos/).  Run the smoke test first to populate it:
+#   uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario afo --select 1
+_REPO = Path(__file__).resolve().parents[3]
+DATASET_ROOT = str(
+    _REPO / "tests" / "smoke" / "outputs" / "datasets" / "afo" / "test-session"
+)
+_FULL_DATASET_AVAILABLE = (Path(DATASET_ROOT) / "meta" / "info.json").exists()
 
 
 def make_config(split_ratio="8,1,1", dataset_root=DATASET_ROOT, output_dir=None, extra_argv=None):
