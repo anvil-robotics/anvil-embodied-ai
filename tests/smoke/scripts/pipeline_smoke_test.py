@@ -248,20 +248,6 @@ def run_step_eval(sc: Scenario, force: bool, steps_override: int) -> StepResult:
     return StepResult(ok=True, duration_s=dt, artifact=expected)
 
 
-def _mcap_has_commands_topic(mcap_path: Path) -> bool:
-    """Return True if the MCAP file contains a .../commands topic (any arm)."""
-    try:
-        from mcap.reader import make_reader
-        with mcap_path.open("rb") as f:
-            reader = make_reader(f)
-            for _, channel in reader.get_summary().channels.items():
-                if channel.topic.endswith("/commands"):
-                    return True
-    except Exception:
-        pass
-    return False
-
-
 # ── Step 4: anvil-eval-ros ───────────────────────────────────────────────────
 
 def run_step_eval_ros(sc: Scenario, force: bool, steps_override: int,
@@ -269,19 +255,6 @@ def run_step_eval_ros(sc: Scenario, force: bool, steps_override: int,
     ckpt_dir = sc.ckpt_dir(steps_override)
     if not (ckpt_dir / "pretrained_model" / "config.json").exists():
         return _missing(ckpt_dir / "pretrained_model" / "config.json")
-
-    # In CMD scenario (action_from_observation=false) with Docker, the replay
-    # needs a GT /commands topic in the MCAP. Fail fast rather than timing out.
-    if with_docker and sc.key == "cmd":
-        sample = next(sc.mcap_root.rglob("*.mcap"), None)
-        if sample is not None and not _mcap_has_commands_topic(sample):
-            return StepResult(
-                ok=False, duration_s=0.0, artifact=sc.eval_ros_out,
-                notes=(
-                    "CMD scenario requires /commands GT topic but none found. "
-                    "Use --no-docker or record MCAPs with the action-command topic."
-                ),
-            )
 
     expected = (
         (sc.eval_ros_out / "metrics_summary.json") if with_docker
@@ -292,10 +265,14 @@ def run_step_eval_ros(sc: Scenario, force: bool, steps_override: int,
     if expected.exists() and not force:
         return StepResult(ok=True, duration_s=0.0, artifact=expected, notes="cached")
 
+    monitor_dir = sc.eval_ros_out / "monitor"
     cmd = [
         "uv", "run", "anvil-eval-ros",
         "--checkpoint", str(ckpt_dir),
         "--mcap-root", str(sc.mcap_root),
+        "--dataset-dir", str(sc.dataset_dir),
+        "--base-inference-config",
+        str(FIXTURES / "configs" / "inference-eval-smoke-test.yaml"),
         "--num-eps", "1",
         "--output-dir", str(sc.eval_ros_out),
     ]
@@ -304,9 +281,15 @@ def run_step_eval_ros(sc: Scenario, force: bool, steps_override: int,
     else:
         subprocess.run(
             ["docker", "rm", "-f",
-             "lerobot-eval-inference", "lerobot-eval-player", "lerobot-eval-recorder"],
+             "lerobot-eval-inference", "lerobot-eval-player", "lerobot-eval-recorder",
+             "lerobot-eval-monitor"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        # Pre-create monitor dir as current user so Docker writes files into a
+        # user-owned directory (otherwise Docker creates it as root and we can't
+        # write the inference_report.png from the host afterwards).
+        monitor_dir.mkdir(parents=True, exist_ok=True)
+        cmd.append("--monitor")
 
     t0 = time.monotonic()
     rc = _run(cmd)
@@ -323,6 +306,23 @@ def run_step_eval_ros(sc: Scenario, force: bool, steps_override: int,
         summary = json.loads(expected.read_text())
         overall = summary.get("overall", {})
         notes_bits.append(f"mean MAE={overall.get('mean_mae', float('nan')):.4f}")
+
+        # ── Monitor CSV plot ─────────────────────────────────────────────
+        monitor_csv = monitor_dir / "inference_data.csv"
+        monitor_png = monitor_dir / "inference_report.png"
+        if monitor_csv.exists():
+            print(f"  [monitor] Plotting {monitor_csv.relative_to(REPO)} ...", flush=True)
+            plot_rc = _run([
+                "uv", "run", "python", str(REPO / "scripts" / "plot_monitor_csv.py"),
+                str(monitor_csv),
+                "-o", str(monitor_png),
+            ])
+            if plot_rc == 0 and monitor_png.exists():
+                notes_bits.append(f"monitor→{monitor_png.relative_to(REPO)}")
+            else:
+                notes_bits.append("monitor plot FAILED")
+        else:
+            notes_bits.append("monitor CSV missing")
     else:
         plan = json.loads(expected.read_text())
         notes_bits.append(f"{len(plan.get('episodes', []))} eps")

@@ -121,6 +121,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable inference monitor CSV recording. Adds inference-monitor container.",
     )
+    parser.add_argument(
+        "--dataset-dir",
+        help="Path to the converted LeRobot dataset directory. Used as an extra candidate "
+             "when searching for conversion_config.yaml (useful when raw MCAP and dataset "
+             "dirs are not co-located in the standard data/raw / data/datasets layout).",
+    )
+    parser.add_argument(
+        "--base-inference-config",
+        help="Path to the base inference YAML to use instead of the default "
+             "configs/lerobot_control/inference_eval.yaml. Useful when the default config "
+             "has more cameras or arms than the model being evaluated (e.g. smoke tests).",
+    )
     return parser.parse_args()
 
 
@@ -143,7 +155,9 @@ def _mcap_has_commands_topic(mcap_path: Path) -> bool:
 
 
 def _read_synthesis_info(
-    mcap_root: Path, mcap_root_arg: Path | None = None
+    mcap_root: Path,
+    mcap_root_arg: Path | None = None,
+    dataset_dir: Path | None = None,
 ) -> dict | None:
     """Return synthesize info when conversion_config has action_from_observation=true.
 
@@ -154,17 +168,24 @@ def _read_synthesis_info(
     except ImportError:
         return None
 
-    candidates: list[Path] = []
-    if mcap_root_arg is not None:
-        candidates.append(mcap_root_arg)
-    candidates.append(mcap_root)
-
     config_path: Path | None = None
-    for root in candidates:
-        candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
-        if candidate.exists():
-            config_path = candidate
-            break
+
+    # Highest priority: explicit dataset_dir (e.g. from --dataset-dir CLI arg)
+    if dataset_dir is not None:
+        direct = dataset_dir / "conversion_config.yaml"
+        if direct.exists():
+            config_path = direct
+
+    if config_path is None:
+        candidates: list[Path] = []
+        if mcap_root_arg is not None:
+            candidates.append(mcap_root_arg)
+        candidates.append(mcap_root)
+        for root in candidates:
+            candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
+            if candidate.exists():
+                config_path = candidate
+                break
 
     if config_path is None:
         return None
@@ -251,33 +272,43 @@ def _read_action_dim(checkpoint_path: Path) -> int | None:
 
 
 def _detect_arms_from_conversion_config(
-    mcap_root: Path, mcap_root_arg: Path | None = None
+    mcap_root: Path,
+    mcap_root_arg: Path | None = None,
+    dataset_dir: Path | None = None,
 ) -> list[str] | None:
     """Read conversion_config.yaml to find which arms are used for actions.
 
     Returns ordered list of arm names (e.g. ["right"]) or None if not found.
     The dataset conversion config lives at data/datasets/{dataset_name}/conversion_config.yaml.
 
-    Two candidate roots are tried so symlinked data dirs still work:
-      1. the path as given on the CLI (e.g. workspace/data/raw/<name>)
-      2. the symlink-resolved path (e.g. /media/.../<name>)
+    Search order:
+      1. dataset_dir/conversion_config.yaml  (explicit --dataset-dir arg, highest priority)
+      2. mcap_root_arg/../datasets/<name>/conversion_config.yaml  (CLI path, pre-symlink)
+      3. mcap_root/../datasets/<name>/conversion_config.yaml      (resolved symlink path)
     """
     try:
         import yaml
     except ImportError:
         return None
 
-    candidates: list[Path] = []
-    if mcap_root_arg is not None:
-        candidates.append(mcap_root_arg)
-    candidates.append(mcap_root)
-
     config_path: Path | None = None
-    for root in candidates:
-        candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
-        if candidate.exists():
-            config_path = candidate
-            break
+
+    # Highest priority: explicit dataset_dir
+    if dataset_dir is not None:
+        direct = dataset_dir / "conversion_config.yaml"
+        if direct.exists():
+            config_path = direct
+
+    if config_path is None:
+        candidates: list[Path] = []
+        if mcap_root_arg is not None:
+            candidates.append(mcap_root_arg)
+        candidates.append(mcap_root)
+        for root in candidates:
+            candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
+            if candidate.exists():
+                config_path = candidate
+                break
 
     if config_path is None:
         return None
@@ -299,6 +330,7 @@ def generate_inference_config(
     output_dir: Path,
     mcap_root: Path | None = None,
     mcap_root_arg: Path | None = None,
+    dataset_dir: Path | None = None,
 ) -> tuple[Path, dict]:
     """Generate a model-aware inference YAML and return (path, arm_info).
 
@@ -337,7 +369,9 @@ def generate_inference_config(
     # Determine arm names: prefer conversion_config.yaml (exact training mapping)
     arm_names_ordered: list[str] | None = None
     if mcap_root is not None:
-        arm_names_ordered = _detect_arms_from_conversion_config(mcap_root, mcap_root_arg)
+        arm_names_ordered = _detect_arms_from_conversion_config(
+            mcap_root, mcap_root_arg, dataset_dir
+        )
         if arm_names_ordered:
             log.info(
                 "[anvil-eval-ros] Arm config from conversion_config.yaml: %s", arm_names_ordered
@@ -451,6 +485,7 @@ def main() -> None:
     checkpoint_path = Path(args.checkpoint).resolve()
     mcap_root_arg = Path(args.mcap_root)
     mcap_root = mcap_root_arg.resolve()
+    dataset_dir: Path | None = Path(args.dataset_dir).resolve() if args.dataset_dir else None
 
     if not checkpoint_path.exists():
         log.error("[anvil-eval-ros] Checkpoint not found: %s", checkpoint_path)
@@ -471,7 +506,7 @@ def main() -> None:
     # We always check the conversion_config first so that datasets recorded WITH a commands
     # topic but converted with action_from_observation=true still produce correct GT.
     first_mcap = next(iter(ep_map.values()), None)
-    synthesize_info: dict | None = _read_synthesis_info(mcap_root, mcap_root_arg)
+    synthesize_info: dict | None = _read_synthesis_info(mcap_root, mcap_root_arg, dataset_dir)
 
     if synthesize_info:
         log.info(
@@ -587,13 +622,20 @@ def main() -> None:
         sys.exit(1)
 
     # 5b. Auto-generate inference config from model's action shape
-    base_inference_yaml = repo_root / "configs" / "lerobot_control" / "inference_eval.yaml"
+    if args.base_inference_config:
+        base_inference_yaml = Path(args.base_inference_config).resolve()
+        if not base_inference_yaml.exists():
+            log.error("[anvil-eval-ros] --base-inference-config not found: %s", base_inference_yaml)
+            sys.exit(1)
+    else:
+        base_inference_yaml = repo_root / "configs" / "lerobot_control" / "inference_eval.yaml"
     inference_config_path, arm_info = generate_inference_config(
         checkpoint_path,
         base_inference_yaml,
         output_dir,
         mcap_root=mcap_root,
         mcap_root_arg=mcap_root_arg,
+        dataset_dir=dataset_dir,
     )
 
     # 6. Build docker compose command
@@ -640,6 +682,7 @@ def main() -> None:
     compose_cmd += [
         "up",
         "--build",
+        "--remove-orphans",
         "--abort-on-container-exit",
         "--exit-code-from", "eval-recorder",
     ]

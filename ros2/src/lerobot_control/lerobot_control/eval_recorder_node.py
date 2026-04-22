@@ -131,6 +131,8 @@ class EvalRecorderNode(Node):
         # Buffers: {arm_name: [(timestamp_ns, data_list), ...]}
         self._gt_buf: dict[str, list[tuple[int, list[float]]]] = defaultdict(list)
         self._pred_buf: dict[str, list[tuple[int, list[float]]]] = defaultdict(list)
+        # Raw model output before postprocessing (from /monitor/raw_output, optional)
+        self._raw_buf: list[tuple[int, list[float]]] = []
 
         # Silence tracking
         self._last_gt_time: float = 0.0
@@ -171,6 +173,14 @@ class EvalRecorderNode(Node):
                 10,
             )
 
+        # Raw model output subscriber (optional — published by inference_monitor_node)
+        self.create_subscription(
+            Float64MultiArray,
+            "/monitor/raw_output",
+            self._on_raw_output,
+            10,
+        )
+
         # Silence detection timer (controls end-of-episode detection latency)
         self._silence_timer = self.create_timer(silence_poll_sec, self._check_silence)
 
@@ -200,6 +210,7 @@ class EvalRecorderNode(Node):
             self._current_split = data.get("split_label", "replay")
             self._gt_buf.clear()
             self._pred_buf.clear()
+            self._raw_buf.clear()
             self._last_gt_time = 0.0
             self._last_pred_time = 0.0
             self._recording = True
@@ -248,6 +259,13 @@ class EvalRecorderNode(Node):
             self.get_logger().info(
                 f"[eval-recorder] First pred sample on arm '{arm}' (dim={len(msg.data)})"
             )
+
+    def _on_raw_output(self, msg: Float64MultiArray) -> None:
+        with self._lock:
+            if not self._recording:
+                return
+            ts = self.get_clock().now().nanoseconds
+            self._raw_buf.append((ts, list(msg.data)))
 
     # ──────────────────────────────────────────────────────────────────────
     # Silence detection → episode finalization
@@ -299,6 +317,7 @@ class EvalRecorderNode(Node):
             split_label = self._current_split
             gt_buf = dict(self._gt_buf)
             pred_buf = dict(self._pred_buf)
+            raw_buf = list(self._raw_buf)
 
         self.get_logger().info(
             f"[eval-recorder] Finalizing ep {ep_idx}: "
@@ -314,8 +333,9 @@ class EvalRecorderNode(Node):
                     f"[eval-recorder] Ep {ep_idx}: too few aligned frames ({predicted.shape[0]}), skipping"
                 )
             else:
+                raw_output = self._align_raw_to_gt(raw_buf, gt_buf) if raw_buf else None
                 metrics = self._compute_and_save(
-                    predicted, ground_truth, ep_idx, split_label
+                    predicted, ground_truth, ep_idx, split_label, raw_output=raw_output
                 )
                 self._all_metrics.append(metrics)
                 self.get_logger().info(
@@ -392,12 +412,40 @@ class EvalRecorderNode(Node):
         d = min(predicted.shape[1], ground_truth.shape[1], len(self._joint_names))
         return predicted[:, :d], ground_truth[:, :d]
 
+    def _align_raw_to_gt(
+        self,
+        raw_buf: list[tuple[int, list[float]]],
+        gt_buf: dict[str, list[tuple[int, list[float]]]],
+    ) -> np.ndarray | None:
+        """Align /monitor/raw_output to GT timestamps; return (T, D) array or None.
+
+        Uses GT timestamps as reference so the resulting array has the same
+        number of rows as the predicted array from _align_and_stack.
+        """
+        if not raw_buf:
+            return None
+        ref_arm = self._arm_names[0] if self._arm_names else None
+        gt_entries = gt_buf.get(ref_arm, []) if ref_arm else []
+        if not gt_entries:
+            return None
+
+        raw_ts = [t for t, _ in raw_buf]
+        raw_data = [d for _, d in raw_buf]
+
+        aligned = []
+        for gt_t, _ in gt_entries:
+            j = min(range(len(raw_ts)), key=lambda k: abs(raw_ts[k] - gt_t))
+            aligned.append(raw_data[j])
+
+        return np.array(aligned, dtype=np.float32)
+
     def _compute_and_save(
         self,
         predicted: np.ndarray,
         ground_truth: np.ndarray,
         ep_idx: int,
         split_label: str,
+        raw_output: np.ndarray | None = None,
     ):
         """Compute metrics and optionally save plot using anvil_eval."""
         _ensure_anvil_eval_importable()
@@ -412,7 +460,16 @@ class EvalRecorderNode(Node):
         try:
             from anvil_eval.plotting import plot_episode_joints
             plot_path = self._plots_dir / f"episode_{ep_idx:04d}_{split_label}.png"
-            plot_episode_joints(predicted, ground_truth, joint_names, metrics, plot_path)
+            # Trim raw_output to same T and D as predicted
+            raw_trimmed: np.ndarray | None = None
+            if raw_output is not None and raw_output.shape[0] > 0:
+                t = predicted.shape[0]
+                d = predicted.shape[1]
+                raw_trimmed = raw_output[:t, :d]
+            plot_episode_joints(
+                predicted, ground_truth, joint_names, metrics, plot_path,
+                raw_output=raw_trimmed,
+            )
         except ImportError:
             self.get_logger().warning(
                 "[eval-recorder] matplotlib not available — skipping plot for ep %d", ep_idx

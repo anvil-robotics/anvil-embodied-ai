@@ -346,8 +346,26 @@ Host: anvil-eval-ros
 | `--episodes "0,3,5"` | Manually specify episode indices (overrides split sampling) |
 | `--output-dir PATH` | Override default output directory |
 | `--seed N` | Random seed for episode sampling (default: 42) |
+| `--dataset-dir PATH` | Path to the converted LeRobot dataset. Used as an extra search candidate for `conversion_config.yaml` when raw MCAP and dataset are not co-located in the standard `data/raw` / `data/datasets` layout |
+| `--base-inference-config PATH` | Override the default `configs/lerobot_control/inference_eval.yaml`. Useful when evaluating a model trained on a subset of cameras or a single arm |
+| `--monitor` | Enable real-time inference monitor: records a per-step CSV (`obs_state`, `raw_output`, `control_cmd`) and generates a joint-level PNG report in `<output-dir>/monitor/` |
 
 Results are saved to `eval_results/{dataset}/{job}/{checkpoint}/ros/`.
+
+**Inference Monitor (`--monitor`)**
+
+When `--monitor` is passed, a fourth `inference-monitor` container starts alongside the stack. It subscribes to `/monitor/*` topics published by the inference node and writes:
+
+```
+ros/
+├── monitor/
+│   ├── inference_data.csv      ← per-step obs_state / raw_output / control_cmd
+│   └── inference_report.png   ← joint-level overlay plot
+└── plots/
+    └── episode_NNNN_*.png     ← GT (blue) / Pred (red) / Raw model output (orange)
+```
+
+The orange "Raw" line in episode plots shows the model's output **before** postprocessing (delta restore, safety clamping) — useful for diagnosing whether the policy or the postprocessor is responsible for a tracking error.
 
 > **Requires Docker with NVIDIA GPU support.** The inference container is built automatically on first run. Set `LEROBOT_EXTRAS` if your model needs extra dependencies (e.g. `pi`, `smolvla`).
 

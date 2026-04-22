@@ -1,0 +1,57 @@
+rosbag2_bagfile_information:
+  compression_format: ''
+  compression_mode: ''
+  custom_data: null
+  duration:
+    nanoseconds: 3966666627
+  files:
+  - duration:
+      nanoseconds: 3966666627
+    message_count: 1200
+    path: 0003_0.mcap
+    starting_time:
+      nanoseconds_since_epoch: 0
+  message_count: 600
+  relative_file_paths:
+  - 0003_0.mcap
+  ros_distro: jazzy
+  starting_time:
+    nanoseconds_since_epoch: 0
+  storage_identifier: mcap
+  topics_with_message_count:
+  - message_count: 120
+    topic_metadata:
+      name: /joint_states
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: sensor_msgs/msg/JointState
+      type_description_hash: ''
+  - message_count: 120
+    topic_metadata:
+      name: /cam_waist/image_raw/compressed
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: sensor_msgs/msg/CompressedImage
+      type_description_hash: ''
+  - message_count: 120
+    topic_metadata:
+      name: /cam_wrist_r/image_raw/compressed
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: sensor_msgs/msg/CompressedImage
+      type_description_hash: ''
+  - message_count: 120
+    topic_metadata:
+      name: /cam_chest/image_raw/compressed
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: sensor_msgs/msg/CompressedImage
+      type_description_hash: ''
+  - message_count: 120
+    topic_metadata:
+      name: /follower_r_forward_position_controller/commands
+      offered_qos_profiles: []
+      serialization_format: cdr
+      type: std_msgs/msg/Float64MultiArray
+      type_description_hash: ''
+  version: 9
