@@ -2,8 +2,8 @@
 """End-to-end CLI smoke test for the anvil training / eval stack.
 
 Exercises mcap-convert → anvil-trainer → anvil-eval → anvil-eval-ros against the
-fixture at data/raw/test-session-1arm (5 real MCAPs, single right arm, no action
-topic — relies on action_from_observation fallback in openarm_single_quest.yaml).
+fixture at data/raw/test-session (5 stub MCAPs, single right arm, uses
+action_from_observation fallback in openarm_single_quest.yaml).
 
 Usage:
   uv run python scripts/pipeline_smoke_test.py               # run all 4 steps (step 4 launches Docker)
@@ -31,13 +31,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 # ── Stable artifact paths ────────────────────────────────────────────────────
-MCAP_ROOT = REPO / "data" / "raw" / "test-session-1arm"
-DATASET_DIR = REPO / "data" / "datasets" / "test-session-1arm"
-TRAIN_OUT = REPO / "model_zoo" / "test-session-1arm" / "smoke"
+MCAP_ROOT = REPO / "data" / "raw" / "test-session"
+DATASET_DIR = REPO / "data" / "datasets" / "test-session"
+TRAIN_OUT = REPO / "model_zoo" / "test-session" / "smoke"
 CHECKPOINT = TRAIN_OUT / "checkpoints" / "000010"
 PRETRAINED = CHECKPOINT / "pretrained_model"
-EVAL_OUT = REPO / "eval_results" / "test-session-1arm" / "smoke" / "raw"
-EVAL_ROS_OUT = REPO / "eval_results" / "test-session-1arm" / "smoke" / "ros"
+EVAL_OUT = REPO / "eval_results" / "test-session" / "smoke" / "raw"
+EVAL_ROS_OUT = REPO / "eval_results" / "test-session" / "smoke" / "ros"
 CONVERT_CONFIG = REPO / "configs" / "mcap_converter" / "openarm_single_quest.yaml"
 
 
