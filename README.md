@@ -371,10 +371,32 @@ The orange "Raw" line in episode plots shows the model's output **before** postp
 
 ### 4. Run Inference
 
+All inference scenarios go through `scripts/run_inference.sh` — the single entry point that selects the right compose file, manages the monitor output directory, and auto-plots monitor data on exit.
+
+```
+./scripts/run_inference.sh [--fake-hardware] [--monitor] [--echo-topic-only] [COMPOSE_ARGS...]
+```
+
+| Flag | Description |
+|---|---|
+| `--fake-hardware` | Use `docker-compose.fake-hardware.yml` (bridge network + CycloneDDS, no real robot) |
+| `--monitor` | Enable monitor profile. For production: starts `inference_monitor_node`, pre-creates `MONITOR_OUTPUT_DIR` as current user, writes CSV + PNG on exit. For fake-hardware: starts FPS-only monitoring (`echo_topic_only`) |
+| `--echo-topic-only` | Subscribe and log FPS without running a model — verify DDS connectivity without a checkpoint |
+
+**Optional env overrides:**
+
+| Variable | Description |
+|---|---|
+| `MODEL_PATH` | Host path to checkpoint (required for production inference) |
+| `CONFIG_FILE` | Custom inference config YAML (default: `./configs/lerobot_control/inference_default.yaml`) |
+| `MONITOR_OUTPUT_DIR` | Host dir for monitor CSV/PNG output (default: `./monitor_output`) |
+| `LEROBOT_EXTRAS` | Comma-separated policy extras to install in the image (e.g. `pi,smolvla`). **Rebuild after changing:** `docker compose build` |
+
+Run `./scripts/run_inference.sh --help` for the full reference.
+
 #### Test with Fake Hardware First (Recommended)
 
-Before deploying to a real robot, validate your setup using the fake hardware compose file.
-It uses a bridge network + CycloneDDS to simulate real 2-PC cooperation — mock-robot acts as the Robot PC, monitor/inference acts as the GPU PC.
+Simulate the 2-PC setup locally (bridge network + CycloneDDS) before connecting to real hardware. `mock-robot` acts as the Robot PC; `monitor`/`inference` act as the GPU PC.
 
 ```bash
 # 1. Validate DDS connectivity + camera FPS (no model, no GPU needed)
@@ -385,38 +407,22 @@ MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
 ./scripts/run_inference.sh --fake-hardware up --build --profile inference
 ```
 
-If `Control Loop` hits the target FPS (30 Hz) in the stats output, the setup is ready for real hardware.
+If `Control Loop` hits 30 Hz in the stats output, the setup is ready for real hardware.
 
 #### Production (Real Robot)
 
-All inference scenarios go through `scripts/run_inference.sh`, which handles monitor directory ownership and auto-plots CSV on exit.
-
 ```bash
-# MODEL_PATH must be an absolute path or start with ./
+# Standard inference
 MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
 ./scripts/run_inference.sh up --build
 
-# With real-time inference monitor (writes CSV + PNG to ./monitor_output/ on exit)
+# With real-time inference monitor — records per-step CSV; plots PNG to ./monitor_output/ on exit
 MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
 ./scripts/run_inference.sh --monitor up --build
+
+# Verify DDS connectivity without a model checkpoint
+./scripts/run_inference.sh --echo-topic-only up --build
 ```
-
-**Options:**
-
-| Flag | Description |
-|---|---|
-| `--fake-hardware` | Use `docker-compose.fake-hardware.yml` instead of production compose |
-| `--monitor` | Enable monitor profile; for production: sets `MONITOR_ENABLE=true`, pre-creates output dir, plots CSV on exit |
-| `--echo-topic-only` | Subscribe + log FPS without loading a model (sets `ECHO_TOPIC_ONLY=true`); verify DDS connectivity without a checkpoint |
-
-**Optional env overrides:**
-
-| Variable | Description |
-|---|---|
-| `CONFIG_FILE` | Host path to a custom config yaml (default: `./configs/lerobot_control/inference_default.yaml`) |
-| `MONITOR_OUTPUT_DIR` | Host dir for monitor CSV/PNG output (default: `./monitor_output`) |
-| `ECHO_TOPIC_ONLY` | Set to `true` to subscribe + log FPS without loading a model (or use `--echo-topic-only` flag) |
-| `LEROBOT_EXTRAS` | Comma-separated policy extras to install in the image (e.g. `pi,diffusion`). **Rebuild the image after changing:** `docker compose build` |
 
 Before running, review `configs/lerobot_control/inference_default.yaml`:
 
@@ -461,7 +467,7 @@ inference_tuning:
 
 The Anvil Devbox runs [anvil-loader](https://docs.anvil.bot/software/starting-robot-operation) for real-time robot control, streaming joint states and camera feeds over CycloneDDS. This repo runs on a separate GPU PC, subscribing to those streams, running the trained policy, and publishing action commands back. See the [full documentation](https://docs.anvil.bot/) for setup details.
 
-Use `docker-compose.fake-hardware.yml` to simulate this 2-PC setup locally (bridge network + CycloneDDS) before connecting to real hardware.
+Use `./scripts/run_inference.sh --fake-hardware` to simulate this 2-PC setup locally before connecting to real hardware.
 
 ## Project Structure
 
