@@ -378,33 +378,42 @@ It uses a bridge network + CycloneDDS to simulate real 2-PC cooperation — mock
 
 ```bash
 # 1. Validate DDS connectivity + camera FPS (no model, no GPU needed)
-docker compose -f docker-compose.fake-hardware.yml --profile monitor up --build
+./scripts/run_inference.sh --fake-hardware --monitor up --build
 
 # 2. Validate full inference pipeline with your model (GPU required)
 MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
-docker compose -f docker-compose.fake-hardware.yml --profile inference up --build
+./scripts/run_inference.sh --fake-hardware up --build --profile inference
 ```
 
 If `Control Loop` hits the target FPS (30 Hz) in the stats output, the setup is ready for real hardware.
 
 #### Production (Real Robot)
 
+All inference scenarios go through `scripts/run_inference.sh`, which handles monitor directory ownership and auto-plots CSV on exit.
+
 ```bash
 # MODEL_PATH must be an absolute path or start with ./
-# Use $(pwd)/ prefix so tab-completion works naturally on the path first, then wrap it:
 MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
-docker compose up
+./scripts/run_inference.sh up --build
 
-# Or use explicit ./relative path:
-MODEL_PATH=./model_zoo/my-task/checkpoints/last \
-docker compose up
+# With real-time inference monitor (writes CSV + PNG to ./monitor_output/ on exit)
+MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
+./scripts/run_inference.sh --monitor up --build
 ```
+
+**Options:**
+
+| Flag | Description |
+|---|---|
+| `--fake-hardware` | Use `docker-compose.fake-hardware.yml` instead of production compose |
+| `--monitor` | Enable monitor profile; for production: sets `MONITOR_ENABLE=true`, pre-creates output dir, plots CSV on exit |
 
 **Optional env overrides:**
 
 | Variable | Description |
 |---|---|
 | `CONFIG_FILE` | Host path to a custom config yaml (default: `./configs/lerobot_control/inference_default.yaml`) |
+| `MONITOR_OUTPUT_DIR` | Host dir for monitor CSV/PNG output (default: `./monitor_output`) |
 | `ECHO_TOPIC_ONLY` | Set to `true` to subscribe + log FPS without loading a model — useful to verify DDS connectivity on the GPU PC |
 | `LEROBOT_EXTRAS` | Comma-separated policy extras to install in the image (e.g. `pi,diffusion`). **Rebuild the image after changing:** `docker compose build` |
 
@@ -470,6 +479,9 @@ anvil-embodied-ai/
 │   └── mcap_converter/            # Data conversion config
 ├── docker/
 │   └── inference/                 # Dockerfile + entrypoint
+├── scripts/
+│   ├── run_inference.sh               # Entry point for all inference scenarios (wraps docker compose)
+│   └── plot_monitor_csv.py            # Plot obs.state / raw_output / control_cmd from monitor CSV
 ├── docker-compose.yml                    # Production inference (GPU PC)
 ├── docker-compose.fake-hardware.yml      # Fake hardware: simulate 2-PC DDS cooperation (monitor / inference profiles)
 ├── docker-compose.eval.yml               # ROS2 MCAP replay eval: 3-service stack (inference + mcap-player + eval-recorder)
