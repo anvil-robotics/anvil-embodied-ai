@@ -2,7 +2,7 @@
 # LeRobot Inference Configuration
 # =============================================================================
 # Parameters set via ROS2 launch args (not in this file):
-#   model_path, device, control_frequency, image_height/width, monitor_only
+#   model_path, device, control_frequency, image_height/width, echo_topic_only
 #
 # Model type and training flags are auto-read from the checkpoint.
 # Only set fields here to override checkpoint values or provide runtime config.

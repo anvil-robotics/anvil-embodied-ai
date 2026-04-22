@@ -387,7 +387,7 @@ docker compose up
 | Variable | Description |
 |---|---|
 | `CONFIG_FILE` | Host path to a custom config yaml (default: `./configs/lerobot_control/inference_default.yaml`) |
-| `MONITOR_ONLY` | Set to `true` to subscribe + log FPS without loading a model — useful to verify DDS connectivity on the GPU PC |
+| `ECHO_TOPIC_ONLY` | Set to `true` to subscribe + log FPS without loading a model — useful to verify DDS connectivity on the GPU PC |
 | `LEROBOT_EXTRAS` | Comma-separated policy extras to install in the image (e.g. `pi,diffusion`). **Rebuild the image after changing:** `docker compose build` |
 
 Before running, review `configs/lerobot_control/inference_default.yaml`:
