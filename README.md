@@ -407,6 +407,7 @@ MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
 |---|---|
 | `--fake-hardware` | Use `docker-compose.fake-hardware.yml` instead of production compose |
 | `--monitor` | Enable monitor profile; for production: sets `MONITOR_ENABLE=true`, pre-creates output dir, plots CSV on exit |
+| `--echo-topic-only` | Subscribe + log FPS without loading a model (sets `ECHO_TOPIC_ONLY=true`); verify DDS connectivity without a checkpoint |
 
 **Optional env overrides:**
 
@@ -414,7 +415,7 @@ MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
 |---|---|
 | `CONFIG_FILE` | Host path to a custom config yaml (default: `./configs/lerobot_control/inference_default.yaml`) |
 | `MONITOR_OUTPUT_DIR` | Host dir for monitor CSV/PNG output (default: `./monitor_output`) |
-| `ECHO_TOPIC_ONLY` | Set to `true` to subscribe + log FPS without loading a model — useful to verify DDS connectivity on the GPU PC |
+| `ECHO_TOPIC_ONLY` | Set to `true` to subscribe + log FPS without loading a model (or use `--echo-topic-only` flag) |
 | `LEROBOT_EXTRAS` | Comma-separated policy extras to install in the image (e.g. `pi,diffusion`). **Rebuild the image after changing:** `docker compose build` |
 
 Before running, review `configs/lerobot_control/inference_default.yaml`:

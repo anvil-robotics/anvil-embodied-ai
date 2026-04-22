@@ -6,10 +6,12 @@
 #   ./scripts/run_inference.sh [OPTIONS] [COMPOSE_ARGS...]
 #
 # Options:
-#   --fake-hardware   Use docker-compose.fake-hardware.yml (DDS bridge test, no real robot)
-#   --monitor         Enable monitor profile; for production also sets MONITOR_ENABLE=true,
-#                     pre-creates MONITOR_OUTPUT_DIR as current user, and plots CSV on exit
-#   -h, --help        Show this message
+#   --fake-hardware    Use docker-compose.fake-hardware.yml (DDS bridge test, no real robot)
+#   --monitor          Enable monitor profile; for production also sets MONITOR_ENABLE=true,
+#                      pre-creates MONITOR_OUTPUT_DIR as current user, and plots CSV on exit
+#   --echo-topic-only  Subscribe + log FPS without loading a model (sets ECHO_TOPIC_ONLY=true);
+#                      useful to verify DDS connectivity on the GPU PC without a checkpoint
+#   -h, --help         Show this message
 #
 # All other arguments (e.g. up --build, down, logs) are passed directly to docker compose.
 #
@@ -31,6 +33,9 @@
 #   # Fake-hardware DDS test (FPS monitor only, no GPU)
 #   ./scripts/run_inference.sh --fake-hardware --monitor up --build
 #
+#   # Verify DDS connectivity without a model (no MODEL_PATH needed)
+#   ./scripts/run_inference.sh --echo-topic-only up --build
+#
 #   # Fake-hardware full inference pipeline
 #   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh --fake-hardware up --build --profile inference
 
@@ -43,6 +48,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 COMPOSE_FILE="${REPO_ROOT}/docker-compose.yml"
 FAKE_HARDWARE=false
 MONITOR_REQUESTED=false
+ECHO_TOPIC_ONLY_REQUESTED=false
 PASSTHROUGH=()
 
 usage() {
@@ -59,6 +65,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --monitor)
             MONITOR_REQUESTED=true
+            shift
+            ;;
+        --echo-topic-only)
+            ECHO_TOPIC_ONLY_REQUESTED=true
             shift
             ;;
         -h|--help)
@@ -80,6 +90,11 @@ done
 # Always inject --profile monitor when requested
 if [[ "$MONITOR_REQUESTED" == true ]]; then
     PASSTHROUGH=("--profile" "monitor" "${PASSTHROUGH[@]}")
+fi
+
+# ECHO_TOPIC_ONLY: subscribe + log FPS without loading a model (DDS connectivity check)
+if [[ "$ECHO_TOPIC_ONLY_REQUESTED" == true ]]; then
+    export ECHO_TOPIC_ONLY=true
 fi
 
 # Production-only: MONITOR_ENABLE env var triggers inference_monitor_node inside the container;
