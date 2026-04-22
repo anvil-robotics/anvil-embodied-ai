@@ -42,10 +42,10 @@ def generate_launch_description():
         "deterministic_seed", default_value="42", description="Random seed for deterministic mode"
     )
 
-    monitor_only_arg = DeclareLaunchArgument(
-        "monitor_only",
+    echo_topic_only_arg = DeclareLaunchArgument(
+        "echo_topic_only",
         default_value="false",
-        description="Monitor-only mode: subscribe + log FPS, no model or publishing",
+        description="Echo-topic-only mode: subscribe + log FPS, no model loaded or actions published",
     )
 
     debug_arg = DeclareLaunchArgument(
@@ -58,6 +58,12 @@ def generate_launch_description():
         "debug_image_dir",
         default_value="",
         description="Save pre-model input frames to this directory (one sub-dir per camera). Empty = disabled.",
+    )
+
+    monitor_enable_arg = DeclareLaunchArgument(
+        "monitor_enable",
+        default_value="false",
+        description="Publish /monitor/obs_state, /monitor/raw_output, /monitor/control_cmd for inference_monitor_node",
     )
 
     # Node
@@ -74,9 +80,10 @@ def generate_launch_description():
                 "device": LaunchConfiguration("device"),
                 "deterministic": LaunchConfiguration("deterministic"),
                 "deterministic_seed": LaunchConfiguration("deterministic_seed"),
-                "monitor_only": LaunchConfiguration("monitor_only"),
+                "echo_topic_only": LaunchConfiguration("echo_topic_only"),
                 "debug": LaunchConfiguration("debug"),
                 "debug_image_dir": LaunchConfiguration("debug_image_dir"),
+                "monitor_enable": LaunchConfiguration("monitor_enable"),
             }
         ],
     )
@@ -89,9 +96,10 @@ def generate_launch_description():
             control_freq_arg,
             deterministic_arg,
             deterministic_seed_arg,
-            monitor_only_arg,
+            echo_topic_only_arg,
             debug_arg,
             debug_image_dir_arg,
+            monitor_enable_arg,
             inference_node,
         ]
     )

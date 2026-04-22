@@ -14,6 +14,7 @@ Subscribes to:
 
 Publishes:
     - Forward position controller command topics (std_msgs/Float64MultiArray)
+    - /monitor/obs_state, /monitor/raw_output, /monitor/control_cmd  (when monitor_enable:=true)
 """
 
 import json
@@ -76,7 +77,7 @@ class LeRobotInferenceNode(Node):
         self._shutting_down: bool = False
         self._has_published: bool = False
 
-        if not self.monitor_only:
+        if not self.echo_topic_only:
             self._setup_model()
 
             self.action_limiter = ActionLimiter(
@@ -113,7 +114,7 @@ class LeRobotInferenceNode(Node):
         self._smooth_tracker = None
         self._queue_depths: deque[int] = deque(maxlen=300)
         self._vla_skip_count: int = 0
-        if self._debug and not self.monitor_only and hasattr(self, "model"):
+        if self._debug and not self.echo_topic_only and hasattr(self, "model"):
             from .action_smooth_tracker import ActionSmoothTracker
 
             total_action_dim = sum(
@@ -128,7 +129,7 @@ class LeRobotInferenceNode(Node):
         self._stats_timer = self.create_timer(
             self._stats_log_interval,
             self._log_input_stats,
-            callback_group=self._publish_callback_group if not self.monitor_only else MutuallyExclusiveCallbackGroup(),
+            callback_group=self._publish_callback_group if not self.echo_topic_only else MutuallyExclusiveCallbackGroup(),
         )
 
         # Windowed rate tracking
@@ -147,17 +148,19 @@ class LeRobotInferenceNode(Node):
         self.declare_parameter("device", "cuda")
         self.declare_parameter("deterministic", False)
         self.declare_parameter("deterministic_seed", 42)
-        self.declare_parameter("monitor_only", False)
+        self.declare_parameter("echo_topic_only", False)
         self.declare_parameter("debug", False)
         self.declare_parameter("debug_image_dir", "")
+        self.declare_parameter("monitor_enable", False)
 
         # Static fields from ROS2 params
-        self.monitor_only = self.get_parameter("monitor_only").value
+        self.echo_topic_only = self.get_parameter("echo_topic_only").value
         self._debug = self.get_parameter("debug").value
+        self._monitor_enable: bool = self.get_parameter("monitor_enable").value
         _debug_image_dir = self.get_parameter("debug_image_dir").value
         self._debug_image_dir: str | None = _debug_image_dir if _debug_image_dir else None
         self.model_path = self.get_parameter("model_path").value
-        if not self.model_path and not self.monitor_only:
+        if not self.model_path and not self.echo_topic_only:
             raise ValueError("model_path parameter is required")
 
         self.control_freq = self.get_parameter("control_frequency").value
@@ -181,10 +184,11 @@ class LeRobotInferenceNode(Node):
         self._tuning_config = self.config.get("inference_tuning", {})
 
         # --- Checkpoint metadata (lightweight JSON reads, no tensor loading) ---
-        meta = self._read_checkpoint_metadata()
+        # Skip in echo_topic_only mode — no checkpoint needed
+        meta = {} if self.echo_topic_only else self._read_checkpoint_metadata()
 
         # image_shape: from config.json input_features — must match training
-        # Default (480, 640, 3) is used only in monitor_only mode with no checkpoint
+        # Default (480, 640, 3) is used only in echo_topic_only mode with no checkpoint
         self.image_shape = meta.get("image_shape", (480, 640, 3))
 
         # model_type: from config.json, YAML overrides if explicitly set
@@ -350,7 +354,7 @@ class LeRobotInferenceNode(Node):
         logger.info("=" * 50)
         logger.info("LeRobot Inference Node")
         logger.info("=" * 50)
-        if self.monitor_only:
+        if self.echo_topic_only:
             logger.info("Mode:       Monitor Only (no model, no publishing)")
         else:
             logger.info(f"Model:      {self.model_path}")
@@ -362,7 +366,7 @@ class LeRobotInferenceNode(Node):
                 logger.info(f"Task:       '{self.task_description}'")
         logger.info(f"Device:     {self.device}")
         logger.info(f"Frequency:  {self.control_freq} Hz")
-        if not self.monitor_only:
+        if not self.echo_topic_only:
             logger.info(f"Max delta:  {self.max_position_delta} rad")
 
         h, w, _ = self.image_shape
@@ -372,7 +376,7 @@ class LeRobotInferenceNode(Node):
         logger.info(f"Cameras:    {self.camera_names}")
         logger.info(f"Arms:       {list(self.arms_config.keys())}")
 
-        if not self.monitor_only and hasattr(self, "model") and hasattr(self.model, "config"):
+        if not self.echo_topic_only and hasattr(self, "model") and hasattr(self.model, "config"):
             config = self.model.config
             chunk_size = getattr(config, "chunk_size", None)
             n_action_steps = getattr(config, "n_action_steps", None)
@@ -402,7 +406,7 @@ class LeRobotInferenceNode(Node):
                     logger.error("temporal_ensemble_coeff is set but ensembler not created!")
 
         # GPU/CPU memory after model load
-        if not self.monitor_only and hasattr(self, "model"):
+        if not self.echo_topic_only and hasattr(self, "model"):
             if torch.cuda.is_available():
                 gpu_mb = torch.cuda.memory_allocated(self.device) / 1e6
                 logger.info(f"GPU memory (weights): {gpu_mb:.0f} MB")
@@ -414,7 +418,7 @@ class LeRobotInferenceNode(Node):
             except ImportError:
                 pass
 
-        if not self.monitor_only and self._is_vla:
+        if not self.echo_topic_only and self._is_vla:
             rtc = self.rtc_config_yaml
             logger.info("┌─ RTC ───────────────────────────────────────────────────┐")
             logger.info("│  Status:              ENABLED                           │")
@@ -434,6 +438,12 @@ class LeRobotInferenceNode(Node):
             )
             self.arm_publishers[arm_name] = self.create_publisher(Float64MultiArray, cmd_topic, 10)
             self.get_logger().info(f"Publishing to: {cmd_topic}")
+
+        if self._monitor_enable:
+            self._monitor_obs_pub = self.create_publisher(Float64MultiArray, "/monitor/obs_state", 10)
+            self._monitor_raw_pub = self.create_publisher(Float64MultiArray, "/monitor/raw_output", 10)
+            self._monitor_cmd_pub = self.create_publisher(Float64MultiArray, "/monitor/control_cmd", 10)
+            self.get_logger().info("Monitor topics enabled: /monitor/{obs_state,raw_output,control_cmd}")
 
     def _setup_vla_inference(self) -> None:
         """Initialise ActionQueue and LatencyTracker for VLA / RTC mode."""
@@ -679,6 +689,9 @@ class LeRobotInferenceNode(Node):
             self.joint_names_config.get("joint_order", []),
         )
 
+        monitor_obs_parts: list[np.ndarray] = []
+        monitor_cmd_parts: list[np.ndarray] = []
+
         for arm_name, arm_config in self.arms_config.items():
             start_idx = arm_config.get("action_start", 0)
             end_idx = arm_config.get("action_end", len(action))
@@ -711,11 +724,42 @@ class LeRobotInferenceNode(Node):
             if arm_name in self.arm_publishers:
                 self.arm_publishers[arm_name].publish(msg)
 
+            if self._monitor_enable:
+                if arm_current is not None:
+                    monitor_obs_parts.append(arm_current)
+                monitor_cmd_parts.append(arm_action)
+
+        if self._monitor_enable and monitor_cmd_parts:
+            self._publish_monitor(
+                obs_state=np.concatenate(monitor_obs_parts) if monitor_obs_parts else np.zeros_like(action),
+                raw_output=action,
+                control_cmd=np.concatenate(monitor_cmd_parts),
+            )
+
         # Debug: track smoothness
         if self._smooth_tracker is not None:
             self._smooth_tracker.record(action)
         self.metrics.record_action_output()
         self._has_published = True
+
+    def _publish_monitor(
+        self,
+        obs_state: np.ndarray,
+        raw_output: np.ndarray,
+        control_cmd: np.ndarray,
+    ) -> None:
+        """Publish monitor topics for real-time inference visualization."""
+        obs_msg = Float64MultiArray()
+        obs_msg.data = obs_state.tolist()
+        self._monitor_obs_pub.publish(obs_msg)
+
+        raw_msg = Float64MultiArray()
+        raw_msg.data = raw_output.tolist()
+        self._monitor_raw_pub.publish(raw_msg)
+
+        cmd_msg = Float64MultiArray()
+        cmd_msg.data = control_cmd.tolist()
+        self._monitor_cmd_pub.publish(cmd_msg)
 
     def _log_input_stats(self) -> None:
         """Periodically log input reception statistics with windowed rates."""
@@ -754,9 +798,9 @@ class LeRobotInferenceNode(Node):
         self._prev_action_output_count = stats["action_output_count"]
         self._prev_frame_counters = dict(frame_counters)
 
-        # Find bottleneck camera (only relevant when not monitor_only)
+        # Find bottleneck camera (only relevant when not echo_topic_only)
         bottleneck_name = None
-        if not self.monitor_only and camera_hz:
+        if not self.echo_topic_only and camera_hz:
             slowest = min(camera_hz.items(), key=lambda x: x[1])
             if slowest[1] < self.control_freq:
                 bottleneck_name = slowest[0]
@@ -771,7 +815,7 @@ class LeRobotInferenceNode(Node):
             marker = "  << bottleneck" if name == bottleneck_name else ""
             logger.info(f"  {name:12s}  {hz:7.1f} Hz  (+{delta} frames){marker}")
 
-        if not self.monitor_only:
+        if not self.echo_topic_only:
             if self._is_vla:
                 self._log_stats_vla(logger, dt, stats, inference_hz, action_output_hz, bottleneck_name, camera_hz)
             else:
@@ -900,7 +944,7 @@ class LeRobotInferenceNode(Node):
 
         # Hold position before publisher is torn down — only if we actually
         # commanded the robot at least once during this session.
-        if not self.monitor_only and self._has_published:
+        if not self.echo_topic_only and self._has_published:
             self._publish_hold_position()
 
         self.strategy.cleanup()

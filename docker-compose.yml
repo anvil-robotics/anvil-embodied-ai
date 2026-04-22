@@ -15,8 +15,9 @@ services:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}
       - CYCLONEDDS_URI=${CYCLONEDDS_URI:-}
-      - MONITOR_ONLY=${MONITOR_ONLY:-false}
+      - ECHO_TOPIC_ONLY=${ECHO_TOPIC_ONLY:-false}
       - DEBUG=${DEBUG:-false}
+      - MONITOR_ENABLE=${MONITOR_ENABLE:-false}
       - DISPLAY=${DISPLAY}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
@@ -36,4 +37,24 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml monitor_only:=${MONITOR_ONLY:-false} debug:=${DEBUG:-false}
+    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml echo_topic_only:=${ECHO_TOPIC_ONLY:-false} debug:=${DEBUG:-false} monitor_enable:=${MONITOR_ENABLE:-false}
+
+  inference-monitor:
+    image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}
+    container_name: lerobot-inference-monitor
+    network_mode: host
+    ipc: host
+    profiles:
+      - monitor
+    depends_on:
+      - inference
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}
+      - CYCLONEDDS_URI=${CYCLONEDDS_URI:-}
+    volumes:
+      - ${MONITOR_OUTPUT_DIR:-./monitor_output}:/workspace/monitor_output
+    command: >
+      ros2 run lerobot_control inference_monitor_node
+        --ros-args
+        -p output_dir:=/workspace/monitor_output

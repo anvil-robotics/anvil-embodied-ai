@@ -1,0 +1,112 @@
+# Monitor smoke test — directly publishes fake /monitor/* topics to test
+# inference_monitor_node in isolation (no inference_node or real model needed).
+#
+# Services:
+#   monitor-pub-obs/raw/cmd  — each publishes one fake /monitor/* topic at 30 Hz
+#   monitor                  — inference_monitor_node: CSV + PNG report on exit
+#   timer                    — exits after TEST_DURATION_SEC, triggers auto-shutdown
+#
+# Usage:
+#   sudo rm -rf /tmp/monitor_smoke_test   # clear stale root-owned files if needed
+#   docker compose -f docker-compose.monitor-smoke-test.yml up --abort-on-container-exit
+#
+# Output:
+#   ${SMOKE_OUTPUT_DIR}/monitor/   — inference_data.csv + inference_report.png
+#   ${SMOKE_OUTPUT_DIR}/logs/      — per-container log files
+#
+# Optional overrides:
+#   IMAGE_TAG          — Docker image tag (default: latest)
+#   ROS_DOMAIN_ID      — ROS domain (default: 42)
+#   SMOKE_OUTPUT_DIR   — root output dir (default: /tmp/monitor_smoke_test)
+#   TEST_DURATION_SEC  — seconds before auto-shutdown (default: 20)
+
+x-ros: &ros
+  image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}
+  network_mode: host
+  ipc: host
+  environment:
+    - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
+    - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    - CYCLONEDDS_URI=
+
+services:
+
+  # ── Timer — exits after TEST_DURATION_SEC, triggers --abort-on-container-exit
+  timer:
+    <<: *ros
+    container_name: monitor-smoke-timer
+    entrypoint: []
+    command:
+      - bash
+      - -c
+      - "echo '[timer] Smoke test will run for ${TEST_DURATION_SEC:-20}s ...'; sleep ${TEST_DURATION_SEC:-20}; echo '[timer] Done.'"
+
+  # ── Fake /monitor/obs_state publisher (30 Hz, 16-DOF) ────────────────────
+  monitor-pub-obs:
+    <<: *ros
+    container_name: monitor-smoke-pub-obs
+    depends_on:
+      - timer
+    command:
+      - ros2
+      - topic
+      - pub
+      - /monitor/obs_state
+      - std_msgs/msg/Float64MultiArray
+      - "{data: [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.11, 0.21, 0.31, 0.41, 0.51, 0.61, 0.71, 0.81]}"
+      - -r
+      - "30"
+
+  # ── Fake /monitor/raw_output publisher (30 Hz, 16-DOF) ───────────────────
+  monitor-pub-raw:
+    <<: *ros
+    container_name: monitor-smoke-pub-raw
+    depends_on:
+      - timer
+    command:
+      - ros2
+      - topic
+      - pub
+      - /monitor/raw_output
+      - std_msgs/msg/Float64MultiArray
+      - "{data: [0.12, 0.22, 0.32, 0.42, 0.52, 0.62, 0.72, 0.82, 0.13, 0.23, 0.33, 0.43, 0.53, 0.63, 0.73, 0.83]}"
+      - -r
+      - "30"
+
+  # ── Fake /monitor/control_cmd publisher (30 Hz, 16-DOF) ──────────────────
+  monitor-pub-cmd:
+    <<: *ros
+    container_name: monitor-smoke-pub-cmd
+    depends_on:
+      - timer
+    command:
+      - ros2
+      - topic
+      - pub
+      - /monitor/control_cmd
+      - std_msgs/msg/Float64MultiArray
+      - "{data: [0.11, 0.21, 0.31, 0.41, 0.51, 0.61, 0.71, 0.81, 0.12, 0.22, 0.32, 0.42, 0.52, 0.62, 0.72, 0.82]}"
+      - -r
+      - "30"
+
+  # ── Monitor node (subscribes /monitor/*, writes CSV) ─────────────────────
+  monitor:
+    <<: *ros
+    container_name: monitor-smoke-monitor
+    depends_on:
+      - monitor-pub-obs
+      - monitor-pub-raw
+      - monitor-pub-cmd
+    volumes:
+      # Mount fixed local source to override stale built version in image
+      - ./ros2/src/lerobot_control/lerobot_control/inference_monitor_node.py:/workspace/build/lerobot_control/lerobot_control/inference_monitor_node.py:ro
+      - ${SMOKE_OUTPUT_DIR:-/tmp/monitor_smoke_test}/monitor:/workspace/monitor_output
+    command:
+      - ros2
+      - run
+      - lerobot_control
+      - inference_monitor_node
+      - --ros-args
+      - -p
+      - output_dir:=/workspace/monitor_output
+    stop_grace_period: 15s

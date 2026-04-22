@@ -72,7 +72,7 @@ services:
         condition: service_healthy
     command: >
       ros2 launch lerobot_control inference.launch.py
-        monitor_only:=true
+        echo_topic_only:=true
         config_file:=/workspace/config.yaml
 
   inference:

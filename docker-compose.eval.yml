@@ -36,6 +36,8 @@
 #   EVAL_SYNTHESIZE_COMMANDS     — "true" to republish joint_states as GT commands (auto-set)
 #   EVAL_SYNTHESIZE_COMMAND_TOPIC — topic to publish synthesized commands (auto-set)
 #   EVAL_SYNTHESIZE_ARM_JOINT_NAMES — ROS2 array of joint names to extract (auto-set)
+#   MONITOR_ENABLE        — "true" to publish /monitor/* topics for inference_monitor_node
+#   MONITOR_OUTPUT_DIR    — host path for monitor CSV (auto-set to OUTPUT_DIR/monitor)
 
 x-base: &base
   image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}
@@ -71,10 +73,31 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/test_bridge.xml
+      - MONITOR_ENABLE=${MONITOR_ENABLE:-false}
     command: >
       ros2 launch lerobot_control inference.launch.py
         model_path:=/workspace/model
         config_file:=/workspace/config.yaml
+        monitor_enable:=${MONITOR_ENABLE:-false}
+
+  # ── 4. Inference monitor — real-time Rerun + CSV (optional, profile: monitor) ──
+  inference-monitor:
+    <<: *base
+    container_name: lerobot-eval-monitor
+    profiles:
+      - monitor
+    depends_on:
+      - inference
+    volumes:
+      - ${MONITOR_OUTPUT_DIR:-/tmp/monitor_output}:/workspace/monitor_output
+    command: >
+      ros2 run lerobot_control inference_monitor_node
+        --ros-args
+        -p output_dir:=/workspace/monitor_output
 
   # ── 2. MCAP player — replays episodes, coordinates eval flow ─────────────
   mcap-player:
