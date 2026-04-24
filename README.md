@@ -287,6 +287,32 @@ model:
   task_description: "Grab the gray doll and put it in the bucket"
 ```
 
+#### Fine-tune from a local checkpoint
+
+To start a **new** training run using a previously trained checkpoint as the initial weights (step counter resets to 0, new output directory):
+
+```bash
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.path=model_zoo/my-task/checkpoints/last/pretrained_model
+```
+
+When `--policy.path` is given, `--policy.type` is not needed — the policy type is read from the checkpoint. Backbone injection is also skipped since the backbone config is already embedded in the checkpoint.
+
+> **`--policy.path` vs `--resume`:** `--policy.path` starts a fresh run from the checkpoint's weights (new output dir, step 0). `--resume` continues a stopped run in-place (same output dir, step counter carries over). Use `--policy.path` to fine-tune on a new dataset or with different hyperparameters; use `--resume` to recover from an interrupted training.
+
+For VLA policies (SmolVLA, Pi0, Pi0.5), `--policy.pretrained_path` can also point to a local directory instead of a HuggingFace repo ID:
+
+```bash
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=smolvla \
+  --policy.pretrained_path=/path/to/local/smolvla_base \
+  --policy.load_vlm_weights=true \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --task-description="Grab the gray doll and put it in the bucket"
+```
+
 #### Resume a run
 
 ```bash
