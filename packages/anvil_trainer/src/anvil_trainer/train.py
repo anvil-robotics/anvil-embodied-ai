@@ -81,19 +81,6 @@ def _find_wandb_run_id(job_path: Path) -> tuple[str | None, str | None, str | No
         return None, None, None
 
 
-def _wandb_enabled(job_path: Path, checkpoint: str) -> bool:
-    """Return True if W&B was enabled — either via CLI or in the saved train_config.json."""
-    if any(a == "--wandb.enable=true" for a in sys.argv):
-        return True
-    cfg = job_path / "checkpoints" / checkpoint / "pretrained_model" / "train_config.json"
-    if not cfg.exists():
-        return False
-    try:
-        return bool(json.loads(cfg.read_text()).get("wandb", {}).get("enable", False))
-    except Exception:
-        return False
-
-
 def _delete_wandb_run(old_run_id: str, new_run: object) -> None:
     """Delete the old W&B run via the API after a successful forked resume."""
     try:
@@ -192,7 +179,7 @@ def train(config: TrainingConfig | None = None) -> None:
         _wandb_fork_active = (
             config.resume_job_path is not None
             and config.resume_checkpoint != "last"
-            and _wandb_enabled(Path(config.resume_job_path), config.resume_checkpoint)
+            and any(a == "--wandb.enable=true" for a in sys.argv)
         )
 
         if _wandb_fork_active:
