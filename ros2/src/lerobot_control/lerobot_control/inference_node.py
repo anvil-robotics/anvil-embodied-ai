@@ -34,6 +34,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 
 from .action_limiter import ActionLimiter
+from .delta_restore import resolve_action_type, restore_delta_chunk
 from .metrics_tracker import MetricsTracker
 from .model_loader import ModelLoader, set_deterministic_mode
 
@@ -72,11 +73,10 @@ class LeRobotInferenceNode(Node):
         # Reference joint state captured at the moment each action chunk was
         # generated (in model/observation order).  All queued steps in the chunk
         # share this reference so delta restoration is consistent with training.
+        # _delta_ref_state and _abs_shadow_queue must always be reset together;
+        # use _reset_delta_state() in any future reload or episode-boundary path.
         self._delta_ref_state: np.ndarray | None = None
-        # Shadow queue of pre-restored absolute actions for delta models.
-        # The model's internal queue stores normalized values; we denormalize the
-        # full chunk together then restore delta → absolute outside the model queue.
-        self._abs_shadow_queue: list[np.ndarray] = []
+        self._abs_shadow_queue: deque[np.ndarray] = deque()
 
         self._shutting_down: bool = False
         self._has_published: bool = False
@@ -206,9 +206,7 @@ class LeRobotInferenceNode(Node):
         self.model_type = model_cfg.get("type") or meta.get("model_type")
 
         # action_type from anvil_config.json — must match training
-        self.action_type: str = meta.get("action_type", "absolute")
-        if self.action_type == "absolute" and meta.get("use_delta_actions", False):
-            self.action_type = "delta_obs_t"
+        self.action_type: str = resolve_action_type(meta)
         self.use_delta_actions: bool = self.action_type in ("delta_obs_t", "delta_sequential")
         self.delta_exclude_joints: list[str] = meta.get("delta_exclude_joints", [])
 
@@ -656,28 +654,18 @@ class LeRobotInferenceNode(Node):
                 # values from a shadow queue so we never re-enter normalized space.
                 if self.use_delta_actions:
                     if _is_new_chunk and self._delta_ref_state is not None:
-                        from lerobot_control.delta_restore import restore_delta_chunk as _rdc
-
-                        def _pp_np(a_t: object) -> np.ndarray:
-                            if self.postprocessor:
-                                a_t = self.postprocessor.process_action(a_t)  # type: ignore[arg-type]
-                            if isinstance(a_t, torch.Tensor):
-                                return a_t.detach().cpu().numpy().flatten()
-                            return np.asarray(a_t).flatten()
-
                         if _rest_norm is not None:
-                            _rest_denorm = [_pp_np(a) for a in _rest_norm]
+                            _rest_denorm = [self._denorm_queue_action(a) for a in _rest_norm]
                             _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
                         else:
                             _chunk = action[np.newaxis]
-                        _abs = _rdc(_chunk, self._delta_ref_state, self.action_type, self._delta_exclude_indices)
-                        self._abs_shadow_queue = list(_abs[1:])
+                        _abs = restore_delta_chunk(_chunk, self._delta_ref_state, self.action_type, self._delta_exclude_indices)
+                        self._abs_shadow_queue = deque(_abs[1:])
                         action = _abs[0]
                     elif self._abs_shadow_queue:
-                        action = self._abs_shadow_queue.pop(0)
+                        action = self._abs_shadow_queue.popleft()
                     elif not hasattr(self.model, "_queues") and self._delta_ref_state is not None:
-                        from lerobot_control.delta_restore import restore_delta_chunk as _rdc
-                        action = _rdc(action[np.newaxis], self._delta_ref_state, self.action_type, self._delta_exclude_indices)[0]
+                        action = restore_delta_chunk(action[np.newaxis], self._delta_ref_state, self.action_type, self._delta_exclude_indices)[0]
 
                 self._classic_action_deque.append(action)
                 self.metrics.record_inference()
@@ -719,6 +707,19 @@ class LeRobotInferenceNode(Node):
             import traceback
             self.get_logger().error(f"Publish error: {e}")
             self.get_logger().error(traceback.format_exc())
+
+    def _reset_delta_state(self) -> None:
+        """Reset delta-restore state; call this whenever the model is reloaded."""
+        self._delta_ref_state = None
+        self._abs_shadow_queue.clear()
+
+    def _denorm_queue_action(self, a: object) -> np.ndarray:
+        """Apply postprocessor and convert a queued normalized tensor to a flat numpy array."""
+        if self.postprocessor:
+            a = self.postprocessor.process_action(a)  # type: ignore[arg-type]
+        if isinstance(a, torch.Tensor):
+            return a.detach().cpu().numpy().flatten()
+        return np.asarray(a).flatten()
 
     def _move_to_device(self, data):
         """Recursively move tensors to the configured device."""

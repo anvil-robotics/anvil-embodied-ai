@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -88,12 +89,11 @@ class EpisodeEvaluator:
         ground_truth_actions: list[np.ndarray] = []
         raw_actions: list[np.ndarray] = []
 
-        # Reset model state (clears action queues for ACT)
         reset_model_state(self.model)
         self._delta_ref_state = None   # reset per-episode delta reference state
         self._prev_gt_action = None    # reset sequential GT reference
         # Shadow queue of pre-restored absolute actions (avoids touching model's normalized queue)
-        _abs_shadow_queue: list[np.ndarray] = []
+        _abs_shadow_queue: deque[np.ndarray] = deque()
 
         exclude_indices = list(self._resolve_exclude_indices())
 
@@ -172,11 +172,11 @@ class EpisodeEvaluator:
                         _chunk, self._delta_ref_state, self.action_type, exclude_indices
                     )
                     # Populate shadow queue with future absolute actions (skip index 0 = current)
-                    _abs_shadow_queue = list(_abs[1:])
+                    _abs_shadow_queue = deque(_abs[1:])
                     action = _abs[0]
                 elif _abs_shadow_queue:
                     # Non-new-chunk with queue model: pop pre-restored absolute action
-                    action = _abs_shadow_queue.pop(0)
+                    action = _abs_shadow_queue.popleft()
                 elif not hasattr(self.model, "_queues"):
                     # Models without chunk queue (e.g. ACT): per-step restore
                     _ref = self._delta_ref_state if self._delta_ref_state is not None else _obs_flat

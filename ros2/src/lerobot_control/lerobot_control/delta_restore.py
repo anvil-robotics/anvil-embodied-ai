@@ -6,21 +6,36 @@ converts a chunk of raw model delta outputs to absolute joint positions.
   chunk_np        : (chunk_size, D) float64 ndarray — raw model output (delta space)
   obs_t           : (D,) float64 ndarray — observation state at chunk generation time
   action_type     : "delta_obs_t" | "delta_sequential"
-  exclude_indices : list[int] — joints kept absolute (not deltaized during training)
+  exclude_indices : set[int] | list[int] — joints kept absolute (not deltaized during training)
   returns         : (chunk_size, D) float64 ndarray — absolute actions
 
 Both modes leave exclude_indices joints unchanged (they are already absolute in model output).
+
+resolve_action_type(cfg) normalises the action_type field from a checkpoint anvil_config dict,
+applying backward-compat mapping from the old use_delta_actions boolean.
 """
 from __future__ import annotations
 
 import numpy as np
 
 
+def resolve_action_type(cfg: dict) -> str:
+    """Return normalised action_type string from an anvil_config dict.
+
+    Handles backward compat: old checkpoints without action_type but with
+    use_delta_actions=True are mapped to "delta_obs_t".
+    """
+    action_type = cfg.get("action_type", "absolute")
+    if action_type == "absolute" and cfg.get("use_delta_actions", False):
+        return "delta_obs_t"
+    return action_type
+
+
 def restore_delta_chunk(
     chunk_np: np.ndarray,
     obs_t: np.ndarray,
     action_type: str,
-    exclude_indices: list[int],
+    exclude_indices: set[int] | list[int],
 ) -> np.ndarray:
     """Restore a chunk of delta actions to absolute joint positions.
 
@@ -29,6 +44,7 @@ def restore_delta_chunk(
         obs_t: Observation state at chunk generation time, shape (D,).
         action_type: "delta_obs_t" or "delta_sequential".
         exclude_indices: Joint indices kept in absolute space during training.
+            Pass a pre-computed set to avoid repeated conversion.
 
     Returns:
         Absolute actions, shape (chunk_size, D).
@@ -40,7 +56,7 @@ def restore_delta_chunk(
         chunk_np = chunk_np[np.newaxis, :]
 
     chunk_size, D = chunk_np.shape
-    excl = set(exclude_indices)
+    excl = exclude_indices if isinstance(exclude_indices, set) else set(exclude_indices)
     non_excl = [i for i in range(D) if i not in excl]
 
     abs_chunk = chunk_np.copy()  # excluded joints: keep raw value (already absolute)
