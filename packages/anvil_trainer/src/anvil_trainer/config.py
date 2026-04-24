@@ -26,6 +26,24 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 
+def _parse_resume_path(raw: str) -> tuple[str, str]:
+    """Split a --resume path into (job_root, checkpoint_name).
+
+    Examples::
+
+        "model_zoo/foo/bar"                    -> ("model_zoo/foo/bar", "last")
+        "model_zoo/foo/bar/checkpoints/020000" -> ("model_zoo/foo/bar", "020000")
+    """
+    p = Path(raw)
+    parts = p.parts
+    if "checkpoints" in parts:
+        idx = list(parts).index("checkpoints")
+        job_root = str(Path(*parts[:idx]))
+        ckpt = parts[idx + 1] if idx + 1 < len(parts) else "last"
+        return job_root, ckpt
+    return raw, "last"
+
+
 @dataclass
 class TrainingConfig:
     """
@@ -46,14 +64,16 @@ class TrainingConfig:
     task_override: str | None = None
     use_delta_actions: bool = False
     delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when use_delta_actions=True
+    delta_stats_n_steps: int = 8  # Number of look-ahead steps for delta stats (1 = single-frame, N = include k=0..N multi-step deltas)
     dataset_root: str | None = None
     output_dir: str | None = None
-    resume_job_path: str | None = None
+    resume_job_path: str | None = None   # Job root dir (before checkpoints/)
+    resume_checkpoint: str = "last"       # Checkpoint to resume from ("last" or e.g. "020000")
     split_ratio: list[float] = field(default_factory=lambda: [8.0, 1.0, 1.0])  # train/val/test episode split ratios
     # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50 (VLA models ignore this)
     backbone: str = "resnet18"
     note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
-    note_append: str | None = None  # Append to existing note during --resume-job
+    note_append: str | None = None  # Append to existing note during --resume
 
     @classmethod
     def from_env_and_args(cls) -> TrainingConfig:
@@ -103,6 +123,14 @@ class TrainingConfig:
                 sys.argv.remove(arg)
                 break
 
+        # Number of look-ahead steps for delta stats computation
+        delta_stats_n_steps = 8
+        for arg in sys.argv:
+            if arg.startswith("--delta-stats-n-steps="):
+                delta_stats_n_steps = int(arg.split("=", 1)[1])
+                sys.argv.remove(arg)
+                break
+
         # Episode split ratios from --split-ratio arg (remove to avoid lerobot arg parsing error)
         split_ratio = [8.0, 1.0, 1.0]  # default: train/val/test
         for arg in sys.argv:
@@ -128,29 +156,73 @@ class TrainingConfig:
                 policy_type = arg.split("=", 1)[1]
                 break
 
-        # Resume job from --resume-job=PATH arg
-        resume_job_path = None
+        # --resume=PATH  (anvil flag — value is a path, not a boolean)
+        # lerobot's own --resume=true/false is left in sys.argv untouched.
+        resume_raw: str | None = None
         for arg in sys.argv:
-            if arg.startswith("--resume-job="):
-                resume_job_path = arg.split("=", 1)[1]
-                sys.argv.remove(arg)
-                break
+            if arg.startswith("--resume="):
+                val = arg.split("=", 1)[1]
+                if val.lower() not in ("true", "false", "1", "0"):
+                    resume_raw = val
+                    sys.argv.remove(arg)
+                    break
 
-        # If --resume or --output_dir is passed directly, warn and tell to use --resume-job
-        if any(a.startswith("--resume") or a.startswith("--output_dir") for a in sys.argv):
-            log.warning("[anvil_trainer] Manual --resume or --output_dir detected. Please use --resume-job=PATH instead for better compatibility.")
+        resume_job_path: str | None = None
+        resume_checkpoint: str = "last"
+        if resume_raw is not None:
+            resume_job_path, resume_checkpoint = _parse_resume_path(resume_raw)
 
         is_resume = resume_job_path is not None
 
         if is_resume:
+            # If a specific checkpoint was requested, redirect 'last' symlink to it so
+            # lerobot loads weights and step count from the correct checkpoint.
+            if resume_checkpoint != "last":
+                target_dir = Path(resume_job_path) / "checkpoints" / resume_checkpoint
+                if not target_dir.exists():
+                    raise FileNotFoundError(
+                        f"[anvil_trainer] Checkpoint not found: {target_dir}"
+                    )
+                last_link = Path(resume_job_path) / "checkpoints" / "last"
+                if last_link.is_symlink() or not last_link.exists():
+                    last_link.unlink(missing_ok=True)
+                    last_link.symlink_to(resume_checkpoint)
+                    log.info("[anvil_trainer] Updated 'last' → '%s' for resume", resume_checkpoint)
+                else:
+                    log.warning(
+                        "[anvil_trainer] 'last' is a real directory; cannot redirect to '%s'. "
+                        "Lerobot will resume from the existing 'last' checkpoint.",
+                        resume_checkpoint,
+                    )
+
             # Inject lerobot resume flags
             if not any(a.startswith("--resume=") for a in sys.argv) and "--resume" not in sys.argv:
                 sys.argv.append("--resume=true")
             if not any(a.startswith("--output_dir=") for a in sys.argv):
                 sys.argv.append(f"--output_dir={resume_job_path}")
 
-            # Extract output_dir for our internal config
             output_dir = resume_job_path
+
+            # Auto-inherit delta action settings from the target checkpoint if not explicitly set
+            if not use_delta_actions:
+                ckpt_anvil = (
+                    Path(resume_job_path) / "checkpoints" / resume_checkpoint
+                    / "pretrained_model" / "anvil_config.json"
+                )
+                if ckpt_anvil.exists():
+                    try:
+                        prev = json.loads(ckpt_anvil.read_text())
+                        if prev.get("use_delta_actions"):
+                            use_delta_actions = True
+                            log.info("[anvil_trainer] --resume: inherited use_delta_actions=True from checkpoint")
+                        if delta_exclude_joints is None and prev.get("delta_exclude_joints"):
+                            delta_exclude_joints = prev["delta_exclude_joints"]
+                            log.info(
+                                "[anvil_trainer] --resume: inherited delta_exclude_joints=%s from checkpoint",
+                                delta_exclude_joints,
+                            )
+                    except Exception:
+                        pass
         else:
             # Resolve output_dir for NEW job: model_zoo/{dataset_name}/{run_name}
             # Extract job_name if provided (passed through to lerobot as-is)
@@ -256,9 +328,11 @@ class TrainingConfig:
             task_override=task_override,
             use_delta_actions=use_delta_actions,
             delta_exclude_joints=delta_exclude_joints,
+            delta_stats_n_steps=delta_stats_n_steps,
             dataset_root=dataset_root,
             output_dir=output_dir,
             resume_job_path=resume_job_path,
+            resume_checkpoint=resume_checkpoint,
             split_ratio=split_ratio,
             backbone=backbone,
             note=note,
@@ -311,13 +385,13 @@ def _resolve_note(config: TrainingConfig) -> str | None:
     """
     Resolve the final note string for this run.
 
-    During a new run (no --resume-job):
+    During a new run (no --resume):
       - --note=TEXT        → use TEXT
       - --note-append=TEXT → treat as plain note (no old note to append to)
       - neither            → None
 
-    During --resume-job:
-      - neither            → auto-preserve: read old note from last checkpoint
+    During --resume:
+      - neither            → auto-preserve: read old note from the target checkpoint
       - --note=TEXT        → replace: discard old note, use TEXT
       - --note-append=TEXT → append: old note + "\\n[YYYY-MM-DD] TEXT"
     """
@@ -326,10 +400,10 @@ def _resolve_note(config: TrainingConfig) -> str | None:
             return config.note_append
         return config.note
 
-    # Resume: read old note from last checkpoint's anvil_config.json
+    # Resume: read old note from the target checkpoint's anvil_config.json
     old_note: str | None = None
     last_anvil = (
-        Path(config.resume_job_path) / "checkpoints" / "last"
+        Path(config.resume_job_path) / "checkpoints" / config.resume_checkpoint
         / "pretrained_model" / "anvil_config.json"
     )
     if last_anvil.exists():

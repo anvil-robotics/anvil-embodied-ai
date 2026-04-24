@@ -84,15 +84,35 @@ Record teleoperation demos as ROS2 MCAP files through an [Anvil Devbox](https://
 
 Convert MCAP recordings from teleoperation sessions into LeRobot v3.0 datasets.
 
-Two teleop modes are supported — pick the config that matches your recording:
+Pick the config that matches your recording mode and arm count:
+
+| Config | Teleop mode | Arms | Action source |
+|--------|-------------|------|---------------|
+| `openarm_bimanual.yaml` | Leader-follower | Bimanual | Leader joint positions |
+| `openarm_bimanual_quest.yaml` | Quest VR | Bimanual | Command topics |
+| `openarm_single_quest.yaml` | Quest VR | Single (right) | Command topics |
+| `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | Observation lookahead (`action_from_observation`) |
 
 ```bash
-# For data recorded with leader-follower
+# Leader-follower, bimanual
 uv run mcap-convert --input-dir data/raw/my-sessions --config configs/mcap_converter/openarm_bimanual.yaml
 
-# For data recorded with Quest
+# Quest VR, bimanual
 uv run mcap-convert --input-dir data/raw/my-sessions --config configs/mcap_converter/openarm_bimanual_quest.yaml
+
+# Quest VR, single-arm — command topic was not recorded
+uv run mcap-convert --input-dir data/raw/my-sessions --config configs/mcap_converter/openarm_single_quest_afo.yaml
 ```
+
+**`action_from_observation`**
+
+Use this when the command topic (`/follower_*/commands`) was not captured in the MCAP. Instead of reading from a command topic, the converter shifts the observation forward by N frames:
+
+```
+action[t] = observation.state[t + N]   (default N = 10, ≈333 ms at 30 fps)
+```
+
+This is pre-configured in `openarm_single_quest_afo.yaml`. To adjust the lookahead, set `action_from_observation_n` in the config file. When `action_from_observation: true` is set, any `action_topics` entries in the config are ignored — the pipeline is deterministic regardless of what was captured.
 
 > **Output path:** the dataset is always saved to `<output-dir>/<input-dir-name>/`. With the default setting (`--output-dir data/datasets`), the result is `data/datasets/my-sessions/`.
 
@@ -151,8 +171,9 @@ Checkpoints are saved to `model_zoo/<dataset>/<policy>_<timestamp>/` by default.
 | `--save_freq=10000` | 10k | Checkpoint interval |
 | `--use-delta-actions` | off | Convert actions to delta form (action − observation.state). Persisted to `anvil_config.json` so inference applies the inverse automatically. |
 | `--delta-exclude-joints=JOINT1,JOINT2` | none | Joints to keep in absolute space when `--use-delta-actions` is on. Resolved by name from the dataset's `meta/info.json`. Useful for grippers, which often train better in absolute space (e.g. `--delta-exclude-joints=left_finger,right_finger`). |
-| `--policy.normalization_mapping='{...}'` | policy default | e.g. `{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}`<br><br>Keys:<br>`ACTION` · `STATE` · `VISUAL`<br>Values:<br>`MEAN_STD`   — normalise by μ/σ<br>`MIN_MAX`    — normalise to [0,1]<br>`QUANTILE10` — normalise by p10/p90 (Pi0.5 default; requires quantile stats\*)<br>`IDENTITY`   — passthrough (always use for images)<br><br>mcap-convert datasets lack quantile stats — use `MEAN_STD` for `ACTION`/`STATE`. |
-| `--resume=true` | off | Resume from `--output_dir` checkpoint |
+| `--delta-stats-n-steps=N` | 8 | Look-ahead steps used when computing delta normalization statistics. Includes multi-step displacements `action[t+k] - state[t]` for k = 0…N in the stats, so the normalizer's range covers the full chunk instead of only single-step deltas. Prevents loss imbalance for ACT + delta and widens the MIN_MAX clip boundary for Diffusion + delta. Set to `1` to revert to single-frame delta stats. Episode boundaries are respected — cross-episode pairs are excluded. |
+| `--policy.normalization_mapping='{...}'` | policy default | e.g. `{"ACTION":"MIN_MAX","STATE":"MEAN_STD","VISUAL":"IDENTITY"}`<br><br>Keys:<br>`ACTION` · `STATE` · `VISUAL`<br>Values:<br>`MEAN_STD`   — normalise by μ/σ<br>`MIN_MAX`    — normalise to [−1, 1] by observed min/max<br>`QUANTILE10` — normalise by p10/p90 (Pi0.5 default; requires quantile stats\*)<br>`IDENTITY`   — passthrough (always use for images)<br><br>**`ACTION` guidance by policy:**<br>• **Diffusion** — use `MIN_MAX` (default). Diffusion clips the denoised action to ±1 in normalised space at every step (`clip_sample=True, clip_sample_range=1.0`); `MEAN_STD` causes extreme actions beyond ±1 σ to be silently truncated, hurting peak tracking.<br>• **ACT / SmolVLA / Pi0** — use `MEAN_STD`.<br>• **Pi0.5** — use `MEAN_STD` unless quantile stats are available (see note below).<br><br>`QUANTILE10` requires `q01`/`q99` stats not produced by `mcap-convert` — see note below. `MIN_MAX` and `MEAN_STD` are always available. |
+| `--resume=PATH` | — | Resume a previous job. `PATH` is the job root or a specific checkpoint dir (e.g. `model_zoo/my-task/checkpoints/020000`). Omit checkpoint to resume from `last`. |
 
 \* quantile stats (`q01`/`q99`) are not produced by `mcap-convert`. See [Pi0.5 — Normalization mapping](docs/training-tips.md#normalization-mapping) for how to add them or switch normalization method.
 
@@ -191,7 +212,7 @@ Good at tasks with multimodal action distributions (e.g. the robot can complete 
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
-  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --policy.normalization_mapping='{"ACTION":"MIN_MAX","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
   --wandb.enable=false \  # set true to save training logs to W&B
 ```
 
@@ -269,10 +290,14 @@ model:
 #### Resume a run
 
 ```bash
-uv run anvil-trainer --resume-job=model_zoo/pick-and-place
+# Resume from the latest checkpoint
+uv run anvil-trainer --resume=model_zoo/pick-and-place
+
+# Resume from a specific checkpoint (e.g. step 20000)
+uv run anvil-trainer --resume=model_zoo/pick-and-place/checkpoints/020000
 ```
 
-Only pass `--resume-job` — all other settings are restored from the saved `train_config.json` in the checkpoint.
+Only pass `--resume` — all other settings are restored from the saved `train_config.json` in the checkpoint. Delta action settings (`--use-delta-actions`, `--delta-exclude-joints`) are inherited automatically from the checkpoint's `anvil_config.json`.
 
 ### 3. Offline Evaluation
 
@@ -449,9 +474,12 @@ inference_tuning:
 
 **Safety**
 ```yaml
-# Uncomment to override the code default of 0.1 rad/step.
 # safety:
-#   max_position_delta: 0.1
+#   max_position_delta: 0.1   # Max joint position change per step (default: 0.1 rad).
+#   min_position_delta: 0.05  # Min per-joint change required to publish a new command.
+#                             #   Holds the last command until cumulative change exceeds
+#                             #   this threshold — useful when model delta outputs are
+#                             #   too small to overcome motor friction. Default: disabled.
 ```
 
 #### Distributed Inference Architecture

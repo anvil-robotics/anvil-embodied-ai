@@ -26,11 +26,9 @@ Environment variables:
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
-from abc import ABC, abstractmethod
 from pathlib import Path
 
 from anvil_trainer.config import TrainingConfig, _resolve_note
@@ -53,46 +51,7 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 
-def _resolve_note(config: TrainingConfig) -> str | None:
-    """
-    Resolve the final note string for this run.
-
-    During a new run (no --resume-job):
-      - --note=TEXT        → use TEXT
-      - --note-append=TEXT → treat as plain note (no old note to append to)
-      - neither            → None
-
-    During --resume-job:
-      - neither            → auto-preserve: read old note from last checkpoint
-      - --note=TEXT        → replace: discard old note, use TEXT
-      - --note-append=TEXT → append: old note + "\\n[YYYY-MM-DD] TEXT"
-    """
-    if not config.resume_job_path:
-        if config.note_append and not config.note:
-            return config.note_append
-        return config.note
-
-    # Resume: read old note from last checkpoint's anvil_config.json
-    old_note: str | None = None
-    last_anvil = (
-        Path(config.resume_job_path) / "checkpoints" / "last"
-        / "pretrained_model" / "anvil_config.json"
-    )
-    if last_anvil.exists():
-        try:
-            data = json.loads(last_anvil.read_text())
-            old_note = data.get("note") or None
-        except Exception:
-            pass
-
-    if config.note is not None:
-        return config.note  # explicit replace
-    if config.note_append is not None:
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        if old_note:
-            return f"{old_note}\n[{date_str}] {config.note_append}"
-        return f"[{date_str}] {config.note_append}"
-    return old_note  # auto-preserve
+# _resolve_note is defined in anvil_trainer.config and imported above.
 
 
 # =============================================================================
@@ -127,16 +86,46 @@ def train(config: TrainingConfig | None = None) -> None:
 
     # Resume path injection (requires patches-free access to sys.argv)
     if config.resume_job_path:
-        # LeRobot 0.5.1 saves train_config.json inside each checkpoint
-        last_cfg_path = Path(config.resume_job_path) / "checkpoints" / "last" / "pretrained_model" / "train_config.json"
-        if last_cfg_path.exists() and not any(a.startswith("--config_path=") for a in sys.argv):
-            sys.argv.append(f"--config_path={last_cfg_path}")
-            log.info("[anvil_trainer] Resuming with config from last checkpoint: %s", last_cfg_path)
+        # LeRobot 0.5.1 saves train_config.json inside each checkpoint.
+        # Use the specific checkpoint (e.g. "020000") if given, otherwise "last".
+        ckpt_cfg_path = (
+            Path(config.resume_job_path) / "checkpoints"
+            / config.resume_checkpoint / "pretrained_model" / "train_config.json"
+        )
+        if ckpt_cfg_path.exists() and not any(a.startswith("--config_path=") for a in sys.argv):
+            sys.argv.append(f"--config_path={ckpt_cfg_path}")
+            log.info("[anvil_trainer] Resuming with config from checkpoint '%s': %s", config.resume_checkpoint, ckpt_cfg_path)
 
     # Install all lerobot patches; they are torn down on block exit even if
     # lerobot_train() raises.
     with patched_lerobot(config):
         from lerobot.scripts.lerobot_train import train as lerobot_train
+
+        # Patch init_logging (in lerobot_train's namespace) so our resume summary
+        # is emitted right after lerobot sets up its log format — and therefore
+        # appears in the same format, just before the "Output dir:" line.
+        if config.resume_job_path:
+            import lerobot.scripts.lerobot_train as _lt
+            _orig_init_logging = _lt.init_logging
+
+            def _resume_init_logging(*args, **kwargs):
+                import lerobot.scripts.lerobot_train as _lt_inner
+                _lt_inner.init_logging = _orig_init_logging  # self-restore
+                _orig_init_logging(*args, **kwargs)
+                ckpt = config.resume_checkpoint
+                if ckpt == "last":
+                    last_link = Path(config.resume_job_path) / "checkpoints" / "last"
+                    if last_link.is_symlink():
+                        ckpt = f"last → {last_link.resolve().name}"
+                import logging as _logging
+                _logging.info(
+                    "[anvil_trainer] Resuming: %s  (checkpoint: %s)",
+                    config.resume_job_path,
+                    ckpt,
+                )
+
+            _lt.init_logging = _resume_init_logging
+
         lerobot_train()
 
 
@@ -165,8 +154,11 @@ Examples:
     --policy.type=act --job_name=grabbing-w1 \\
     --camera-filter=chest,waist --use-delta-actions
 
-  # Resume a stopped run
-  anvil-trainer --resume-job=model_zoo/my-dataset/grabbing-w1
+  # Resume a stopped run (from latest checkpoint)
+  anvil-trainer --resume=model_zoo/my-dataset/grabbing-w1
+
+  # Resume from a specific checkpoint (e.g. step 20000)
+  anvil-trainer --resume=model_zoo/my-dataset/grabbing-w1/checkpoints/020000
 
 ===============================================================================
 
@@ -177,9 +169,13 @@ Anvil-specific flags (stripped before passing to LeRobot):
       Persisted to anvil_config.json in each checkpoint so inference
       can read it automatically.
 
-  --resume-job=PATH
+  --resume=PATH
       Resume a previously stopped training job.
-      Shortcut for --resume=true --output_dir=PATH.
+      PATH can be the job root dir or a specific checkpoint dir:
+        --resume=model_zoo/my-dataset/grabbing-w1              (resume from last)
+        --resume=model_zoo/my-dataset/grabbing-w1/checkpoints/020000  (resume from step 20000)
+      When a specific checkpoint is given, the 'last' symlink is updated to point
+      to it so lerobot loads weights and the step counter from that checkpoint.
 
   --task-description=TEXT
       Task prompt for SmolVLA. Overrides LEROBOT_TASK_OVERRIDE env var.
@@ -192,13 +188,13 @@ Anvil-specific flags (stripped before passing to LeRobot):
   --note=TEXT
       Free-text note attached to this run.
       Stored in anvil_config.json in each checkpoint and sent to wandb as run notes.
-      During --resume-job: replaces the previous note.
+      During --resume: replaces the previous note.
       Example: --note="lr=1e-4, wider backbone, retrain from scratch"
 
   --note-append=TEXT
-      Append TEXT to the existing note when using --resume-job.
+      Append TEXT to the existing note when using --resume.
       Prefixes TEXT with the current date: "[YYYY-MM-DD] TEXT".
-      On a new run (no --resume-job), treated as plain --note.
+      On a new run (no --resume), treated as plain --note.
       Example: --note-append="switched to resnet34, bumped lr to 3e-4"
 
   --split-ratio=TRAIN,VAL,TEST
@@ -214,7 +210,7 @@ Anvil-specific flags (stripped before passing to LeRobot):
 
   --output_dir=PATH
       Override the default checkpoint directory (default: model_zoo/).
-      For resuming, use --resume-job instead.
+      For resuming, use --resume instead.
 
 Output:
   Checkpoints  →  model_zoo/<job_name>/checkpoints/<step>/pretrained_model/
