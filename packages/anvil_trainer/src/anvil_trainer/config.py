@@ -62,9 +62,13 @@ class TrainingConfig:
 
     exclude_observation: list[str] | None = None
     task_override: str | None = None
-    use_delta_actions: bool = False
-    delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when use_delta_actions=True
-    delta_stats_n_steps: int = 1  # Number of look-ahead steps for delta stats (1 = single-frame, N = include k=0..N multi-step deltas)
+    # action_type: "absolute" | "delta_obs_t" | "delta_sequential"
+    # delta_obs_t:     delta[k] = action[t+k] - obs[t]  (all k share the same obs reference)
+    # delta_sequential: delta[0] = action[t] - obs[t], delta[k] = action[t+k] - action[t+k-1]
+    action_type: str = "absolute"
+    use_delta_actions: bool = False  # Shorthand alias for --action-type=delta_obs_t
+    delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when using delta actions
+    delta_stats_n_steps: int = 1  # Look-ahead steps for delta stats (1 = single-frame, N = k=0..N-1 multi-step)
     dataset_root: str | None = None
     output_dir: str | None = None
     resume_job_path: str | None = None   # Job root dir (before checkpoints/)
@@ -74,6 +78,14 @@ class TrainingConfig:
     backbone: str = "resnet18"
     note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
     note_append: str | None = None  # Append to existing note during --resume
+
+    @property
+    def use_delta_actions(self) -> bool:
+        return self.action_type in ("delta_obs_t", "delta_sequential")
+
+    @property
+    def delta_sequential(self) -> bool:
+        return self.action_type == "delta_sequential"
 
     @classmethod
     def from_env_and_args(cls) -> TrainingConfig:
@@ -85,7 +97,8 @@ class TrainingConfig:
             LEROBOT_TASK_OVERRIDE: Task string override
 
         Command line args:
-            --use-delta-actions: Enable delta action transform
+            --action-type=absolute|delta_obs_t|delta_sequential
+            --use-delta-actions: Legacy flag, maps to --action-type=delta_obs_t
         """
         # --exclude-observation=images.chest,images.wrist_l,velocity,effort
         excl_str = None
@@ -109,9 +122,17 @@ class TrainingConfig:
         if task_override is None:
             task_override = os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
 
-        # Delta actions from command line (remove to avoid lerobot arg parsing error)
-        use_delta_actions = "--use-delta-actions" in sys.argv
-        if use_delta_actions:
+        # action_type from --action-type= arg (remove to avoid lerobot arg parsing error)
+        action_type = "absolute"
+        for arg in list(sys.argv):
+            if arg.startswith("--action-type="):
+                action_type = arg.split("=", 1)[1]
+                sys.argv.remove(arg)
+                break
+        # Backward compat: --use-delta-actions maps to delta_obs_t
+        if "--use-delta-actions" in sys.argv:
+            if action_type == "absolute":
+                action_type = "delta_obs_t"
             sys.argv.remove("--use-delta-actions")
 
         # Joints to exclude from delta transform (kept in absolute space)
@@ -219,8 +240,8 @@ class TrainingConfig:
 
             output_dir = resume_job_path
 
-            # Auto-inherit delta action settings from the target checkpoint if not explicitly set
-            if not use_delta_actions:
+            # Auto-inherit action_type and delta_exclude_joints from checkpoint if not set on CLI
+            if action_type == "absolute" and not use_delta_actions:
                 ckpt_anvil = (
                     Path(resume_job_path) / "checkpoints" / resume_checkpoint
                     / "pretrained_model" / "anvil_config.json"
@@ -228,9 +249,14 @@ class TrainingConfig:
                 if ckpt_anvil.exists():
                     try:
                         prev = json.loads(ckpt_anvil.read_text())
-                        if prev.get("use_delta_actions"):
-                            use_delta_actions = True
-                            log.info("[anvil_trainer] --resume: inherited use_delta_actions=True from checkpoint")
+                        _inherited = prev.get("action_type", "absolute")
+                        if _inherited == "absolute" and prev.get("use_delta_actions", False):
+                            _inherited = "delta_obs_t"
+                        action_type = _inherited
+                        if action_type != "absolute":
+                            log.info(
+                                "[anvil_trainer] --resume: inherited action_type=%s from checkpoint", action_type,
+                            )
                         if delta_exclude_joints is None and prev.get("delta_exclude_joints"):
                             delta_exclude_joints = prev["delta_exclude_joints"]
                             log.info(
@@ -342,7 +368,7 @@ class TrainingConfig:
         return cls(
             exclude_observation=exclude_observation,
             task_override=task_override,
-            use_delta_actions=use_delta_actions,
+            action_type=action_type,
             delta_exclude_joints=delta_exclude_joints,
             delta_stats_n_steps=delta_stats_n_steps,
             dataset_root=dataset_root,
@@ -363,10 +389,14 @@ class TrainingConfig:
         with open(yaml_path) as f:
             data = yaml.safe_load(f)
 
+        _action_type = data.get("action_type", "absolute")
+        if _action_type == "absolute" and data.get("use_delta_actions", False):
+            _action_type = "delta_obs_t"
         return cls(
             exclude_observation=data.get("exclude_observation"),
             task_override=data.get("task_override"),
-            use_delta_actions=data.get("use_delta_actions", False),
+            action_type=_action_type,
+            delta_exclude_joints=data.get("delta_exclude_joints"),
             dataset_root=data.get("dataset_root"),
             split_ratio=data.get("split_ratio", [8.0, 1.0, 1.0]),
             backbone=data.get("backbone", "resnet18"),

@@ -34,6 +34,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 
 from .action_limiter import ActionLimiter
+from .delta_restore import resolve_action_type, restore_delta_chunk
 from .metrics_tracker import MetricsTracker
 from .model_loader import ModelLoader, set_deterministic_mode
 
@@ -72,7 +73,10 @@ class LeRobotInferenceNode(Node):
         # Reference joint state captured at the moment each action chunk was
         # generated (in model/observation order).  All queued steps in the chunk
         # share this reference so delta restoration is consistent with training.
+        # _delta_ref_state and _abs_shadow_queue must always be reset together;
+        # use _reset_delta_state() in any future reload or episode-boundary path.
         self._delta_ref_state: np.ndarray | None = None
+        self._abs_shadow_queue: deque[np.ndarray] = deque()
 
         self._shutting_down: bool = False
         self._has_published: bool = False
@@ -85,10 +89,16 @@ class LeRobotInferenceNode(Node):
                 min_delta_threshold=self.min_position_delta,
                 model_joint_order=self.joint_names_config.get("model_joint_order", []),
                 controller_joint_order=self.joint_names_config.get("controller_joint_order", []),
-                use_delta_actions=self.use_delta_actions,
-                delta_exclude_joints=self.delta_exclude_joints,
                 logger=self.get_logger(),
             )
+
+            # Resolve delta exclude indices in model joint order (used by chunk restore)
+            _model_order = self.joint_names_config.get("model_joint_order", [])
+            self._delta_exclude_indices = [
+                _model_order.index(name)
+                for name in self.delta_exclude_joints
+                if name in _model_order
+            ]
 
             self._setup_publishers()
 
@@ -197,9 +207,14 @@ class LeRobotInferenceNode(Node):
         model_cfg = self.config.get("model", {})
         self.model_type = model_cfg.get("type") or meta.get("model_type")
 
-        # use_delta_actions / delta_exclude_joints: from anvil_config.json — must match training
-        self.use_delta_actions = meta.get("use_delta_actions", False)
+        # action_type from anvil_config.json — must match training
+        self.action_type: str = resolve_action_type(meta)
+        self.use_delta_actions: bool = self.action_type in ("delta_obs_t", "delta_sequential")
         self.delta_exclude_joints: list[str] = meta.get("delta_exclude_joints", [])
+
+        # Resolve delta exclude joint indices (in model output order)
+        # Will be finalized after joint_names_config is loaded.
+        self._delta_exclude_indices: list[int] = []
 
         # task_description: anvil_config.json first, YAML overrides if explicitly set
         self.task_description = meta.get("task_description", "")
@@ -278,6 +293,7 @@ class LeRobotInferenceNode(Node):
         anvil_path = checkpoint / "anvil_config.json"
         if anvil_path.exists():
             anvil = json.loads(anvil_path.read_text())
+            meta["action_type"] = anvil.get("action_type", "absolute")
             meta["use_delta_actions"] = anvil.get("use_delta_actions", False)
             meta["delta_exclude_joints"] = anvil.get("delta_exclude_joints", [])
             if "task_description" in anvil:
@@ -361,7 +377,7 @@ class LeRobotInferenceNode(Node):
         else:
             logger.info(f"Model:      {self.model_path}")
             logger.info(f"Type:       {self.model_type or 'unknown'}")
-            logger.info(f"Delta acts: {self.use_delta_actions}")
+            logger.info(f"Action type: {self.action_type}")
             if self.use_delta_actions and self.delta_exclude_joints:
                 logger.info(f"Delta excl: {self.delta_exclude_joints}")
             if self.model_type in {"smolvla", "pi0", "pi05"}:
@@ -604,8 +620,12 @@ class LeRobotInferenceNode(Node):
 
                 with torch.inference_mode():
                     action = self.model.select_action(observation)
-
-
+                    # Collect remaining normalized queue items BEFORE postprocessing so
+                    # the whole chunk can be denormalized together for delta restore.
+                    if _is_new_chunk and self.use_delta_actions and hasattr(self.model, "_queues"):
+                        _rest_norm = [a.detach().clone() for a in self.model._queues.get("action", [])]
+                    else:
+                        _rest_norm = None
 
                 # Capture reference state right after chunk generation
                 if _is_new_chunk and "observation.state" in _raw_obs:
@@ -629,6 +649,25 @@ class LeRobotInferenceNode(Node):
                     self.get_logger().info(
                         f"[DEBUG] action (post-postproc): [{', '.join(f'{v:.4f}' for v in action)}]"
                     )
+
+                # Chunk-level delta restore via shadow queue.
+                # The model's internal queue stores normalized tensors; we denormalize
+                # the full chunk together, restore delta → absolute, then serve absolute
+                # values from a shadow queue so we never re-enter normalized space.
+                if self.use_delta_actions:
+                    if _is_new_chunk and self._delta_ref_state is not None:
+                        if _rest_norm is not None:
+                            _rest_denorm = [self._denorm_queue_action(a) for a in _rest_norm]
+                            _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
+                        else:
+                            _chunk = action[np.newaxis]
+                        _abs = restore_delta_chunk(_chunk, self._delta_ref_state, self.action_type, self._delta_exclude_indices)
+                        self._abs_shadow_queue = deque(_abs[1:])
+                        action = _abs[0]
+                    elif self._abs_shadow_queue:
+                        action = self._abs_shadow_queue.popleft()
+                    elif not hasattr(self.model, "_queues") and self._delta_ref_state is not None:
+                        action = restore_delta_chunk(action[np.newaxis], self._delta_ref_state, self.action_type, self._delta_exclude_indices)[0]
 
                 self._classic_action_deque.append(action)
                 self.metrics.record_inference()
@@ -671,6 +710,19 @@ class LeRobotInferenceNode(Node):
             self.get_logger().error(f"Publish error: {e}")
             self.get_logger().error(traceback.format_exc())
 
+    def _reset_delta_state(self) -> None:
+        """Reset delta-restore state; call this whenever the model is reloaded."""
+        self._delta_ref_state = None
+        self._abs_shadow_queue.clear()
+
+    def _denorm_queue_action(self, a: object) -> np.ndarray:
+        """Apply postprocessor and convert a queued normalized tensor to a flat numpy array."""
+        if self.postprocessor:
+            a = self.postprocessor.process_action(a)  # type: ignore[arg-type]
+        if isinstance(a, torch.Tensor):
+            return a.detach().cpu().numpy().flatten()
+        return np.asarray(a).flatten()
+
     def _move_to_device(self, data):
         """Recursively move tensors to the configured device."""
         if torch.is_tensor(data):
@@ -710,12 +762,9 @@ class LeRobotInferenceNode(Node):
                     ]
                 )
 
-            # Slice the per-chunk reference state for this arm so that queued
-            # actions are restored relative to the state at generation time.
-            arm_ref = None
-            if self.use_delta_actions and self._delta_ref_state is not None:
-                arm_ref = self._delta_ref_state[start_idx:end_idx]
-            arm_action = self.action_limiter.process(arm_action, arm_current, ref_state=arm_ref)
+            # Delta restore is done upstream in _obs_update (chunk-level).
+            # Actions arriving here are already absolute — just apply safety limits.
+            arm_action = self.action_limiter.process(arm_action, arm_current)
 
             if self._debug:
                 formatted = ", ".join(f"{v:.4f}" for v in arm_action)

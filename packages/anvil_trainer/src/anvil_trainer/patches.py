@@ -474,7 +474,12 @@ class TransformRunner:
         import torch
         from lerobot.utils.train_utils import save_checkpoint as original_save_checkpoint
 
-        anvil_cfg_base: dict = {"use_delta_actions": self.config.use_delta_actions}
+        anvil_cfg_base: dict = {
+            "action_type": self.config.action_type,
+            # Backward compat: old inference nodes read use_delta_actions
+            "use_delta_actions": self.config.use_delta_actions,
+            "delta_sequential": self.config.delta_sequential,
+        }
         if self.config.delta_exclude_joints:
             anvil_cfg_base["delta_exclude_joints"] = self.config.delta_exclude_joints
         if self.config.task_override:

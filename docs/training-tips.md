@@ -149,13 +149,25 @@ uv run anvil-trainer \
 
 ### Delta actions
 
-For tasks where the robot needs to return to similar poses repeatedly,
-`--use-delta-actions` (action = target − current state) can make learning
-easier. The flag is persisted to `anvil_config.json` in the checkpoint and
-auto-read at inference — no manual inference YAML change needed.
+For tasks where the robot needs to return to similar poses repeatedly, training in delta action space (action = residual rather than absolute target) can make learning easier. Use `--action-type` to select the mode:
+
+| `--action-type` | Formula | When to use |
+|---|---|---|
+| `absolute` | raw target position | default; most tasks |
+| `delta_obs_t` | target − observation at chunk time | tasks with repeated returns to similar poses; equivalent to `--use-delta-actions` |
+| `delta_sequential` | target − previous action | smoother trajectories where inter-step residuals are small |
+
+The chosen mode is persisted to `anvil_config.json` in the checkpoint and auto-read at inference — no manual inference YAML change needed.
 
 ```bash
+# delta_obs_t (shorthand)
 uv run anvil-trainer ... --use-delta-actions
+
+# delta_obs_t (explicit)
+uv run anvil-trainer ... --action-type=delta_obs_t
+
+# delta_sequential
+uv run anvil-trainer ... --action-type=delta_sequential
 ```
 
 ### Steps and batch size

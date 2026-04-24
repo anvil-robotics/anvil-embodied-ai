@@ -1,0 +1,1 @@
+uv run anvil-trainer   --dataset.root=data/datasets/placing-block-without-left-hand-random-pose/   --policy.type=diffusion   --policy.normalization_mapping='{"ACTION":"MIN_MAX","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'   --wandb.enable=true --batch_size=16 --use-delta-actions --note="delta, min_max"

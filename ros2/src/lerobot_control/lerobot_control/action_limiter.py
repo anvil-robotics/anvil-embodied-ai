@@ -23,7 +23,6 @@ class ActionLimiter:
         min_delta_threshold: float | None = None,
         model_joint_order: list[str] | None = None,
         controller_joint_order: list[str] | None = None,
-        use_delta_actions: bool = False,
         delta_exclude_joints: list[str] | None = None,
         logger=None,
     ):
@@ -38,9 +37,7 @@ class ActionLimiter:
                 friction when model deltas are too small to move the joint.
             model_joint_order: Order the ML model outputs actions
             controller_joint_order: Order the ROS2 controller expects
-            use_delta_actions: If True, model outputs deltas to add to current position
-            delta_exclude_joints: Joint names kept in absolute space during training
-                (these joints must NOT have current_position added at inference)
+            delta_exclude_joints: Joint names kept in absolute space (not delta-restored)
             logger: Optional ROS2 logger
         """
         self.max_delta = max_delta
@@ -48,7 +45,6 @@ class ActionLimiter:
         self._last_published: np.ndarray | None = None
         self.model_joint_order = model_joint_order or []
         self.controller_joint_order = controller_joint_order or []
-        self.use_delta_actions = use_delta_actions
         self.logger = logger
 
         # Build reorder indices
@@ -66,6 +62,7 @@ class ActionLimiter:
     def reset(self) -> None:
         """Reset deadband state (call between episodes or on model reload)."""
         self._last_published = None
+
 
     def _log(self, level: str, msg: str):
         """Log message using ROS2 logger or print."""
@@ -155,15 +152,14 @@ class ActionLimiter:
         """
         Process action: reorder and apply delta limiting.
 
+        Delta restore is handled upstream (in inference_node) before actions reach here.
+        This method receives absolute actions and only applies reordering + safety limiting.
+
         Args:
-            action: Raw action from model (in model joint order)
+            action: Absolute action (in model joint order), already delta-restored upstream
             current_positions: Current joint positions (in controller order)
-            joint_order: Joint order for delta action conversion
-            ref_state: Reference joint positions from when the action chunk was
-                generated (in controller order).  When provided, delta restoration
-                uses ref_state as the baseline instead of current_positions, so
-                that all queued steps in a chunk share the same reference.  Falls
-                back to current_positions when None (backward-compatible).
+            joint_order: Unused, kept for backward compatibility
+            ref_state: Unused, kept for backward compatibility
 
         Returns:
             Processed action ready for publishing (in controller order, delta-limited)
@@ -173,23 +169,6 @@ class ActionLimiter:
 
         # Reorder from model order to controller order
         action = self.reorder(action)
-        # ref_state is in model order (from observation.state) — reorder it to
-        # controller order so it aligns with the reordered action before addition.
-        if ref_state is not None:
-            ref_state = self.reorder(ref_state)
-
-        # Convert delta actions to absolute if needed.
-        # Joints in _delta_exclude_indices were trained as absolute — keep their
-        # model output as-is and only add the baseline for the remaining joints.
-        # Use ref_state (state at chunk generation) when available so that all
-        # queued steps share the same reference; fall back to current_positions.
-        if self.use_delta_actions:
-            _base = ref_state if ref_state is not None else current_positions
-            if _base is not None:
-                restored = _base + action
-                for idx in self._delta_exclude_indices:
-                    restored[idx] = action[idx]
-                action = restored
 
         # Apply delta limiting (always against current position for safety)
         if current_positions is not None:
