@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """End-to-end CLI smoke test for the anvil training / eval stack.
 
-Five scenarios are tested against the fixture at data/raw/test-session (5 stub MCAPs,
+Four scenarios are tested against the fixture at data/raw/test-session (5 stub MCAPs,
 single right arm):
 
-  AFO  — action_from_observation=true,  action_type=absolute
-  CMD  — action_from_observation=false, action_type=absolute
-  AFO_DELTA_OBS_T      — AFO dataset + --action-type=delta_obs_t
-  AFO_DELTA_SEQUENTIAL — AFO dataset + --action-type=delta_sequential
-  CMD_DELTA_OBS_T      — CMD dataset + --action-type=delta_obs_t
+  AFO              — action_from_observation=true,  action_type=absolute
+  CMD              — action_from_observation=false, action_type=absolute
+  CMD_DELTA_OBS_T       — CMD dataset + --action-type=delta_obs_t
+  CMD_DELTA_SEQUENTIAL  — CMD dataset + --action-type=delta_sequential
 
-delta scenarios reuse the step-1 dataset produced by afo/cmd and only
-differ in training (steps 2–4).  They share convert_config with their
-base scenario so step 1 is always a no-op (cached) for delta variants.
+delta scenarios reuse the step-1 CMD dataset and only differ in training
+(steps 2–4).  Step 1 is always a no-op (cached) for delta variants.
 
 Each scenario runs all 4 steps: mcap-convert → anvil-trainer → anvil-eval → anvil-eval-ros
 
@@ -115,28 +113,6 @@ SCENARIOS: dict[str, Scenario] = {
         eval_ros_out=OUTPUTS / "eval_results" / "cmd" / "ros",
         convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
     ),
-    "afo_delta_obs_t": Scenario(
-        key="afo_delta_obs_t",
-        label="AFO delta_obs_t",
-        mcap_root=MCAP_ROOT,
-        dataset_dir=OUTPUTS / "datasets" / "afo" / _MCAP_NAME,  # shared with afo
-        train_out=OUTPUTS / "model_zoo" / "afo_delta_obs_t" / "smoke",
-        eval_out=OUTPUTS / "eval_results" / "afo_delta_obs_t" / "raw",
-        eval_ros_out=OUTPUTS / "eval_results" / "afo_delta_obs_t" / "ros",
-        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-afo.yaml",
-        action_type="delta_obs_t",
-    ),
-    "afo_delta_sequential": Scenario(
-        key="afo_delta_sequential",
-        label="AFO delta_sequential",
-        mcap_root=MCAP_ROOT,
-        dataset_dir=OUTPUTS / "datasets" / "afo" / _MCAP_NAME,  # shared with afo
-        train_out=OUTPUTS / "model_zoo" / "afo_delta_sequential" / "smoke",
-        eval_out=OUTPUTS / "eval_results" / "afo_delta_sequential" / "raw",
-        eval_ros_out=OUTPUTS / "eval_results" / "afo_delta_sequential" / "ros",
-        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-afo.yaml",
-        action_type="delta_sequential",
-    ),
     "cmd_delta_obs_t": Scenario(
         key="cmd_delta_obs_t",
         label="CMD delta_obs_t",
@@ -147,6 +123,17 @@ SCENARIOS: dict[str, Scenario] = {
         eval_ros_out=OUTPUTS / "eval_results" / "cmd_delta_obs_t" / "ros",
         convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
         action_type="delta_obs_t",
+    ),
+    "cmd_delta_sequential": Scenario(
+        key="cmd_delta_sequential",
+        label="CMD delta_sequential",
+        mcap_root=MCAP_ROOT,
+        dataset_dir=OUTPUTS / "datasets" / "cmd" / _MCAP_NAME,  # shared with cmd
+        train_out=OUTPUTS / "model_zoo" / "cmd_delta_sequential" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "cmd_delta_sequential" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "cmd_delta_sequential" / "ros",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
+        action_type="delta_sequential",
     ),
 }
 
