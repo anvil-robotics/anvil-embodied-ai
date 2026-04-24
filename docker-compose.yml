@@ -31,3 +31,37 @@ services:
               count: all
               capabilities: [gpu]
     command: bash -c "ros2 launch lerobot_control inference.launch.py model_path:=$$MODEL_PATH config_file:=$$CONFIG_FILE monitor_only:=$$MONITOR_ONLY"
+
+  neuracore-inference:
+    image: ghcr.io/anvil-robotics/neuracore-inference:${NEURACORE_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/neuracore/Dockerfile
+      args:
+        NEURACORE_VERSION: ${NEURACORE_VERSION:-11.0.0}
+    container_name: neuracore-inference
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}
+      - CYCLONEDDS_URI=${CYCLONEDDS_URI:-}
+      - NEURACORE_API_KEY=${NEURACORE_API_KEY:-}
+      - NEURACORE_MODEL_FILE=${NEURACORE_MODEL_FILE:-}
+      - NEURACORE_TRAIN_RUN_NAME=${NEURACORE_TRAIN_RUN_NAME:-}
+      - NEURACORE_ROBOT_NAME=${NEURACORE_ROBOT_NAME:-anvil-openarm}
+      - NEURACORE_INFERENCE_RATE_HZ=${NEURACORE_INFERENCE_RATE_HZ:-30.0}
+      - NEURACORE_CONSUME_LIVE_DATA=${NEURACORE_CONSUME_LIVE_DATA:-0}
+    volumes:
+      - ./model_zoo:/workspace/model_zoo:ro
+      - ./configs:/workspace/configs:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles: ["neuracore"]
+    command: bash -c "ros2 launch neuracore_control inference.launch.py model_file:=$$NEURACORE_MODEL_FILE train_run_name:=$$NEURACORE_TRAIN_RUN_NAME robot_name:=$$NEURACORE_ROBOT_NAME inference_rate_hz:=$$NEURACORE_INFERENCE_RATE_HZ"
