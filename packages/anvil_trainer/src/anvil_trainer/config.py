@@ -156,6 +156,22 @@ class TrainingConfig:
                 policy_type = arg.split("=", 1)[1]
                 break
 
+        # When --policy.path is given without --policy.type, read the type from
+        # the checkpoint's config.json so the auto-generated job_name is meaningful.
+        if policy_type == "run":
+            for arg in sys.argv:
+                if arg.startswith("--policy.path="):
+                    _pp = Path(arg.split("=", 1)[1])
+                    try:
+                        _t = json.loads((_pp / "config.json").read_text()).get("type", "")
+                        if not _t:  # fallback: parent train_config.json
+                            _t = json.loads((_pp.parent / "train_config.json").read_text()).get("policy", {}).get("type", "")
+                        if _t:
+                            policy_type = _t
+                    except Exception:
+                        pass
+                    break
+
         # --resume=PATH  (anvil flag — value is a path, not a boolean)
         # lerobot's own --resume=true/false is left in sys.argv untouched.
         resume_raw: str | None = None
