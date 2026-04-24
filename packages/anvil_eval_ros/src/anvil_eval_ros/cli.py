@@ -584,6 +584,19 @@ def main() -> None:
         log.error("[anvil-eval-ros] docker-compose.eval.yml not found at %s", compose_file)
         sys.exit(1)
 
+    # 5a. Read action_type from checkpoint anvil_config.json (for eval-recorder)
+    action_type = "absolute"
+    _anvil_cfg_path = checkpoint_path / "pretrained_model" / "anvil_config.json"
+    if _anvil_cfg_path.exists():
+        try:
+            _anvil_cfg = json.loads(_anvil_cfg_path.read_text())
+            action_type = _anvil_cfg.get("action_type", "absolute")
+            if action_type == "absolute" and _anvil_cfg.get("use_delta_actions", False):
+                action_type = "delta_obs_t"
+            log.info("[anvil-eval-ros] action_type=%s (from anvil_config.json)", action_type)
+        except Exception:
+            pass
+
     # 5b. Auto-generate inference config from model's action shape
     base_inference_yaml = repo_root / "configs" / "lerobot_control" / "inference_eval.yaml"
     inference_config_path, arm_info = generate_inference_config(
@@ -624,6 +637,8 @@ def main() -> None:
             if synthesize_info
             else {}
         ),
+        # action_type for eval-recorder (derived from checkpoint anvil_config.json)
+        "EVAL_ACTION_TYPE": action_type,
         # Inference monitor
         "MONITOR_ENABLE": "true" if args.monitor else "false",
         "MONITOR_OUTPUT_DIR": str(output_dir / "monitor"),

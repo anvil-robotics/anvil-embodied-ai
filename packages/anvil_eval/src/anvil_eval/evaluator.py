@@ -60,13 +60,17 @@ class EpisodeEvaluator:
         self.postprocessor = postprocessor
         self.model_type = model_type
         self.device = device
-        self.use_delta_actions = anvil_cfg.get("use_delta_actions", False)
+        self.action_type: str = anvil_cfg.get("action_type", "absolute")
+        if self.action_type == "absolute" and anvil_cfg.get("use_delta_actions", False):
+            self.action_type = "delta_obs_t"
+        self.use_delta_actions: bool = self.action_type in ("delta_obs_t", "delta_sequential")
         self.delta_exclude_joints = anvil_cfg.get("delta_exclude_joints", [])
         self.task_description = task_description
         self.joint_names = joint_names
         self._is_vla = model_type in ("pi0", "pi05", "smolvla")
         self._exclude_indices: set[int] | None = None
         self._delta_ref_state: np.ndarray | None = None
+        self._prev_gt_action: np.ndarray | None = None  # for delta_sequential GT computation
 
     def evaluate_episode(
         self,
@@ -78,6 +82,7 @@ class EpisodeEvaluator:
         """Evaluate model predictions for a single episode."""
         _ensure_model_loader_importable()
         from lerobot_control.model_loader import reset_model_state
+        from lerobot_control.delta_restore import restore_delta_chunk
 
         predicted_actions: list[np.ndarray] = []
         ground_truth_actions: list[np.ndarray] = []
@@ -85,7 +90,10 @@ class EpisodeEvaluator:
 
         # Reset model state (clears action queues for ACT)
         reset_model_state(self.model)
-        self._delta_ref_state = None  # reset per-episode delta reference state
+        self._delta_ref_state = None   # reset per-episode delta reference state
+        self._prev_gt_action = None    # reset sequential GT reference
+
+        exclude_indices = list(self._resolve_exclude_indices())
 
         for rel_idx in tqdm(frame_indices, desc=f"Episode {episode_idx}", leave=False):
             item = dataset[rel_idx]
@@ -98,19 +106,20 @@ class EpisodeEvaluator:
 
             # Observation state for delta restore (raw, before preprocessing)
             obs_state = item["observation.state"].numpy() if "observation.state" in item else None
+            _obs_flat = (obs_state[-1] if obs_state is not None and obs_state.ndim > 1 else obs_state)
 
             # Detect whether a new action chunk is about to be generated.
-            # DiffusionPolicy caches n_action_steps actions relative to the state at
-            # the time the chunk was generated (state_t0).  Restoring queued steps
-            # with the current obs_state (state_t0+k) introduces a drift error of
-            # state_{t0+k} − state_t0.  We therefore capture obs_state_t0 once per
-            # chunk and reuse it for all subsequent restorations in that chunk.
-            # Models without _queues (e.g. ACT) fall back to per-frame obs_state.
+            # When queue is empty, select_action runs model and fills queue.
+            # We capture obs_state as the delta reference for the whole chunk.
             _is_new_chunk = (
                 self.use_delta_actions
                 and hasattr(self.model, "_queues")
                 and len(self.model._queues.get("action", [])) == 0
             )
+
+            # Capture ref state BEFORE inference (queue will be filled after select_action)
+            if _is_new_chunk and _obs_flat is not None:
+                self._delta_ref_state = _obs_flat.copy()
 
             # Preprocess + inference
             with torch.inference_mode():
@@ -125,11 +134,6 @@ class EpisodeEvaluator:
 
                 action = self.model.select_action(processed)
 
-            # Capture reference state right after new chunk is generated
-            if _is_new_chunk and obs_state is not None:
-                _ref = obs_state[-1] if obs_state.ndim > 1 else obs_state
-                self._delta_ref_state = _ref.copy()
-
             # Postprocess
             if self.postprocessor:
                 action = self.postprocessor.process_action(action)
@@ -143,15 +147,37 @@ class EpisodeEvaluator:
             # Capture raw model output before delta restore
             raw_actions.append(action.copy())
 
-            # Delta action restore — use the reference state from when the current
-            # chunk was generated (state_t0) rather than the current obs_state, so
-            # that all 8 queued steps share the same reference.
-            if self.use_delta_actions:
-                _obs_ref = (obs_state[-1] if obs_state is not None and obs_state.ndim > 1
-                            else obs_state)
-                _ref = self._delta_ref_state if self._delta_ref_state is not None else _obs_ref
+            # Chunk-level delta restore: on new chunk, restore all queued actions at once
+            # so sequential and obs_t modes both work correctly across the chunk.
+            if _is_new_chunk and self.use_delta_actions and self._delta_ref_state is not None:
+                if hasattr(self.model, "_queues"):
+                    _rest = [
+                        (a.cpu().numpy().flatten() if hasattr(a, "cpu") else np.asarray(a).flatten())
+                        for a in list(self.model._queues.get("action", []))
+                    ]
+                    _chunk = np.stack([action] + _rest) if _rest else action[np.newaxis]
+                    _abs = restore_delta_chunk(
+                        _chunk, self._delta_ref_state, self.action_type, exclude_indices
+                    )
+                    from collections import deque as _deque
+                    self.model._queues["action"] = _deque(
+                        torch.tensor(_a, dtype=torch.float32) for _a in _abs[1:]
+                    )
+                    action = _abs[0]
+                else:
+                    # Fallback for models without _queues (single-step restore)
+                    _abs = restore_delta_chunk(
+                        action[np.newaxis], self._delta_ref_state, self.action_type, exclude_indices
+                    )
+                    action = _abs[0]
+            elif not _is_new_chunk and self.use_delta_actions and not hasattr(self.model, "_queues"):
+                # Models without chunk queue (e.g. ACT w/ temporal ensemble): per-step restore
+                _ref = self._delta_ref_state if self._delta_ref_state is not None else _obs_flat
                 if _ref is not None:
-                    action = self._restore_delta_action(action, _ref)
+                    _abs = restore_delta_chunk(
+                        action[np.newaxis], _ref, self.action_type, exclude_indices
+                    )
+                    action = _abs[0]
 
             predicted_actions.append(action)
             ground_truth_actions.append(gt_action)
@@ -196,21 +222,6 @@ class EpisodeEvaluator:
                 self._exclude_indices.add(self.joint_names.index(name))
         return self._exclude_indices
 
-    def _restore_delta_action(self, predicted_delta: np.ndarray, obs_state: np.ndarray) -> np.ndarray:
-        """Restore absolute action from delta prediction.
-
-        delta = action - observation.state (during training)
-        absolute = delta + observation.state (restore)
-        Joints in delta_exclude_joints stay as-is (already absolute).
-        """
-        predicted_abs = predicted_delta.copy()
-        exclude = self._resolve_exclude_indices()
-
-        for i in range(min(len(predicted_abs), len(obs_state))):
-            if i not in exclude:
-                predicted_abs[i] = predicted_delta[i] + obs_state[i]
-
-        return predicted_abs
 
 
 def load_model(checkpoint: str, device: str):

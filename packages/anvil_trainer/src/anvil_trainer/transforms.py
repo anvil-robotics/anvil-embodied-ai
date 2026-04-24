@@ -186,7 +186,7 @@ class DeltaActionTransform(Transform):
         return "delta_actions"
 
     def is_enabled(self, config: TrainingConfig) -> bool:
-        return config.use_delta_actions
+        return config.action_type in ("delta_obs_t", "delta_sequential")
 
     @staticmethod
     def _parse_names(info: dict, feat_key: str) -> list[str]:
@@ -270,19 +270,48 @@ class DeltaActionTransform(Transform):
         action_last = action.shape[-1]
         state_last = state.shape[-1]
 
+        is_sequential = getattr(config, "delta_sequential", False)
+
         if self._action_to_state_map is not None:
             # Name-based mapping: each action joint → its counterpart in state by name
             delta = original_action.clone()
             exclude_set = set(self._exclude_indices)
-            for a_idx, s_idx in enumerate(self._action_to_state_map):
-                if a_idx not in exclude_set:
-                    delta[..., a_idx] = action[..., a_idx] - state[..., s_idx]
+
+            if is_sequential and action.dim() == 2:
+                # delta_sequential:
+                #   k=0: action[0] - state
+                #   k>0: action[k] - action[k-1]
+                for a_idx, s_idx in enumerate(self._action_to_state_map):
+                    if a_idx not in exclude_set:
+                        delta[0, a_idx] = action[0, a_idx] - state[s_idx]
+                for k in range(1, action.shape[0]):
+                    for a_idx in range(action.shape[1]):
+                        if a_idx not in exclude_set:
+                            delta[k, a_idx] = action[k, a_idx] - action[k - 1, a_idx]
+            else:
+                # delta_obs_t: all k relative to obs (existing broadcast logic)
+                for a_idx, s_idx in enumerate(self._action_to_state_map):
+                    if a_idx not in exclude_set:
+                        delta[..., a_idx] = action[..., a_idx] - state[..., s_idx]
+
             item["action"] = delta
         elif action_last == state_last:
             # Positional fallback (info.json unavailable) — shapes match, safe to subtract
-            item["action"] = action - state
-            for idx in self._exclude_indices:
-                item["action"][..., idx] = original_action[..., idx]
+            if is_sequential and action.dim() == 2:
+                delta = original_action.clone()
+                exclude_set = set(self._exclude_indices)
+                for a_idx in range(action.shape[1]):
+                    if a_idx not in exclude_set:
+                        delta[0, a_idx] = action[0, a_idx] - state[a_idx]
+                for k in range(1, action.shape[0]):
+                    for a_idx in range(action.shape[1]):
+                        if a_idx not in exclude_set:
+                            delta[k, a_idx] = action[k, a_idx] - action[k - 1, a_idx]
+                item["action"] = delta
+            else:
+                item["action"] = action - state
+                for idx in self._exclude_indices:
+                    item["action"][..., idx] = original_action[..., idx]
         else:
             raise DataIntegrityError(
                 f"[delta_actions] action has {action_last} joints but observation.state has "
@@ -291,8 +320,10 @@ class DeltaActionTransform(Transform):
             )
 
         if self._first_apply:
+            mode = "sequential" if is_sequential else "obs_t"
             log.info(
-                "[delta_actions] active — %d joints total: %d get delta, %d kept absolute %s",
+                "[delta_actions] active (mode=%s) — %d joints total: %d get delta, %d kept absolute %s",
+                mode,
                 action_last,
                 action_last - len(self._exclude_indices),
                 len(self._exclude_indices),

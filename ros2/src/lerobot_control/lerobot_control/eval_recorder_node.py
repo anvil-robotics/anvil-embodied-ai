@@ -89,6 +89,7 @@ class EvalRecorderNode(Node):
         self.declare_parameter("inference_drain_sec", 1.5)
         self.declare_parameter("silence_timeout_sec", 1.0)
         self.declare_parameter("silence_poll_sec", 0.05)
+        self.declare_parameter("action_type", "absolute")
 
         gt_topics = self.get_parameter("gt_topics").get_parameter_value().string_array_value
         pred_topics = self.get_parameter("pred_topics").get_parameter_value().string_array_value
@@ -109,6 +110,9 @@ class EvalRecorderNode(Node):
         )
         silence_poll_sec = (
             self.get_parameter("silence_poll_sec").get_parameter_value().double_value
+        )
+        self._action_type: str = (
+            self.get_parameter("action_type").get_parameter_value().string_value
         )
 
         # Build full joint name list: [left_joint1, ..., right_joint1, ...]

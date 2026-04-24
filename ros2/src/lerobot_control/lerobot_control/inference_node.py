@@ -84,10 +84,16 @@ class LeRobotInferenceNode(Node):
                 max_delta=self.max_position_delta,
                 model_joint_order=self.joint_names_config.get("model_joint_order", []),
                 controller_joint_order=self.joint_names_config.get("controller_joint_order", []),
-                use_delta_actions=self.use_delta_actions,
-                delta_exclude_joints=self.delta_exclude_joints,
                 logger=self.get_logger(),
             )
+
+            # Resolve delta exclude indices in model joint order (used by chunk restore)
+            _model_order = self.joint_names_config.get("model_joint_order", [])
+            self._delta_exclude_indices = [
+                _model_order.index(name)
+                for name in self.delta_exclude_joints
+                if name in _model_order
+            ]
 
             self._setup_publishers()
 
@@ -195,9 +201,16 @@ class LeRobotInferenceNode(Node):
         model_cfg = self.config.get("model", {})
         self.model_type = model_cfg.get("type") or meta.get("model_type")
 
-        # use_delta_actions / delta_exclude_joints: from anvil_config.json — must match training
-        self.use_delta_actions = meta.get("use_delta_actions", False)
+        # action_type from anvil_config.json — must match training
+        self.action_type: str = meta.get("action_type", "absolute")
+        if self.action_type == "absolute" and meta.get("use_delta_actions", False):
+            self.action_type = "delta_obs_t"
+        self.use_delta_actions: bool = self.action_type in ("delta_obs_t", "delta_sequential")
         self.delta_exclude_joints: list[str] = meta.get("delta_exclude_joints", [])
+
+        # Resolve delta exclude joint indices (in model output order)
+        # Will be finalized after joint_names_config is loaded.
+        self._delta_exclude_indices: list[int] = []
 
         # task_description: anvil_config.json first, YAML overrides if explicitly set
         self.task_description = meta.get("task_description", "")
@@ -276,6 +289,7 @@ class LeRobotInferenceNode(Node):
         anvil_path = checkpoint / "anvil_config.json"
         if anvil_path.exists():
             anvil = json.loads(anvil_path.read_text())
+            meta["action_type"] = anvil.get("action_type", "absolute")
             meta["use_delta_actions"] = anvil.get("use_delta_actions", False)
             meta["delta_exclude_joints"] = anvil.get("delta_exclude_joints", [])
             if "task_description" in anvil:
@@ -359,7 +373,7 @@ class LeRobotInferenceNode(Node):
         else:
             logger.info(f"Model:      {self.model_path}")
             logger.info(f"Type:       {self.model_type or 'unknown'}")
-            logger.info(f"Delta acts: {self.use_delta_actions}")
+            logger.info(f"Action type: {self.action_type}")
             if self.use_delta_actions and self.delta_exclude_joints:
                 logger.info(f"Delta excl: {self.delta_exclude_joints}")
             if self.model_type in {"smolvla", "pi0", "pi05"}:
@@ -628,6 +642,28 @@ class LeRobotInferenceNode(Node):
                         f"[DEBUG] action (post-postproc): [{', '.join(f'{v:.4f}' for v in action)}]"
                     )
 
+                # Chunk-level delta restore: when a new chunk is generated, collect all
+                # queued actions, restore the entire chunk at once, write back absolute
+                # values. Subsequent pops are already absolute — no per-step math needed.
+                if _is_new_chunk and self.use_delta_actions and self._delta_ref_state is not None:
+                    from lerobot_control.delta_restore import restore_delta_chunk as _rdc
+                    from collections import deque as _deque
+
+                    def _t2np(a):
+                        return (a.cpu().numpy() if hasattr(a, "cpu") else np.asarray(a)).flatten()
+
+                    if hasattr(self.model, "_queues"):
+                        _rest = [_t2np(a) for a in list(self.model._queues.get("action", []))]
+                        _chunk = np.stack([action] + _rest) if _rest else action[np.newaxis]
+                        _abs = _rdc(_chunk, self._delta_ref_state, self.action_type, self._delta_exclude_indices)
+                        self.model._queues["action"] = _deque(
+                            torch.tensor(_a, dtype=torch.float32) for _a in _abs[1:]
+                        )
+                        action = _abs[0]
+                    else:
+                        _abs = _rdc(action[np.newaxis], self._delta_ref_state, self.action_type, self._delta_exclude_indices)
+                        action = _abs[0]
+
                 self._classic_action_deque.append(action)
                 self.metrics.record_inference()
 
@@ -708,12 +744,9 @@ class LeRobotInferenceNode(Node):
                     ]
                 )
 
-            # Slice the per-chunk reference state for this arm so that queued
-            # actions are restored relative to the state at generation time.
-            arm_ref = None
-            if self.use_delta_actions and self._delta_ref_state is not None:
-                arm_ref = self._delta_ref_state[start_idx:end_idx]
-            arm_action = self.action_limiter.process(arm_action, arm_current, ref_state=arm_ref)
+            # Delta restore is done upstream in _obs_update (chunk-level).
+            # Actions arriving here are already absolute — just apply safety limits.
+            arm_action = self.action_limiter.process(arm_action, arm_current)
 
             if self._debug:
                 formatted = ", ".join(f"{v:.4f}" for v in arm_action)

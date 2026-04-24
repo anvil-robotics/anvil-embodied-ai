@@ -36,6 +36,7 @@
 #   EVAL_SYNTHESIZE_COMMANDS     — "true" to republish joint_states as GT commands (auto-set)
 #   EVAL_SYNTHESIZE_COMMAND_TOPIC — topic to publish synthesized commands (auto-set)
 #   EVAL_SYNTHESIZE_ARM_JOINT_NAMES — ROS2 array of joint names to extract (auto-set)
+#   EVAL_ACTION_TYPE      — "absolute"|"delta_obs_t"|"delta_sequential" (auto-set from anvil_config.json)
 #   MONITOR_ENABLE        — "true" to publish /monitor/* topics for inference_monitor_node
 #   MONITOR_OUTPUT_DIR    — host path for monitor CSV (auto-set to OUTPUT_DIR/monitor)
 
@@ -156,6 +157,7 @@ services:
         -p gt_topics:=${EVAL_GT_TOPICS:-["/follower_l_forward_position_controller/commands","/follower_r_forward_position_controller/commands"]}
         -p pred_topics:=${EVAL_PRED_TOPICS:-["/eval/follower_l_forward_position_controller/commands","/eval/follower_r_forward_position_controller/commands"]}
         -p arm_names:=${EVAL_ARM_NAMES:-["left","right"]}
+        -p action_type:=${EVAL_ACTION_TYPE:-absolute}
 
 networks:
   ros2_eval:

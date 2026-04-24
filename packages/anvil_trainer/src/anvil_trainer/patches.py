@@ -188,19 +188,49 @@ class TransformRunner:
             action_to_state_map = delta_transform._action_to_state_map
             exclude_set = set(exclude_indices)
 
-            deltas = actions_np.copy()
+            # Compute k=0 deltas: action[t] - state[t]
+            k0_deltas = actions_np.copy()
             if action_to_state_map is not None:
-                # Name-based mapping validated by _build_mappings
                 for a_idx, s_idx in enumerate(action_to_state_map):
                     if a_idx not in exclude_set:
-                        deltas[:, a_idx] = actions_np[:, a_idx] - states_np[:, s_idx]
+                        k0_deltas[:, a_idx] = actions_np[:, a_idx] - states_np[:, s_idx]
             elif d_action == d_state:
-                deltas = actions_np - states_np
+                k0_deltas = actions_np - states_np
             else:
                 raise DataIntegrityError(
                     f"[delta_stats] action has {d_action} joints but observation.state has "
                     f"{d_state} joints and no info.json is available for name-based mapping."
                 )
+
+            is_sequential = getattr(self.config, "delta_sequential", False)
+            if is_sequential:
+                # For delta_sequential, also include consecutive action diffs (k>0 terms).
+                # delta[k>0] = action[t+k] - action[t+k-1] — same scale as delta[0].
+                episode_idx_np = np.array(hf["episode_index"])
+                act_curr = actions_np[:-1]
+                act_next = actions_np[1:]
+                same_ep = episode_idx_np[:-1] == episode_idx_np[1:]
+
+                seq_deltas = act_next.copy()
+                if action_to_state_map is not None:
+                    for a_idx in range(d_action):
+                        if a_idx not in exclude_set:
+                            seq_deltas[:, a_idx] = act_next[:, a_idx] - act_curr[:, a_idx]
+                elif d_action == d_state:
+                    seq_deltas = act_next - act_curr
+                # Keep excluded joints absolute in seq_deltas too
+                for idx in exclude_indices:
+                    if idx < d_action:
+                        seq_deltas[:, idx] = act_next[:, idx]
+                seq_deltas = seq_deltas[same_ep]
+                deltas = np.concatenate([k0_deltas, seq_deltas], axis=0)
+                log.info(
+                    "[delta_stats] delta_sequential: k0=%d frames + %d consecutive diffs = %d total",
+                    len(k0_deltas), len(seq_deltas), len(deltas),
+                )
+            else:
+                deltas = k0_deltas
+
             orig = full_dataset.meta.stats.get("action", {})
             orig_mean = np.array(orig.get("mean", deltas.mean(axis=0)))
             orig_std = np.array(orig.get("std", deltas.std(axis=0)))
@@ -208,9 +238,10 @@ class TransformRunner:
             orig_max = np.array(orig.get("max", deltas.max(axis=0)))
 
             # Keep excluded joints' values in absolute space before taking stats
-            for idx in exclude_indices:
-                if idx < d_action:
-                    deltas[:, idx] = actions_np[:, idx]
+            if not is_sequential:
+                for idx in exclude_indices:
+                    if idx < d_action:
+                        deltas[:, idx] = actions_np[:, idx]
 
             delta_mean = deltas.mean(axis=0)
             delta_std = np.where(deltas.std(axis=0) < 1e-6, 1e-6, deltas.std(axis=0))
@@ -449,7 +480,12 @@ class TransformRunner:
         import torch
         from lerobot.utils.train_utils import save_checkpoint as original_save_checkpoint
 
-        anvil_cfg_base: dict = {"use_delta_actions": self.config.use_delta_actions}
+        anvil_cfg_base: dict = {
+            "action_type": self.config.action_type,
+            # Backward compat: old inference nodes read use_delta_actions
+            "use_delta_actions": self.config.use_delta_actions,
+            "delta_sequential": self.config.delta_sequential,
+        }
         if self.config.delta_exclude_joints:
             anvil_cfg_base["delta_exclude_joints"] = self.config.delta_exclude_joints
         if self.config.task_override:

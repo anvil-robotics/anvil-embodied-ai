@@ -44,8 +44,11 @@ class TrainingConfig:
 
     exclude_observation: list[str] | None = None
     task_override: str | None = None
-    use_delta_actions: bool = False
-    delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when use_delta_actions=True
+    # action_type: "absolute" | "delta_obs_t" | "delta_sequential"
+    # delta_obs_t:     delta[k] = action[t+k] - obs[t]  (all k relative to obs)
+    # delta_sequential: delta[0] = action[t] - obs[t], delta[k] = action[t+k] - action[t+k-1]
+    action_type: str = "absolute"
+    delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when using delta actions
     dataset_root: str | None = None
     output_dir: str | None = None
     resume_job_path: str | None = None
@@ -54,6 +57,14 @@ class TrainingConfig:
     backbone: str = "resnet18"
     note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
     note_append: str | None = None  # Append to existing note during --resume-job
+
+    @property
+    def use_delta_actions(self) -> bool:
+        return self.action_type in ("delta_obs_t", "delta_sequential")
+
+    @property
+    def delta_sequential(self) -> bool:
+        return self.action_type == "delta_sequential"
 
     @classmethod
     def from_env_and_args(cls) -> TrainingConfig:
@@ -65,7 +76,8 @@ class TrainingConfig:
             LEROBOT_TASK_OVERRIDE: Task string override
 
         Command line args:
-            --use-delta-actions: Enable delta action transform
+            --action-type=absolute|delta_obs_t|delta_sequential
+            --use-delta-actions: Legacy flag, maps to --action-type=delta_obs_t
         """
         # --exclude-observation=images.chest,images.wrist_l,velocity,effort
         excl_str = None
@@ -89,9 +101,17 @@ class TrainingConfig:
         if task_override is None:
             task_override = os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
 
-        # Delta actions from command line (remove to avoid lerobot arg parsing error)
-        use_delta_actions = "--use-delta-actions" in sys.argv
-        if use_delta_actions:
+        # action_type from --action-type= arg (remove to avoid lerobot arg parsing error)
+        action_type = "absolute"
+        for arg in list(sys.argv):
+            if arg.startswith("--action-type="):
+                action_type = arg.split("=", 1)[1]
+                sys.argv.remove(arg)
+                break
+        # Backward compat: --use-delta-actions maps to delta_obs_t
+        if "--use-delta-actions" in sys.argv:
+            if action_type == "absolute":
+                action_type = "delta_obs_t"
             sys.argv.remove("--use-delta-actions")
 
         # Joints to exclude from delta transform (kept in absolute space)
@@ -151,6 +171,26 @@ class TrainingConfig:
 
             # Extract output_dir for our internal config
             output_dir = resume_job_path
+
+            # Auto-inherit action_type from checkpoint if not explicitly set on CLI
+            if action_type == "absolute":
+                _ac_path = (
+                    Path(resume_job_path) / "checkpoints" / "last"
+                    / "pretrained_model" / "anvil_config.json"
+                )
+                if _ac_path.exists():
+                    try:
+                        _ac = json.loads(_ac_path.read_text())
+                        _inherited = _ac.get("action_type", "absolute")
+                        if _inherited == "absolute" and _ac.get("use_delta_actions", False):
+                            _inherited = "delta_obs_t"
+                        action_type = _inherited
+                        if action_type != "absolute":
+                            log.info(
+                                "[anvil_trainer] Inherited action_type=%s from checkpoint", action_type
+                            )
+                    except Exception:
+                        pass
         else:
             # Resolve output_dir for NEW job: model_zoo/{dataset_name}/{run_name}
             # Extract job_name if provided (passed through to lerobot as-is)
@@ -254,7 +294,7 @@ class TrainingConfig:
         return cls(
             exclude_observation=exclude_observation,
             task_override=task_override,
-            use_delta_actions=use_delta_actions,
+            action_type=action_type,
             delta_exclude_joints=delta_exclude_joints,
             dataset_root=dataset_root,
             output_dir=output_dir,
@@ -273,10 +313,14 @@ class TrainingConfig:
         with open(yaml_path) as f:
             data = yaml.safe_load(f)
 
+        _action_type = data.get("action_type", "absolute")
+        if _action_type == "absolute" and data.get("use_delta_actions", False):
+            _action_type = "delta_obs_t"
         return cls(
             exclude_observation=data.get("exclude_observation"),
             task_override=data.get("task_override"),
-            use_delta_actions=data.get("use_delta_actions", False),
+            action_type=_action_type,
+            delta_exclude_joints=data.get("delta_exclude_joints"),
             dataset_root=data.get("dataset_root"),
             split_ratio=data.get("split_ratio", [8.0, 1.0, 1.0]),
             backbone=data.get("backbone", "resnet18"),
