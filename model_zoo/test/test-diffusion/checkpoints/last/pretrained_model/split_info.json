@@ -1,7 +1,0 @@
-{
-  "split_ratio": [8, 1, 1],
-  "total_episodes": 5,
-  "train_episodes": [0, 1, 2],
-  "val_episodes": [3],
-  "test_episodes": [4]
-}
