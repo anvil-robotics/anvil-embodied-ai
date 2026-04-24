@@ -158,6 +158,13 @@ class TransformRunner:
         the early-return path (``n_train < 1`` case) inherits the correct
         stats.
 
+        When ``config.delta_stats_n_steps > 1`` the stats are computed over
+        multi-step deltas ``action[t+k] - state[t]`` for k = 0 … n_steps,
+        sampled only within episode boundaries.  This makes the normalisation
+        range reflect the full displacement distribution seen inside an action
+        chunk, preventing loss imbalance in ACT-style chunk prediction and
+        clip-sample truncation in Diffusion.
+
         Args:
             full_dataset: LeRobotDataset spanning all episodes.
 
@@ -177,6 +184,7 @@ class TransformRunner:
             hf = full_dataset.hf_dataset
             actions_np = np.array(hf["action"], dtype=np.float64)
             states_np = np.array(hf["observation.state"], dtype=np.float64)
+            episode_idx_np = np.array(hf["episode_index"], dtype=np.int64).ravel()
             # Use most recent obs step if states are stacked (n_obs_steps > 1)
             if states_np.ndim == 3:
                 states_np = states_np[:, -1, :]
@@ -188,34 +196,51 @@ class TransformRunner:
             action_to_state_map = delta_transform._action_to_state_map
             exclude_set = set(exclude_indices)
 
-            deltas = actions_np.copy()
-            if action_to_state_map is not None:
-                # Name-based mapping validated by _build_mappings
-                for a_idx, s_idx in enumerate(action_to_state_map):
-                    if a_idx not in exclude_set:
-                        deltas[:, a_idx] = actions_np[:, a_idx] - states_np[:, s_idx]
-            elif d_action == d_state:
-                deltas = actions_np - states_np
-            else:
-                raise DataIntegrityError(
-                    f"[delta_stats] action has {d_action} joints but observation.state has "
-                    f"{d_state} joints and no info.json is available for name-based mapping."
-                )
+            n_steps = max(1, getattr(self.config, "delta_stats_n_steps", 1))
+
+            def _compute_deltas_for_k(k: int) -> np.ndarray:
+                """Return delta array for look-ahead k, respecting episode boundaries."""
+                if k == 0:
+                    act = actions_np
+                    sta = states_np
+                    mask = np.ones(len(act), dtype=bool)
+                else:
+                    act = actions_np[k:]
+                    sta = states_np[:-k]
+                    mask = episode_idx_np[k:] == episode_idx_np[:-k]
+
+                if action_to_state_map is not None:
+                    d = act.copy()
+                    for a_idx, s_idx in enumerate(action_to_state_map):
+                        if a_idx not in exclude_set:
+                            d[:, a_idx] = act[:, a_idx] - sta[:, s_idx]
+                elif d_action == d_state:
+                    d = act - sta
+                    # Restore excluded joints to absolute values
+                    for idx in exclude_indices:
+                        if idx < d_action:
+                            d[:, idx] = act[:, idx]
+                else:
+                    raise DataIntegrityError(
+                        f"[delta_stats] action has {d_action} joints but observation.state has "
+                        f"{d_state} joints and no info.json is available for name-based mapping."
+                    )
+                return d[mask]
+
+            all_deltas = np.concatenate(
+                [_compute_deltas_for_k(k) for k in range(n_steps)], axis=0
+            )
+
             orig = full_dataset.meta.stats.get("action", {})
-            orig_mean = np.array(orig.get("mean", deltas.mean(axis=0)))
-            orig_std = np.array(orig.get("std", deltas.std(axis=0)))
-            orig_min = np.array(orig.get("min", deltas.min(axis=0)))
-            orig_max = np.array(orig.get("max", deltas.max(axis=0)))
+            orig_mean = np.array(orig.get("mean", all_deltas.mean(axis=0)))
+            orig_std = np.array(orig.get("std", all_deltas.std(axis=0)))
+            orig_min = np.array(orig.get("min", all_deltas.min(axis=0)))
+            orig_max = np.array(orig.get("max", all_deltas.max(axis=0)))
 
-            # Keep excluded joints' values in absolute space before taking stats
-            for idx in exclude_indices:
-                if idx < d_action:
-                    deltas[:, idx] = actions_np[:, idx]
-
-            delta_mean = deltas.mean(axis=0)
-            delta_std = np.where(deltas.std(axis=0) < 1e-6, 1e-6, deltas.std(axis=0))
-            delta_min = deltas.min(axis=0)
-            delta_max = deltas.max(axis=0)
+            delta_mean = all_deltas.mean(axis=0)
+            delta_std = np.where(all_deltas.std(axis=0) < 1e-6, 1e-6, all_deltas.std(axis=0))
+            delta_min = all_deltas.min(axis=0)
+            delta_max = all_deltas.max(axis=0)
 
             # Restore excluded joints to their original absolute stats
             for idx in exclude_indices:
@@ -230,17 +255,17 @@ class TransformRunner:
                 "std": delta_std.tolist(),
                 "min": delta_min.tolist(),
                 "max": delta_max.tolist(),
-                "count": orig.get("count", len(deltas)),
+                "count": orig.get("count", len(all_deltas)),
             }
             # Patch full_dataset in place so the early-return path is covered
             full_dataset.meta.stats["action"] = patched_stats
 
             log.info(
-                "[delta_stats] Computed delta action stats over %d frames, %d joints "
-                "(%d kept absolute: %s). "
+                "[delta_stats] Computed delta action stats over %d samples "
+                "(n_steps=%d, %d frames, %d joints, %d kept absolute: %s). "
                 "j4 abs_mean=%.3f → delta_mean=%.4f, abs_std=%.3f → delta_std=%.4f",
-                len(deltas), d_action, len(exclude_indices),
-                self.config.delta_exclude_joints or [],
+                len(all_deltas), n_steps, len(actions_np), d_action,
+                len(exclude_indices), self.config.delta_exclude_joints or [],
                 orig_mean[4] if len(orig_mean) > 4 else float("nan"),
                 delta_mean[4] if len(delta_mean) > 4 else float("nan"),
                 orig_std[4] if len(orig_std) > 4 else float("nan"),
