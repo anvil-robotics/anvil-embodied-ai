@@ -12,6 +12,7 @@ naming ('cam_wrist_l', etc.) all match, so a model trained from that
 collector's data runs here unchanged.
 """
 
+import csv
 import os
 import time
 from typing import Dict, List, Optional, Tuple
@@ -28,14 +29,10 @@ from std_msgs.msg import Float64MultiArray
 
 from .common import (
     CMD_L_TOPIC,
-    CMD_R_TOPIC,
     DEFAULT_CAMERA_TOPICS,
-    FINGER_JOINTS,
     GRIPPER_HI,
     LEFT_ARM,
     LEFT_GRIPPER,
-    RIGHT_ARM,
-    RIGHT_GRIPPER,
     camera_name_from_topic,
     decode_compressed_image,
     gripper_denormalize,
@@ -51,12 +48,46 @@ class NeuracoreInferenceNode(Node):
         super().__init__("neuracore_inference_node")
         self.get_logger().info("[neura-infer] startup")
 
-        self.declare_parameter("robot_name", "anvil-openarm")
+        self.declare_parameter("robot_name", "anvil_openarm")
         self.declare_parameter("urdf_path", "")
         self.declare_parameter("model_file", "")
         self.declare_parameter("train_run_name", "")
         self.declare_parameter("camera_topics", DEFAULT_CAMERA_TOPICS)
         self.declare_parameter("inference_rate_hz", 30.0)
+        self.declare_parameter("debug", False)
+        self.declare_parameter("max_joint_delta", 0.05)
+        self.declare_parameter("predictions_log", "")
+
+        self._debug = (
+            self.get_parameter("debug").get_parameter_value().bool_value
+        )
+        self._max_joint_delta = float(
+            self.get_parameter("max_joint_delta")
+            .get_parameter_value()
+            .double_value
+        )
+
+        self._predictions_file = None
+        self._predictions_writer = None
+        log_path = (
+            self.get_parameter("predictions_log")
+            .get_parameter_value()
+            .string_value
+        )
+        if log_path:
+            os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+            self._predictions_file = open(log_path, "w", newline="")
+            self._predictions_writer = csv.writer(self._predictions_file)
+            header = ["t"]
+            header += [f"target_{n}" for n in LEFT_ARM]
+            header += ["target_grip"]
+            header += [f"current_{n}" for n in LEFT_ARM]
+            header += ["current_grip"]
+            self._predictions_writer.writerow(header)
+            self._predictions_file.flush()
+            self.get_logger().info(
+                f"[neura-infer] writing predictions to {log_path}"
+            )
 
         self._policy = None
         self._chunk: Optional[np.ndarray] = None
@@ -74,8 +105,8 @@ class NeuracoreInferenceNode(Node):
             camera_name_from_topic(t) for t in self._camera_topics
         ]
 
-        self._arm_joints = LEFT_ARM + RIGHT_ARM
-        self._gripper_joints = [LEFT_GRIPPER, RIGHT_GRIPPER]
+        self._arm_joints = LEFT_ARM
+        self._gripper_joints = [LEFT_GRIPPER]
 
         # Embodiment descriptions — MUST match how the model was trained.
         # If your neuracore training run used different ordering, adjust here.
@@ -120,7 +151,6 @@ class NeuracoreInferenceNode(Node):
             self.get_logger().info(f"[neura-infer] subscribed: {topic}")
 
         self._cmd_l_pub = self.create_publisher(Float64MultiArray, CMD_L_TOPIC, 10)
-        self._cmd_r_pub = self.create_publisher(Float64MultiArray, CMD_R_TOPIC, 10)
 
         model_file = (
             self.get_parameter("model_file").get_parameter_value().string_value
@@ -274,7 +304,7 @@ class NeuracoreInferenceNode(Node):
         for i, name in enumerate(js.name):
             if i >= len(js.position):
                 continue
-            if name in FINGER_JOINTS:
+            if name in self._gripper_joints:
                 grippers[name] = float(js.position[i])
             elif name in self._arm_joints:
                 positions[name] = float(js.position[i])
@@ -300,7 +330,7 @@ class NeuracoreInferenceNode(Node):
 
         grip_preds = preds.get(DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS, {})
         if grip_preds:
-            grip_tensors = [grip_preds[n].value for n in self._gripper_joints]
+            grip_tensors = [grip_preds[n].open_amount for n in self._gripper_joints]
             grip = torch.cat(grip_tensors, dim=2)[0]
             out = torch.cat([arm, grip], dim=1)
         else:
@@ -312,28 +342,76 @@ class NeuracoreInferenceNode(Node):
         )
         return chunk
 
+    def _current_arm_positions(self) -> Optional[np.ndarray]:
+        if self._latest_joint_state is None:
+            return None
+        _, js = self._latest_joint_state
+        lookup = {n: p for n, p in zip(js.name, js.position)}
+        try:
+            return np.array([lookup[n] for n in self._arm_joints], dtype=np.float64)
+        except KeyError:
+            return None
+
+    def _current_gripper_position(self) -> float:
+        if self._latest_joint_state is None or not self._gripper_joints:
+            return float("nan")
+        _, js = self._latest_joint_state
+        for name, pos in zip(js.name, js.position):
+            if name == self._gripper_joints[0]:
+                return float(pos)
+        return float("nan")
+
     def _publish_commands(self, action: np.ndarray) -> None:
-        n_left = len(LEFT_ARM)
-        n_right = len(RIGHT_ARM)
-        n_arm = n_left + n_right
+        n_arm = len(self._arm_joints)
 
-        left_arm = action[:n_left].tolist()
-        right_arm = action[n_left:n_arm].tolist()
+        target_arm = action[:n_arm]
+        current_arm = self._current_arm_positions()
+        if current_arm is not None and len(current_arm) == n_arm:
+            raw_delta = target_arm - current_arm
+            clamped = int(np.sum(np.abs(raw_delta) > self._max_joint_delta))
+            limited = np.clip(
+                raw_delta, -self._max_joint_delta, self._max_joint_delta
+            )
+            safe_arm = (current_arm + limited).tolist()
+            if clamped:
+                self.get_logger().warning(
+                    f"[neura-infer] delta-clamped {clamped}/{n_arm} arm joints "
+                    f"to ±{self._max_joint_delta:.3f} rad",
+                    throttle_duration_sec=2.0,
+                )
+        else:
+            safe_arm = target_arm.tolist()
 
-        if action.shape[0] >= n_arm + 2:
+        if action.shape[0] >= n_arm + 1:
             left_grip_raw = gripper_denormalize(float(action[n_arm]))
-            right_grip_raw = gripper_denormalize(float(action[n_arm + 1]))
         else:
             left_grip_raw = GRIPPER_HI
-            right_grip_raw = GRIPPER_HI
+
+        if self._predictions_writer is not None and self._predictions_file is not None:
+            current_arm_row = (
+                current_arm.tolist()
+                if current_arm is not None
+                else [float("nan")] * n_arm
+            )
+            row = [time.time()]
+            row += target_arm.tolist()
+            row += [left_grip_raw]
+            row += current_arm_row
+            row += [self._current_gripper_position()]
+            self._predictions_writer.writerow(row)
+            self._predictions_file.flush()
+
+        if self._debug:
+            self.get_logger().info(
+                f"[neura-infer] DEBUG action | "
+                f"L_arm={['%.3f' % v for v in safe_arm]} "
+                f"L_grip={left_grip_raw:.3f}"
+            )
+            return
 
         msg_l = Float64MultiArray()
-        msg_l.data = left_arm + [left_grip_raw]
+        msg_l.data = safe_arm + [left_grip_raw]
         self._cmd_l_pub.publish(msg_l)
-
-        msg_r = Float64MultiArray()
-        msg_r.data = right_arm + [right_grip_raw]
-        self._cmd_r_pub.publish(msg_r)
 
     # ------------------------------------------------------------ shutdown
 
@@ -344,6 +422,8 @@ class NeuracoreInferenceNode(Node):
                 self._policy.disconnect()
             except Exception as e:
                 self.get_logger().warning(f"[neura-infer] disconnect failed: {e}")
+        if self._predictions_file is not None:
+            self._predictions_file.close()
         super().destroy_node()
 
 

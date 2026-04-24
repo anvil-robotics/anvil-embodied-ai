@@ -33,7 +33,7 @@ services:
     command: bash -c "ros2 launch lerobot_control inference.launch.py model_path:=$$MODEL_PATH config_file:=$$CONFIG_FILE monitor_only:=$$MONITOR_ONLY"
 
   neuracore-inference:
-    image: ghcr.io/anvil-robotics/neuracore-inference:${NEURACORE_IMAGE_TAG:-latest}
+    # image: ghcr.io/anvil-robotics/neuracore-inference:${NEURACORE_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: docker/neuracore/Dockerfile
@@ -50,12 +50,15 @@ services:
       - NEURACORE_API_KEY=${NEURACORE_API_KEY:-}
       - NEURACORE_MODEL_FILE=${NEURACORE_MODEL_FILE:-}
       - NEURACORE_TRAIN_RUN_NAME=${NEURACORE_TRAIN_RUN_NAME:-}
-      - NEURACORE_ROBOT_NAME=${NEURACORE_ROBOT_NAME:-anvil-openarm}
+      - NEURACORE_ROBOT_NAME=${NEURACORE_ROBOT_NAME:-anvil_openarm}
       - NEURACORE_INFERENCE_RATE_HZ=${NEURACORE_INFERENCE_RATE_HZ:-30.0}
       - NEURACORE_CONSUME_LIVE_DATA=${NEURACORE_CONSUME_LIVE_DATA:-0}
+      - NEURACORE_ORG_ID=2de151e4-96b9-4202-a9e7-56ca9d2a6377
     volumes:
       - ./model_zoo:/workspace/model_zoo:ro
       - ./configs:/workspace/configs:ro
+      - ./ros2/src/neuracore_control:/workspace/src/neuracore_control
+      - ./debug_logs:/workspace/debug_logs
     deploy:
       resources:
         reservations:

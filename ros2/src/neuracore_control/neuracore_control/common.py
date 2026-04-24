@@ -27,7 +27,6 @@ CMD_R_TOPIC = "/follower_r_forward_position_controller/commands"
 
 DEFAULT_CAMERA_TOPICS = [
     "/cam_wrist_l/image_raw/compressed",
-    "/cam_wrist_r/image_raw/compressed",
     "/cam_chest/image_raw/compressed",
     "/cam_waist/image_raw/compressed",
 ]

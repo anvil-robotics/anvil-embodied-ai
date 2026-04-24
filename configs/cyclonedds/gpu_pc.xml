@@ -4,7 +4,7 @@
         <General>
             <Interfaces>
                 <!-- GPU PC ethernet interface -->
-                <NetworkInterface name="eno1"/>
+                <NetworkInterface name="enp0s31f6"/>
             </Interfaces>
             <AllowMulticast>true</AllowMulticast>
             <MaxMessageSize>65535B</MaxMessageSize>
@@ -13,7 +13,7 @@
         <Discovery>
             <Peers>
                 <!-- Robot PC IP (example — replace with your Robot PC's address) -->
-                <Peer address="192.168.0.128"/>
+                <Peer address="192.168.100.40"/>
             </Peers>
         </Discovery>
         <Internal>

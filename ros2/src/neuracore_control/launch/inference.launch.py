@@ -19,7 +19,7 @@ def generate_launch_description():
     )
     robot_name_arg = DeclareLaunchArgument(
         "robot_name",
-        default_value="anvil-openarm",
+        default_value="anvil_openarm",
         description="Neuracore robot name — must match the trained embodiment",
     )
     urdf_path_arg = DeclareLaunchArgument(
@@ -31,6 +31,21 @@ def generate_launch_description():
         "inference_rate_hz",
         default_value="30.0",
         description="Control loop rate (Hz)",
+    )
+    debug_arg = DeclareLaunchArgument(
+        "debug",
+        default_value="false",
+        description="If true, log predicted actions instead of publishing commands",
+    )
+    max_joint_delta_arg = DeclareLaunchArgument(
+        "max_joint_delta",
+        default_value="0.05",
+        description="Per-tick arm joint target is clamped to current ± this (radians)",
+    )
+    predictions_log_arg = DeclareLaunchArgument(
+        "predictions_log",
+        default_value="",
+        description="If set, write per-tick predictions to this CSV path (raw policy targets + current state)",
     )
 
     inference_node = Node(
@@ -45,6 +60,9 @@ def generate_launch_description():
                 "robot_name": LaunchConfiguration("robot_name"),
                 "urdf_path": LaunchConfiguration("urdf_path"),
                 "inference_rate_hz": LaunchConfiguration("inference_rate_hz"),
+                "debug": LaunchConfiguration("debug"),
+                "max_joint_delta": LaunchConfiguration("max_joint_delta"),
+                "predictions_log": LaunchConfiguration("predictions_log"),
             }
         ],
     )
@@ -56,6 +74,9 @@ def generate_launch_description():
             robot_name_arg,
             urdf_path_arg,
             inference_rate_arg,
+            debug_arg,
+            max_joint_delta_arg,
+            predictions_log_arg,
             inference_node,
         ]
     )
