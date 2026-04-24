@@ -119,9 +119,13 @@ class EvalRecorderNode(Node):
         self._action_type: str = (
             self.get_parameter("action_type").get_parameter_value().string_value
         )
-        _delta_exclude_raw: list[str] = list(
-            self.get_parameter("delta_exclude_joints").get_parameter_value().string_array_value
-        )
+        try:
+            _delta_exclude_raw: list[str] = list(
+                self.get_parameter("delta_exclude_joints").get_parameter_value().string_array_value
+            )
+        except rclpy.exceptions.ParameterUninitializedException:
+            # [] passed via CLI has no type info → ROS2 treats it as PARAMETER_NOT_SET
+            _delta_exclude_raw = []
         self._delta_exclude_joints: list[str] = [j for j in _delta_exclude_raw if j]
 
         # Build full joint name list: [left_joint1, ..., right_joint1, ...]

@@ -161,7 +161,7 @@ services:
         -p arm_names:=${EVAL_ARM_NAMES:-["left","right"]}
         -p use_delta_actions:=${EVAL_USE_DELTA_ACTIONS:-false}
         -p action_type:=${EVAL_ACTION_TYPE:-delta_obs_t}
-        -p delta_exclude_joints:=${EVAL_DELTA_EXCLUDE_JOINTS:-[""]}
+        -p delta_exclude_joints:=${EVAL_DELTA_EXCLUDE_JOINTS:-[]}
 
 networks:
   ros2_eval:

@@ -688,7 +688,7 @@ def main() -> None:
         # Delta action settings (from anvil_config.json in checkpoint)
         "EVAL_USE_DELTA_ACTIONS": "true" if use_delta_actions else "false",
         "EVAL_ACTION_TYPE": action_type,
-        "EVAL_DELTA_EXCLUDE_JOINTS": _ros2_list(delta_exclude_joints) if delta_exclude_joints else '[""]',
+        "EVAL_DELTA_EXCLUDE_JOINTS": _ros2_list(delta_exclude_joints) if delta_exclude_joints else "[]",
         # Inference monitor
         "MONITOR_ENABLE": "true" if args.monitor else "false",
         "MONITOR_OUTPUT_DIR": str(output_dir / "monitor"),
