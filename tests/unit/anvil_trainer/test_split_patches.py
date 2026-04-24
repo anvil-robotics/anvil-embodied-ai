@@ -103,7 +103,7 @@ class TestPatchAlwaysInstalled:
         cfg = TrainingConfig(
             split_ratio=[8.0, 1.0, 1.0],
             dataset_root=DATASET_ROOT,
-            use_delta_actions=True,
+            action_type="delta_obs_t",
         )
         runner = TransformRunner(cfg)
         assert len(runner.active_transforms) > 0

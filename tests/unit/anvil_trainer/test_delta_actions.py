@@ -42,7 +42,7 @@ class TestIsEnabled:
         assert DeltaActionTransform().is_enabled(cfg) is False
 
     def test_enabled_when_flag_set(self):
-        cfg = TrainingConfig(use_delta_actions=True)
+        cfg = TrainingConfig(action_type="delta_obs_t")
         assert DeltaActionTransform().is_enabled(cfg) is True
 
 
@@ -52,14 +52,14 @@ class TestIsEnabled:
 
 class TestApplyNoop:
     def test_no_action_key(self):
-        cfg = TrainingConfig(use_delta_actions=True)
+        cfg = TrainingConfig(action_type="delta_obs_t")
         item = {"observation.state": torch.tensor([0.1, 0.2])}
         out = DeltaActionTransform().apply(item, cfg)
         assert out is item  # unchanged reference
         assert "action" not in out
 
     def test_no_observation_state_key(self):
-        cfg = TrainingConfig(use_delta_actions=True)
+        cfg = TrainingConfig(action_type="delta_obs_t")
         item = {"action": torch.tensor([0.1, 0.2])}
         out = DeltaActionTransform().apply(item, cfg)
         assert torch.equal(out["action"], torch.tensor([0.1, 0.2]))
@@ -72,7 +72,7 @@ class TestApplyNoop:
 class TestBasicDelta:
     def test_single_frame_same_shape(self):
         """action and state both [n_joints] → delta = action - state."""
-        cfg = TrainingConfig(use_delta_actions=True)
+        cfg = TrainingConfig(action_type="delta_obs_t")
         item = {
             "action": torch.tensor([1.0, 2.0, 3.0]),
             "observation.state": torch.tensor([0.5, 1.0, 2.5]),
@@ -83,7 +83,7 @@ class TestBasicDelta:
 
     def test_action_chunk_broadcasts(self):
         """action [horizon, n_joints], state [n_joints] → state broadcasts."""
-        cfg = TrainingConfig(use_delta_actions=True)
+        cfg = TrainingConfig(action_type="delta_obs_t")
         item = {
             "action": torch.tensor([[1.0, 2.0], [1.1, 2.2], [0.9, 1.8]]),
             "observation.state": torch.tensor([1.0, 2.0]),
@@ -100,7 +100,7 @@ class TestBasicDelta:
 class TestMultiStepState:
     def test_state_last_step_used(self):
         """state shape [n_obs_steps, n_joints] → use state[-1] as reference."""
-        cfg = TrainingConfig(use_delta_actions=True)
+        cfg = TrainingConfig(action_type="delta_obs_t")
         item = {
             "action": torch.tensor([5.0, 10.0]),
             # Two obs steps: [prev, current]
@@ -119,7 +119,7 @@ class TestMultiStepState:
 class TestShapeMismatch:
     def test_mismatch_without_info_json_raises(self):
         """action [3] vs state [2] with no info.json → DataIntegrityError, not silent fallback."""
-        cfg = TrainingConfig(use_delta_actions=True)  # no dataset_root
+        cfg = TrainingConfig(action_type="delta_obs_t")  # no dataset_root
         item = {
             "action": torch.tensor([1.0, 2.0, 9.9]),
             "observation.state": torch.tensor([0.5, 1.0]),
@@ -138,7 +138,7 @@ class TestShapeMismatch:
             }
         }
         (meta / "info.json").write_text(json.dumps(info))
-        cfg = TrainingConfig(use_delta_actions=True, dataset_root=str(tmp_path))
+        cfg = TrainingConfig(action_type="delta_obs_t", dataset_root=str(tmp_path))
         item = {
             "action": torch.tensor([1.0, 2.0]),
             "observation.state": torch.tensor([0.5, 1.0, 99.0]),  # extra velocity joint
@@ -158,7 +158,7 @@ class TestShapeMismatch:
             }
         }
         (meta / "info.json").write_text(json.dumps(info))
-        cfg = TrainingConfig(use_delta_actions=True, dataset_root=str(tmp_path))
+        cfg = TrainingConfig(action_type="delta_obs_t", dataset_root=str(tmp_path))
         item = {
             "action": torch.tensor([1.0, 2.0, 0.9]),
             "observation.state": torch.tensor([0.5, 1.0]),
@@ -178,7 +178,7 @@ class TestShapeMismatch:
         }
         (meta / "info.json").write_text(json.dumps(info))
         cfg = TrainingConfig(
-            use_delta_actions=True,
+            action_type="delta_obs_t",
             dataset_root=str(tmp_path),
             delta_exclude_joints=["gripper"],
         )
@@ -209,7 +209,7 @@ class TestExcludeJoints:
         """delta_exclude_joints=['gripper'] → gripper keeps absolute value."""
         root = self._make_dataset_root(tmp_path, ["shoulder", "elbow", "gripper"])
         cfg = TrainingConfig(
-            use_delta_actions=True,
+            action_type="delta_obs_t",
             delta_exclude_joints=["gripper"],
             dataset_root=str(root),
         )
@@ -228,7 +228,7 @@ class TestExcludeJoints:
         """Excluded joint stays absolute across a multi-step action chunk."""
         root = self._make_dataset_root(tmp_path, ["j0", "j1"])
         cfg = TrainingConfig(
-            use_delta_actions=True,
+            action_type="delta_obs_t",
             delta_exclude_joints=["j1"],
             dataset_root=str(root),
         )
@@ -246,7 +246,7 @@ class TestExcludeJoints:
         """Unknown joint name in delta_exclude_joints is logged but doesn't raise."""
         root = self._make_dataset_root(tmp_path, ["j0", "j1"])
         cfg = TrainingConfig(
-            use_delta_actions=True,
+            action_type="delta_obs_t",
             delta_exclude_joints=["nonexistent"],
             dataset_root=str(root),
         )
@@ -268,20 +268,25 @@ class TestComputeDeltaStats:
                           abs_stats: dict | None = None) -> MagicMock:
         """Build a mock LeRobotDataset with hf_dataset columns and meta.stats."""
         ds = MagicMock()
-        ds.hf_dataset = {"action": actions, "observation.state": states}
+        n = len(actions)
+        ds.hf_dataset = {
+            "action": actions,
+            "observation.state": states,
+            "episode_index": np.zeros(n, dtype=np.int64),
+        }
         ds.meta = MagicMock()
         ds.meta.stats = {"action": abs_stats or {}}
         return ds
 
     def test_returns_none_when_delta_inactive(self):
-        cfg = TrainingConfig(use_delta_actions=False)
+        cfg = TrainingConfig(action_type="absolute")
         runner = TransformRunner(cfg)
         ds = self._make_fake_dataset(np.zeros((10, 3)), np.zeros((10, 3)))
         assert runner._compute_delta_action_stats(ds) is None
 
     def test_delta_mean_near_zero_for_slow_motion(self):
         """When action closely tracks state (slow motion), delta_mean ≈ 0."""
-        cfg = TrainingConfig(use_delta_actions=True)
+        cfg = TrainingConfig(action_type="delta_obs_t")
         runner = TransformRunner(cfg)
         # Actions ≈ states with small offset (delta ≈ 0.01)
         rng = np.random.default_rng(0)
@@ -311,7 +316,7 @@ class TestComputeDeltaStats:
             {"features": {"action": {"names": ["j0", "j1", "gripper"]}}}
         ))
         cfg = TrainingConfig(
-            use_delta_actions=True,
+            action_type="delta_obs_t",
             delta_exclude_joints=["gripper"],
             dataset_root=str(tmp_path),
         )
@@ -341,7 +346,7 @@ class TestComputeDeltaStats:
 
     def test_handles_stacked_observation_state(self):
         """observation.state shaped (N, n_obs_steps, D) uses the last step."""
-        cfg = TrainingConfig(use_delta_actions=True)
+        cfg = TrainingConfig(action_type="delta_obs_t")
         runner = TransformRunner(cfg)
         # Two obs steps; only the last one should be used
         states_2step = np.zeros((50, 2, 3))
@@ -355,7 +360,7 @@ class TestComputeDeltaStats:
 
     def test_failure_returns_none(self):
         """Broken hf_dataset → warning + None, never raises."""
-        cfg = TrainingConfig(use_delta_actions=True)
+        cfg = TrainingConfig(action_type="delta_obs_t")
         runner = TransformRunner(cfg)
         ds = MagicMock()
         # Missing observation.state raises on access
@@ -375,7 +380,7 @@ class TestComputeDeltaStats:
                 "observation.state": {"names": ["j0"]},
             }
         }))
-        cfg = TrainingConfig(use_delta_actions=True, dataset_root=str(tmp_path))
+        cfg = TrainingConfig(action_type="delta_obs_t", dataset_root=str(tmp_path))
         runner = TransformRunner(cfg)
         ds = self._make_fake_dataset(np.zeros((10, 2)), np.zeros((10, 1)))
         with pytest.raises(DataIntegrityError, match="missing_joint"):
