@@ -117,6 +117,7 @@ credentials.json
 secrets.yaml
 
 # Local Claude configuration
+.claude/*
 CLAUDE.md
 CLAUDE_GLOBAL.md
 docs/claude_journal/
@@ -127,5 +128,6 @@ lerobot/
 eval_results/
 
 # Debug artifacts (inference_node debug_image_dir dump)
+monitor_output*
 debug_images/
 tmp/
