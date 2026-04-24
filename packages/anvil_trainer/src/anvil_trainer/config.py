@@ -64,7 +64,7 @@ class TrainingConfig:
     task_override: str | None = None
     use_delta_actions: bool = False
     delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when use_delta_actions=True
-    delta_stats_n_steps: int = 8  # Number of look-ahead steps for delta stats (1 = single-frame, N = include k=0..N multi-step deltas)
+    delta_stats_n_steps: int = 1  # Number of look-ahead steps for delta stats (1 = single-frame, N = include k=0..N multi-step deltas)
     dataset_root: str | None = None
     output_dir: str | None = None
     resume_job_path: str | None = None   # Job root dir (before checkpoints/)
@@ -124,7 +124,7 @@ class TrainingConfig:
                 break
 
         # Number of look-ahead steps for delta stats computation
-        delta_stats_n_steps = 8
+        delta_stats_n_steps = 1
         for arg in sys.argv:
             if arg.startswith("--delta-stats-n-steps="):
                 delta_stats_n_steps = int(arg.split("=", 1)[1])
