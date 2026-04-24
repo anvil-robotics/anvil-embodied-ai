@@ -26,7 +26,6 @@ Environment variables:
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
@@ -53,48 +52,6 @@ log = logging.getLogger(__name__)
 
 
 # _resolve_note is defined in anvil_trainer.config and imported above.
-
-
-# =============================================================================
-# W&B fork helpers
-# =============================================================================
-
-
-def _find_wandb_run_id(job_path: Path) -> tuple[str | None, str | None, str | None]:
-    """Return (run_id, entity, project) from the local wandb directory, or (None, None, None)."""
-    latest = job_path / "wandb" / "latest-run"
-    if not latest.exists():
-        return None, None, None
-    try:
-        resolved = latest.resolve()
-        # Directory name format: run-YYYYMMDD_HHMMSS-<run_id>
-        run_id = resolved.name.rsplit("-", 1)[-1]
-        entity: str | None = None
-        project: str | None = None
-        meta = resolved / "files" / "wandb-metadata.json"
-        if meta.exists():
-            data = json.loads(meta.read_text())
-            entity = data.get("entity")
-            project = data.get("project")
-        return run_id, entity, project
-    except Exception:
-        return None, None, None
-
-
-def _delete_wandb_run(old_run_id: str, new_run: object) -> None:
-    """Delete the old W&B run via the API after a successful forked resume."""
-    try:
-        import wandb
-        entity = getattr(new_run, "entity", None)
-        project = getattr(new_run, "project", None)
-        if not entity or not project:
-            log.warning("[anvil_trainer] W&B fork: cannot delete old run — entity/project unknown")
-            return
-        api = wandb.Api()
-        api.run(f"{entity}/{project}/{old_run_id}").delete()
-        log.info("[anvil_trainer] W&B fork: deleted old run %s/%s/%s", entity, project, old_run_id)
-    except Exception as exc:
-        log.warning("[anvil_trainer] W&B fork: failed to delete old run '%s': %s", old_run_id, exc)
 
 
 # =============================================================================
@@ -169,58 +126,7 @@ def train(config: TrainingConfig | None = None) -> None:
 
             _lt.init_logging = _resume_init_logging
 
-        # W&B fork: when resuming from a specific (non-last) checkpoint with W&B enabled,
-        # fork the old run at the target step instead of resuming it inline.
-        # This creates a clean new run whose history starts at fork_step, with no
-        # stale data from the original run's later steps.
-        # After lerobot_train() completes successfully, the old run is deleted.
-        _old_wandb_run_id: str | None = None
-        _fork_new_run: object = None
-        _wandb_fork_active = (
-            config.resume_job_path is not None
-            and config.resume_checkpoint != "last"
-            and any(a == "--wandb.enable=true" for a in sys.argv)
-        )
-
-        if _wandb_fork_active:
-            fork_step = int(config.resume_checkpoint)
-            _old_wandb_run_id, _ent, _proj = _find_wandb_run_id(Path(config.resume_job_path))
-            if _old_wandb_run_id:
-                fork_from = (
-                    f"{_ent}/{_proj}/{_old_wandb_run_id}?_step={fork_step}"
-                    if _ent and _proj
-                    else f"{_old_wandb_run_id}?_step={fork_step}"
-                )
-                import wandb as _wandb
-                _orig_wandb_init = _wandb.init
-
-                def _wandb_fork_init(*args, **kwargs):
-                    nonlocal _fork_new_run
-                    import wandb as _w
-                    _w.init = _orig_wandb_init  # self-restore before calling
-                    kwargs.pop("resume", None)
-                    kwargs.pop("id", None)
-                    kwargs["fork_from"] = fork_from
-                    _fork_new_run = _orig_wandb_init(*args, **kwargs)
-                    return _fork_new_run
-
-                _wandb.init = _wandb_fork_init
-                log.info(
-                    "[anvil_trainer] W&B fork: will fork run '%s' at step %d",
-                    _old_wandb_run_id, fork_step,
-                )
-            else:
-                log.warning(
-                    "[anvil_trainer] W&B fork: no previous run ID found in %s/wandb/ — "
-                    "falling back to normal resume",
-                    config.resume_job_path,
-                )
-
         lerobot_train()
-
-        # Reached only on successful completion — delete the now-superseded old run
-        if _old_wandb_run_id and _fork_new_run is not None:
-            _delete_wandb_run(_old_wandb_run_id, _fork_new_run)
 
 
 # =============================================================================
