@@ -187,9 +187,13 @@ def main() -> None:
         frame_indices = eval_dataset.get_episode_frames(ep_idx)
         result = evaluator.evaluate_episode(eval_dataset.dataset, frame_indices, ep_idx, split_label)
         
-        # Compute metrics
+        # Compute metrics in model-output space (raw_output vs raw_ground_truth) so that
+        # delta and absolute models are evaluated on what the model actually predicts,
+        # not on the restored absolute trajectory.
+        _pred_for_metrics = result.raw_output if result.raw_output is not None else result.predicted
+        _gt_for_metrics = result.raw_ground_truth if result.raw_ground_truth is not None else result.ground_truth
         metrics = compute_episode_metrics(
-            result.predicted, result.ground_truth, result.joint_names, ep_idx, split_label
+            _pred_for_metrics, _gt_for_metrics, result.joint_names, ep_idx, split_label
         )
         all_metrics.append(metrics)
         
@@ -198,6 +202,8 @@ def main() -> None:
         plot_episode_joints(
             result.predicted, result.ground_truth, result.joint_names, metrics, plot_path,
             raw_output=result.raw_output,
+            obs_states=result.obs_states,
+            use_delta_actions=evaluator.use_delta_actions,
         )
         log.info("[anvil-eval] Episode %d MAE: %.4f", ep_idx, metrics.mae)
 

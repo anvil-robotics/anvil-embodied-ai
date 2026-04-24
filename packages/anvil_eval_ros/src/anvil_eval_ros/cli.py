@@ -494,6 +494,23 @@ def main() -> None:
         log.error("[anvil-eval-ros] MCAP root not found: %s", mcap_root)
         sys.exit(1)
 
+    # 0. Load anvil_config.json for delta action settings
+    anvil_cfg_path = checkpoint_path / "pretrained_model" / "anvil_config.json"
+    anvil_cfg: dict = {}
+    if anvil_cfg_path.exists():
+        try:
+            anvil_cfg = json.loads(anvil_cfg_path.read_text())
+            log.info("[anvil-eval-ros] Loaded anvil_config.json")
+        except Exception as e:
+            log.warning("[anvil-eval-ros] Failed to read anvil_config.json: %s", e)
+
+    use_delta_actions: bool = anvil_cfg.get("use_delta_actions", False)
+    _action_type_raw: str = anvil_cfg.get("action_type", "absolute")
+    if _action_type_raw == "absolute" and use_delta_actions:
+        _action_type_raw = "delta_obs_t"
+    action_type: str = _action_type_raw
+    delta_exclude_joints: list[str] = anvil_cfg.get("delta_exclude_joints") or []
+
     # 1. Build episode → MCAP path mapping
     ep_map = build_episode_map(mcap_root)
     if not ep_map:
@@ -668,6 +685,10 @@ def main() -> None:
             if synthesize_info
             else {}
         ),
+        # Delta action settings (from anvil_config.json in checkpoint)
+        "EVAL_USE_DELTA_ACTIONS": "true" if use_delta_actions else "false",
+        "EVAL_ACTION_TYPE": action_type,
+        "EVAL_DELTA_EXCLUDE_JOINTS": _ros2_list(delta_exclude_joints) if delta_exclude_joints else '[""]',
         # Inference monitor
         "MONITOR_ENABLE": "true" if args.monitor else "false",
         "MONITOR_OUTPUT_DIR": str(output_dir / "monitor"),

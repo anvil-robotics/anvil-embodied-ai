@@ -89,6 +89,9 @@ class EvalRecorderNode(Node):
         self.declare_parameter("inference_drain_sec", 1.5)
         self.declare_parameter("silence_timeout_sec", 1.0)
         self.declare_parameter("silence_poll_sec", 0.05)
+        self.declare_parameter("use_delta_actions", False)
+        self.declare_parameter("action_type", "delta_obs_t")
+        self.declare_parameter("delta_exclude_joints", [""])
 
         gt_topics = self.get_parameter("gt_topics").get_parameter_value().string_array_value
         pred_topics = self.get_parameter("pred_topics").get_parameter_value().string_array_value
@@ -110,6 +113,16 @@ class EvalRecorderNode(Node):
         silence_poll_sec = (
             self.get_parameter("silence_poll_sec").get_parameter_value().double_value
         )
+        self._use_delta_actions: bool = (
+            self.get_parameter("use_delta_actions").get_parameter_value().bool_value
+        )
+        self._action_type: str = (
+            self.get_parameter("action_type").get_parameter_value().string_value
+        )
+        _delta_exclude_raw: list[str] = list(
+            self.get_parameter("delta_exclude_joints").get_parameter_value().string_array_value
+        )
+        self._delta_exclude_joints: list[str] = [j for j in _delta_exclude_raw if j]
 
         # Build full joint name list: [left_joint1, ..., right_joint1, ...]
         self._joint_names: list[str] = []
@@ -439,6 +452,44 @@ class EvalRecorderNode(Node):
 
         return np.array(aligned, dtype=np.float32)
 
+    def _compute_raw_ground_truth(
+        self,
+        predicted: np.ndarray,
+        ground_truth: np.ndarray,
+        raw_output: np.ndarray,
+    ) -> np.ndarray:
+        """Compute GT in model-output (delta) space from aligned arrays.
+
+        delta_obs_t:
+            obs_state = predicted - raw_output  (since predicted = raw_output + obs_state)
+            raw_gt    = ground_truth - obs_state = ground_truth - predicted + raw_output
+
+        delta_sequential:
+            raw_gt[t] = ground_truth[t] - ground_truth[t-1]
+            raw_gt[0] uses obs_state approximation: predicted[0] - raw_output[0]
+
+        For delta_exclude_joints: raw_gt[i] = ground_truth[i] (already absolute).
+        """
+        d = raw_output.shape[1]
+        joint_names_d = self._joint_names[:d]
+        exclude_set = {
+            joint_names_d.index(j) for j in self._delta_exclude_joints
+            if j in joint_names_d
+        }
+
+        raw_gt = ground_truth[:, :d].copy()
+        if self._action_type == "delta_sequential":
+            for i in range(d):
+                if i not in exclude_set:
+                    obs_state_0 = predicted[0, i] - raw_output[0, i]
+                    prev = np.concatenate([[obs_state_0], ground_truth[:-1, i]])
+                    raw_gt[:, i] = ground_truth[:, i] - prev
+        else:
+            for i in range(d):
+                if i not in exclude_set:
+                    raw_gt[:, i] = ground_truth[:, i] - predicted[:, i] + raw_output[:, i]
+        return raw_gt
+
     def _compute_and_save(
         self,
         predicted: np.ndarray,
@@ -452,20 +503,31 @@ class EvalRecorderNode(Node):
         from anvil_eval.metrics import compute_episode_metrics
 
         joint_names = self._joint_names[: predicted.shape[1]]
+
+        # Evaluate in model-output space so delta and absolute models are compared fairly.
+        if raw_output is not None and raw_output.shape[0] > 0:
+            t = predicted.shape[0]
+            d = predicted.shape[1]
+            raw_trimmed = raw_output[:t, :d]
+            if self._use_delta_actions:
+                raw_gt = self._compute_raw_ground_truth(predicted, ground_truth, raw_trimmed)
+            else:
+                raw_gt = ground_truth[:, :d]
+            pred_for_metrics = raw_trimmed
+            gt_for_metrics = raw_gt
+        else:
+            pred_for_metrics = predicted
+            gt_for_metrics = ground_truth
+            raw_trimmed = None
+
         metrics = compute_episode_metrics(
-            predicted, ground_truth, joint_names, ep_idx, split_label
+            pred_for_metrics, gt_for_metrics, joint_names, ep_idx, split_label
         )
 
         # Plotting is optional — skip gracefully if matplotlib is unavailable
         try:
             from anvil_eval.plotting import plot_episode_joints
             plot_path = self._plots_dir / f"episode_{ep_idx:04d}_{split_label}.png"
-            # Trim raw_output to same T and D as predicted
-            raw_trimmed: np.ndarray | None = None
-            if raw_output is not None and raw_output.shape[0] > 0:
-                t = predicted.shape[0]
-                d = predicted.shape[1]
-                raw_trimmed = raw_output[:t, :d]
             plot_episode_joints(
                 predicted, ground_truth, joint_names, metrics, plot_path,
                 raw_output=raw_trimmed,

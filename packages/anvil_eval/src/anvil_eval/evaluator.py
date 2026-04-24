@@ -36,9 +36,11 @@ class EpisodeResult:
     episode_idx: int
     split_label: str
     predicted: np.ndarray     # (T, D) absolute actions (after delta restore)
-    ground_truth: np.ndarray  # (T, D)
+    ground_truth: np.ndarray  # (T, D) absolute ground-truth actions
     joint_names: list[str]
-    raw_output: np.ndarray | None = None  # (T, D) model raw output before delta restore
+    raw_output: np.ndarray | None = None         # (T, D) model raw output before delta restore
+    obs_states: np.ndarray | None = None         # (T, D) observation state at each frame
+    raw_ground_truth: np.ndarray | None = None   # (T, D) GT in same space as raw_output
 
 
 class EpisodeEvaluator:
@@ -60,7 +62,11 @@ class EpisodeEvaluator:
         self.postprocessor = postprocessor
         self.model_type = model_type
         self.device = device
-        self.use_delta_actions = anvil_cfg.get("use_delta_actions", False)
+        _action_type = anvil_cfg.get("action_type", "absolute")
+        if _action_type == "absolute" and anvil_cfg.get("use_delta_actions", False):
+            _action_type = "delta_obs_t"
+        self.action_type = _action_type
+        self.use_delta_actions = _action_type in ("delta_obs_t", "delta_sequential")
         self.delta_exclude_joints = anvil_cfg.get("delta_exclude_joints", [])
         self.task_description = task_description
         self.joint_names = joint_names
@@ -82,6 +88,9 @@ class EpisodeEvaluator:
         predicted_actions: list[np.ndarray] = []
         ground_truth_actions: list[np.ndarray] = []
         raw_actions: list[np.ndarray] = []
+        obs_state_list: list[np.ndarray] = []
+        raw_gt_list: list[np.ndarray] = []
+        _prev_gt: np.ndarray | None = None  # for delta_sequential GT reference
 
         # Reset model state (clears action queues for ACT)
         reset_model_state(self.model)
@@ -143,6 +152,19 @@ class EpisodeEvaluator:
             # Capture raw model output before delta restore
             raw_actions.append(action.copy())
 
+            # Capture observation state for per-frame diagnostics
+            _obs_flat: np.ndarray | None = None
+            if obs_state is not None:
+                _obs_flat = obs_state[-1] if obs_state.ndim > 1 else obs_state
+                obs_state_list.append(_obs_flat.copy())
+
+            # Compute raw ground truth (same space as raw model output)
+            if self.use_delta_actions and _obs_flat is not None:
+                raw_gt_list.append(self._compute_delta_gt(gt_action, _obs_flat, _prev_gt))
+            else:
+                raw_gt_list.append(gt_action.copy())
+            _prev_gt = gt_action.copy()
+
             # Delta action restore — use the reference state from when the current
             # chunk was generated (state_t0) rather than the current obs_state, so
             # that all 8 queued steps share the same reference.
@@ -163,6 +185,8 @@ class EpisodeEvaluator:
             ground_truth=np.stack(ground_truth_actions),
             joint_names=self.joint_names,
             raw_output=np.stack(raw_actions) if raw_actions else None,
+            obs_states=np.stack(obs_state_list) if obs_state_list else None,
+            raw_ground_truth=np.stack(raw_gt_list) if raw_gt_list else None,
         )
 
     def _preprocess_vla(self, obs: dict) -> dict:
@@ -195,6 +219,29 @@ class EpisodeEvaluator:
             if name in self.joint_names:
                 self._exclude_indices.add(self.joint_names.index(name))
         return self._exclude_indices
+
+    def _compute_delta_gt(
+        self,
+        gt_action: np.ndarray,
+        obs_state: np.ndarray,
+        prev_gt: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Compute ground-truth in model-output (delta) space.
+
+        delta_obs_t:     raw_gt[i] = gt_action[i] - obs_state[i]
+        delta_sequential: raw_gt[i] = gt_action[i] - prev_gt[i]  (falls back to obs_state for t=0)
+        Joints in delta_exclude_joints remain as absolute values (matching training).
+        """
+        delta_gt = gt_action.copy()
+        exclude = self._resolve_exclude_indices()
+        if self.action_type == "delta_sequential" and prev_gt is not None:
+            ref = prev_gt
+        else:
+            ref = obs_state
+        for i in range(min(len(delta_gt), len(ref))):
+            if i not in exclude:
+                delta_gt[i] = gt_action[i] - ref[i]
+        return delta_gt
 
     def _restore_delta_action(self, predicted_delta: np.ndarray, obs_state: np.ndarray) -> np.ndarray:
         """Restore absolute action from delta prediction.
