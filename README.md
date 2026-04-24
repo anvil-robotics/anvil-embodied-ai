@@ -149,8 +149,8 @@ Checkpoints are saved to `model_zoo/<dataset>/<policy>_<timestamp>/` by default.
 | `--steps=100000` | 100k | Total training steps |
 | `--batch_size=8` | 8 | Reduce if GPU OOM |
 | `--save_freq=10000` | 10k | Checkpoint interval |
-| `--use-delta-actions` | off | Convert actions to delta form (action − observation.state). Persisted to `anvil_config.json` so inference applies the inverse automatically. |
-| `--delta-exclude-joints=JOINT1,JOINT2` | none | Joints to keep in absolute space when `--use-delta-actions` is on. Resolved by name from the dataset's `meta/info.json`. Useful for grippers, which often train better in absolute space (e.g. `--delta-exclude-joints=left_finger,right_finger`). |
+| `--action-type=TYPE` | `absolute` | Delta action mode: `absolute` (default, no delta), `delta_obs_t` (each action = target − observation at chunk time), or `delta_sequential` (each action = target − previous action). Persisted to `anvil_config.json`; inference applies the inverse automatically. `--use-delta-actions` is a shorthand alias for `--action-type=delta_obs_t`. |
+| `--delta-exclude-joints=JOINT1,JOINT2` | none | Joints to keep in absolute space when using a delta action type. Resolved by name from the dataset's `meta/info.json`. Useful for grippers, which often train better in absolute space (e.g. `--delta-exclude-joints=left_finger,right_finger`). |
 | `--policy.normalization_mapping='{...}'` | policy default | e.g. `{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}`<br><br>Keys:<br>`ACTION` · `STATE` · `VISUAL`<br>Values:<br>`MEAN_STD`   — normalise by μ/σ<br>`MIN_MAX`    — normalise to [0,1]<br>`QUANTILE10` — normalise by p10/p90 (Pi0.5 default; requires quantile stats\*)<br>`IDENTITY`   — passthrough (always use for images)<br><br>mcap-convert datasets lack quantile stats — use `MEAN_STD` for `ACTION`/`STATE`. |
 | `--resume=true` | off | Resume from `--output_dir` checkpoint |
 
