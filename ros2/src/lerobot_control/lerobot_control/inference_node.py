@@ -82,6 +82,7 @@ class LeRobotInferenceNode(Node):
 
             self.action_limiter = ActionLimiter(
                 max_delta=self.max_position_delta,
+                min_delta_threshold=self.min_position_delta,
                 model_joint_order=self.joint_names_config.get("model_joint_order", []),
                 controller_joint_order=self.joint_names_config.get("controller_joint_order", []),
                 use_delta_actions=self.use_delta_actions,
@@ -173,6 +174,7 @@ class LeRobotInferenceNode(Node):
         # Fields from YAML config
         safety_config = self.config.get("safety", {})
         self.max_position_delta = safety_config.get("max_position_delta", 0.1)
+        self.min_position_delta = safety_config.get("min_position_delta", None)
 
         self.joint_state_topic = self.config.get("joint_state_topic", "/joint_states")
         self.camera_mapping = self.config.get("camera_mapping", {})

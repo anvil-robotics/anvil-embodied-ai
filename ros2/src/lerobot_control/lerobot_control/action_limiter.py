@@ -20,6 +20,7 @@ class ActionLimiter:
     def __init__(
         self,
         max_delta: float = 0.1,
+        min_delta_threshold: float | None = None,
         model_joint_order: list[str] | None = None,
         controller_joint_order: list[str] | None = None,
         use_delta_actions: bool = False,
@@ -31,6 +32,10 @@ class ActionLimiter:
 
         Args:
             max_delta: Maximum position change per step (radians)
+            min_delta_threshold: Minimum per-joint change to publish a new command.
+                When set, commands are held at the last published value until the
+                cumulative change exceeds this threshold. Helps overcome motor
+                friction when model deltas are too small to move the joint.
             model_joint_order: Order the ML model outputs actions
             controller_joint_order: Order the ROS2 controller expects
             use_delta_actions: If True, model outputs deltas to add to current position
@@ -39,6 +44,8 @@ class ActionLimiter:
             logger: Optional ROS2 logger
         """
         self.max_delta = max_delta
+        self.min_delta_threshold = min_delta_threshold
+        self._last_published: np.ndarray | None = None
         self.model_joint_order = model_joint_order or []
         self.controller_joint_order = controller_joint_order or []
         self.use_delta_actions = use_delta_actions
@@ -55,6 +62,10 @@ class ActionLimiter:
             for name in (delta_exclude_joints or [])
             if name in ref_order
         }
+
+    def reset(self) -> None:
+        """Reset deadband state (call between episodes or on model reload)."""
+        self._last_published = None
 
     def _log(self, level: str, msg: str):
         """Log message using ROS2 logger or print."""
@@ -183,6 +194,16 @@ class ActionLimiter:
         # Apply delta limiting (always against current position for safety)
         if current_positions is not None:
             action = self.apply_delta_limit(action, current_positions)
+
+        # Deadband: suppress commands smaller than min_delta_threshold to overcome
+        # motor friction when model outputs are consistently tiny.
+        if self.min_delta_threshold is not None:
+            if self._last_published is None:
+                self._last_published = action.copy()
+            else:
+                mask = np.abs(action - self._last_published) >= self.min_delta_threshold
+                action = np.where(mask, action, self._last_published)
+                self._last_published = action.copy()
 
         return action
 
