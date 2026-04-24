@@ -73,6 +73,10 @@ class LeRobotInferenceNode(Node):
         # generated (in model/observation order).  All queued steps in the chunk
         # share this reference so delta restoration is consistent with training.
         self._delta_ref_state: np.ndarray | None = None
+        # Shadow queue of pre-restored absolute actions for delta models.
+        # The model's internal queue stores normalized values; we denormalize the
+        # full chunk together then restore delta → absolute outside the model queue.
+        self._abs_shadow_queue: list[np.ndarray] = []
 
         self._shutting_down: bool = False
         self._has_published: bool = False
@@ -616,8 +620,12 @@ class LeRobotInferenceNode(Node):
 
                 with torch.inference_mode():
                     action = self.model.select_action(observation)
-
-
+                    # Collect remaining normalized queue items BEFORE postprocessing so
+                    # the whole chunk can be denormalized together for delta restore.
+                    if _is_new_chunk and self.use_delta_actions and hasattr(self.model, "_queues"):
+                        _rest_norm = [a.detach().clone() for a in self.model._queues.get("action", [])]
+                    else:
+                        _rest_norm = None
 
                 # Capture reference state right after chunk generation
                 if _is_new_chunk and "observation.state" in _raw_obs:
@@ -642,27 +650,34 @@ class LeRobotInferenceNode(Node):
                         f"[DEBUG] action (post-postproc): [{', '.join(f'{v:.4f}' for v in action)}]"
                     )
 
-                # Chunk-level delta restore: when a new chunk is generated, collect all
-                # queued actions, restore the entire chunk at once, write back absolute
-                # values. Subsequent pops are already absolute — no per-step math needed.
-                if _is_new_chunk and self.use_delta_actions and self._delta_ref_state is not None:
-                    from lerobot_control.delta_restore import restore_delta_chunk as _rdc
-                    from collections import deque as _deque
+                # Chunk-level delta restore via shadow queue.
+                # The model's internal queue stores normalized tensors; we denormalize
+                # the full chunk together, restore delta → absolute, then serve absolute
+                # values from a shadow queue so we never re-enter normalized space.
+                if self.use_delta_actions:
+                    if _is_new_chunk and self._delta_ref_state is not None:
+                        from lerobot_control.delta_restore import restore_delta_chunk as _rdc
 
-                    def _t2np(a):
-                        return (a.cpu().numpy() if hasattr(a, "cpu") else np.asarray(a)).flatten()
+                        def _pp_np(a_t: object) -> np.ndarray:
+                            if self.postprocessor:
+                                a_t = self.postprocessor.process_action(a_t)  # type: ignore[arg-type]
+                            if isinstance(a_t, torch.Tensor):
+                                return a_t.detach().cpu().numpy().flatten()
+                            return np.asarray(a_t).flatten()
 
-                    if hasattr(self.model, "_queues"):
-                        _rest = [_t2np(a) for a in list(self.model._queues.get("action", []))]
-                        _chunk = np.stack([action] + _rest) if _rest else action[np.newaxis]
+                        if _rest_norm is not None:
+                            _rest_denorm = [_pp_np(a) for a in _rest_norm]
+                            _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
+                        else:
+                            _chunk = action[np.newaxis]
                         _abs = _rdc(_chunk, self._delta_ref_state, self.action_type, self._delta_exclude_indices)
-                        self.model._queues["action"] = _deque(
-                            torch.tensor(_a, dtype=torch.float32) for _a in _abs[1:]
-                        )
+                        self._abs_shadow_queue = list(_abs[1:])
                         action = _abs[0]
-                    else:
-                        _abs = _rdc(action[np.newaxis], self._delta_ref_state, self.action_type, self._delta_exclude_indices)
-                        action = _abs[0]
+                    elif self._abs_shadow_queue:
+                        action = self._abs_shadow_queue.pop(0)
+                    elif not hasattr(self.model, "_queues") and self._delta_ref_state is not None:
+                        from lerobot_control.delta_restore import restore_delta_chunk as _rdc
+                        action = _rdc(action[np.newaxis], self._delta_ref_state, self.action_type, self._delta_exclude_indices)[0]
 
                 self._classic_action_deque.append(action)
                 self.metrics.record_inference()

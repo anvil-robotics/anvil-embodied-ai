@@ -92,8 +92,19 @@ class EpisodeEvaluator:
         reset_model_state(self.model)
         self._delta_ref_state = None   # reset per-episode delta reference state
         self._prev_gt_action = None    # reset sequential GT reference
+        # Shadow queue of pre-restored absolute actions (avoids touching model's normalized queue)
+        _abs_shadow_queue: list[np.ndarray] = []
 
         exclude_indices = list(self._resolve_exclude_indices())
+
+        def _tensor_to_np(a: object) -> np.ndarray:
+            if self.postprocessor:
+                a = self.postprocessor.process_action(a)  # type: ignore[arg-type]
+            if isinstance(a, torch.Tensor):
+                if a.dim() > 1:
+                    a = a.squeeze(0)
+                return a.detach().cpu().numpy()
+            return np.asarray(a).flatten()
 
         for rel_idx in tqdm(frame_indices, desc=f"Episode {episode_idx}", leave=False):
             item = dataset[rel_idx]
@@ -132,52 +143,48 @@ class EpisodeEvaluator:
                         processed = obs
                     processed = self._move_to_device(processed)
 
-                action = self.model.select_action(processed)
+                action_raw = self.model.select_action(processed)  # normalized tensor
 
-            # Postprocess
-            if self.postprocessor:
-                action = self.postprocessor.process_action(action)
+                # On new chunk: collect all remaining normalized queue items BEFORE postprocessing.
+                # The model's queue stores normalized values; we must denormalize the full chunk
+                # together so delta restore operates in a consistent physical space.
+                if _is_new_chunk and self.use_delta_actions and hasattr(self.model, "_queues"):
+                    _rest_norm = [a.detach().clone() for a in self.model._queues.get("action", [])]
+                else:
+                    _rest_norm = None
 
-            # To numpy
-            if isinstance(action, torch.Tensor):
-                if action.dim() > 1:
-                    action = action.squeeze(0)
-                action = action.cpu().numpy()
+            # Postprocess current action (normalized → denormalized delta)
+            action = _tensor_to_np(action_raw)
 
-            # Capture raw model output before delta restore
+            # Capture raw model output (denormalized delta) before delta restore
             raw_actions.append(action.copy())
 
-            # Chunk-level delta restore: on new chunk, restore all queued actions at once
-            # so sequential and obs_t modes both work correctly across the chunk.
-            if _is_new_chunk and self.use_delta_actions and self._delta_ref_state is not None:
-                if hasattr(self.model, "_queues"):
-                    _rest = [
-                        (a.cpu().numpy().flatten() if hasattr(a, "cpu") else np.asarray(a).flatten())
-                        for a in list(self.model._queues.get("action", []))
-                    ]
-                    _chunk = np.stack([action] + _rest) if _rest else action[np.newaxis]
+            # Chunk-level delta restore using shadow queue to avoid re-entering normalized space.
+            if self.use_delta_actions:
+                if _is_new_chunk and self._delta_ref_state is not None:
+                    if _rest_norm is not None:
+                        # Denormalize the rest of the chunk (each element in physical/delta space)
+                        _rest_denorm = [_tensor_to_np(a) for a in _rest_norm]
+                        _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
+                    else:
+                        _chunk = action[np.newaxis]
                     _abs = restore_delta_chunk(
                         _chunk, self._delta_ref_state, self.action_type, exclude_indices
                     )
-                    from collections import deque as _deque
-                    self.model._queues["action"] = _deque(
-                        torch.tensor(_a, dtype=torch.float32) for _a in _abs[1:]
-                    )
+                    # Populate shadow queue with future absolute actions (skip index 0 = current)
+                    _abs_shadow_queue = list(_abs[1:])
                     action = _abs[0]
-                else:
-                    # Fallback for models without _queues (single-step restore)
-                    _abs = restore_delta_chunk(
-                        action[np.newaxis], self._delta_ref_state, self.action_type, exclude_indices
-                    )
-                    action = _abs[0]
-            elif not _is_new_chunk and self.use_delta_actions and not hasattr(self.model, "_queues"):
-                # Models without chunk queue (e.g. ACT w/ temporal ensemble): per-step restore
-                _ref = self._delta_ref_state if self._delta_ref_state is not None else _obs_flat
-                if _ref is not None:
-                    _abs = restore_delta_chunk(
-                        action[np.newaxis], _ref, self.action_type, exclude_indices
-                    )
-                    action = _abs[0]
+                elif _abs_shadow_queue:
+                    # Non-new-chunk with queue model: pop pre-restored absolute action
+                    action = _abs_shadow_queue.pop(0)
+                elif not hasattr(self.model, "_queues"):
+                    # Models without chunk queue (e.g. ACT): per-step restore
+                    _ref = self._delta_ref_state if self._delta_ref_state is not None else _obs_flat
+                    if _ref is not None:
+                        _abs = restore_delta_chunk(
+                            action[np.newaxis], _ref, self.action_type, exclude_indices
+                        )
+                        action = _abs[0]
 
             predicted_actions.append(action)
             ground_truth_actions.append(gt_action)
