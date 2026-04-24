@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 """End-to-end CLI smoke test for the anvil training / eval stack.
 
-Two scenarios are tested against the fixture at data/raw/test-session (5 stub MCAPs,
+Five scenarios are tested against the fixture at data/raw/test-session (5 stub MCAPs,
 single right arm):
 
-  AFO  — action_from_observation=true  (mcap-converter-smoke-test-afo.yaml)
-          action[t] = obs[t+N]; command topics in MCAP are ignored.
-          Mirrors datasets recorded without action-command topics.
+  AFO  — action_from_observation=true,  action_type=absolute
+  CMD  — action_from_observation=false, action_type=absolute
+  AFO_DELTA_OBS_T      — AFO dataset + --action-type=delta_obs_t
+  AFO_DELTA_SEQUENTIAL — AFO dataset + --action-type=delta_sequential
+  CMD_DELTA_OBS_T      — CMD dataset + --action-type=delta_obs_t
 
-  CMD  — action_from_observation=false (mcap-converter-smoke-test-cmd.yaml)
-          action sourced from the recorded /commands topic.
-          Mirrors datasets recorded with action-command topics.
+delta scenarios reuse the step-1 dataset produced by afo/cmd and only
+differ in training (steps 2–4).  They share convert_config with their
+base scenario so step 1 is always a no-op (cached) for delta variants.
 
 Each scenario runs all 4 steps: mcap-convert → anvil-trainer → anvil-eval → anvil-eval-ros
 
 Usage:
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py                      # both scenarios, all 4 steps
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario afo       # AFO scenario only
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --select 1,2         # steps 1+2 for both
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --force              # wipe + rerun
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --no-docker          # step 4 skips Docker
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --keep-going         # don't stop on failure
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py                             # all scenarios, all 4 steps
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario afo              # AFO only
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario afo,cmd          # subset
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --select 1,2               # steps 1+2 for all scenarios
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --force                    # wipe + rerun
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --no-docker                # step 4 skips Docker
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --keep-going               # don't stop on failure
 
 Each step reads its inputs from stable artifact paths produced by earlier steps,
 so you can rerun a subset after fixing a later stage without redoing the whole
@@ -75,6 +78,7 @@ class Scenario:
     eval_out: Path
     eval_ros_out: Path
     convert_config: Path
+    action_type: str = "absolute"  # absolute | delta_obs_t | delta_sequential
 
     @property
     def checkpoint(self) -> Path:
@@ -86,13 +90,14 @@ class Scenario:
 
 # mcap-convert appends the input directory name to the output path, so the dataset
 # ends up at <output_parent>/<mcap_root_name>/.  Use scenario-specific parent dirs
-# (afo / cmd) under outputs/ to keep artifacts separate.
+# under outputs/ to keep artifacts separate.
+# Delta scenarios share the SAME dataset as their base (afo/cmd) — step 1 is a no-op.
 _MCAP_NAME = MCAP_ROOT.name  # "test-session"
 
 SCENARIOS: dict[str, Scenario] = {
     "afo": Scenario(
         key="afo",
-        label="AFO (action_from_observation=true)",
+        label="AFO absolute",
         mcap_root=MCAP_ROOT,
         dataset_dir=OUTPUTS / "datasets" / "afo" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "afo" / "smoke",
@@ -102,13 +107,46 @@ SCENARIOS: dict[str, Scenario] = {
     ),
     "cmd": Scenario(
         key="cmd",
-        label="CMD (action_from_observation=false)",
+        label="CMD absolute",
         mcap_root=MCAP_ROOT,
         dataset_dir=OUTPUTS / "datasets" / "cmd" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "cmd" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "cmd" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "cmd" / "ros",
         convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
+    ),
+    "afo_delta_obs_t": Scenario(
+        key="afo_delta_obs_t",
+        label="AFO delta_obs_t",
+        mcap_root=MCAP_ROOT,
+        dataset_dir=OUTPUTS / "datasets" / "afo" / _MCAP_NAME,  # shared with afo
+        train_out=OUTPUTS / "model_zoo" / "afo_delta_obs_t" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "afo_delta_obs_t" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "afo_delta_obs_t" / "ros",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-afo.yaml",
+        action_type="delta_obs_t",
+    ),
+    "afo_delta_sequential": Scenario(
+        key="afo_delta_sequential",
+        label="AFO delta_sequential",
+        mcap_root=MCAP_ROOT,
+        dataset_dir=OUTPUTS / "datasets" / "afo" / _MCAP_NAME,  # shared with afo
+        train_out=OUTPUTS / "model_zoo" / "afo_delta_sequential" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "afo_delta_sequential" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "afo_delta_sequential" / "ros",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-afo.yaml",
+        action_type="delta_sequential",
+    ),
+    "cmd_delta_obs_t": Scenario(
+        key="cmd_delta_obs_t",
+        label="CMD delta_obs_t",
+        mcap_root=MCAP_ROOT,
+        dataset_dir=OUTPUTS / "datasets" / "cmd" / _MCAP_NAME,  # shared with cmd
+        train_out=OUTPUTS / "model_zoo" / "cmd_delta_obs_t" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "cmd_delta_obs_t" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "cmd_delta_obs_t" / "ros",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
+        action_type="delta_obs_t",
     ),
 }
 
@@ -188,25 +226,25 @@ def run_step_train(sc: Scenario, force: bool, steps_override: int) -> StepResult
         return StepResult(ok=True, duration_s=0.0, artifact=ckpt_dir, notes="cached")
 
     t0 = time.monotonic()
-    rc = _run(
-        [
-            "uv", "run", "anvil-trainer",
-            f"--dataset.root={sc.dataset_dir}",
-            "--dataset.repo_id=local",
-            "--policy.type=diffusion",
-            "--policy.push_to_hub=false",
-            "--split-ratio=3,1,1",
-            f"--steps={steps_override}",
-            f"--save_freq={steps_override}",
-            "--log_freq=5",
-            "--batch_size=1",
-            "--num_workers=0",
-            "--eval_freq=0",
-            f"--output_dir={sc.train_out}",
-            "--job_name=smoke",
-        ],
-        env_extra={"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"},
-    )
+    train_cmd = [
+        "uv", "run", "anvil-trainer",
+        f"--dataset.root={sc.dataset_dir}",
+        "--dataset.repo_id=local",
+        "--policy.type=diffusion",
+        "--policy.push_to_hub=false",
+        "--split-ratio=3,1,1",
+        f"--steps={steps_override}",
+        f"--save_freq={steps_override}",
+        "--log_freq=5",
+        "--batch_size=1",
+        "--num_workers=0",
+        "--eval_freq=0",
+        f"--output_dir={sc.train_out}",
+        "--job_name=smoke",
+    ]
+    if sc.action_type != "absolute":
+        train_cmd.append(f"--action-type={sc.action_type}")
+    rc = _run(train_cmd, env_extra={"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
     dt = time.monotonic() - t0
 
     if rc != 0:
@@ -382,8 +420,10 @@ def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--scenario", default="all",
-                   choices=["all", "afo", "cmd"],
-                   help="which scenario(s) to run: afo, cmd, or all (default: all)")
+                   help=(
+                       "comma-separated scenario keys or 'all' (default: all). "
+                       f"Valid: {', '.join(SCENARIOS)}"
+                   ))
     p.add_argument("--select", default="all",
                    help="comma-separated step numbers or 'all' (default: all)")
     p.add_argument("--force", action="store_true",
@@ -400,7 +440,11 @@ def main() -> int:
     if args.scenario == "all":
         scenarios = list(SCENARIOS.values())
     else:
-        scenarios = [SCENARIOS[args.scenario]]
+        keys = [k.strip() for k in args.scenario.split(",") if k.strip()]
+        unknown = [k for k in keys if k not in SCENARIOS]
+        if unknown:
+            raise SystemExit(f"unknown scenario(s): {unknown}; valid: {list(SCENARIOS)}")
+        scenarios = [SCENARIOS[k] for k in keys]
 
     all_results: list[tuple[str, int, str, StepResult]] = []
     overall_t0 = time.monotonic()
