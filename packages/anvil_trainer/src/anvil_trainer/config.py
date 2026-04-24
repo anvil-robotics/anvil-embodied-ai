@@ -66,7 +66,6 @@ class TrainingConfig:
     # delta_obs_t:     delta[k] = action[t+k] - obs[t]  (all k share the same obs reference)
     # delta_sequential: delta[0] = action[t] - obs[t], delta[k] = action[t+k] - action[t+k-1]
     action_type: str = "absolute"
-    use_delta_actions: bool = False  # Shorthand alias for --action-type=delta_obs_t
     delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when using delta actions
     delta_stats_n_steps: int = 1  # Look-ahead steps for delta stats (1 = single-frame, N = k=0..N-1 multi-step)
     dataset_root: str | None = None
