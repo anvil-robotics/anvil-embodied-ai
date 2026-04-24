@@ -7,7 +7,9 @@ a CSV that can be plotted offline with scripts/plot_monitor_csv.py.
 
 Usage:
     ros2 run lerobot_control inference_monitor_node \\
-        --ros-args -p output_dir:=/tmp/monitor
+        --ros-args -p output_dir:=/tmp/monitor \\
+                   -p use_delta_actions:=true \\
+                   -p joint_names:=right_joint1,right_joint2,right_joint3,right_joint4,right_joint5,right_joint6,right_joint7,right_finger_joint1
 """
 
 from __future__ import annotations
@@ -32,6 +34,8 @@ class InferenceMonitorNode(Node):
         super().__init__("inference_monitor_node")
 
         self.declare_parameter("output_dir", "")
+        self.declare_parameter("use_delta_actions", False)
+        self.declare_parameter("joint_names", "")
 
         raw_output_dir = self.get_parameter("output_dir").value
         if not raw_output_dir:
@@ -39,6 +43,13 @@ class InferenceMonitorNode(Node):
             raw_output_dir = f"./inference_monitor_{ts}"
         self._output_dir = Path(raw_output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
+
+        self._use_delta_actions: bool = self.get_parameter("use_delta_actions").value
+        raw_joint_names: str = self.get_parameter("joint_names").value
+        self._joint_names: list[str] = (
+            [n.strip() for n in raw_joint_names.split(",") if n.strip()]
+            if raw_joint_names else []
+        )
 
         # CSV writer
         self._csv_path = self._output_dir / "inference_data.csv"
@@ -64,6 +75,8 @@ class InferenceMonitorNode(Node):
 
         self.get_logger().info(
             f"[monitor] Listening on /monitor/{{obs_state,raw_output,control_cmd}}\n"
+            f"[monitor] use_delta_actions: {self._use_delta_actions}\n"
+            f"[monitor] joint_names: {self._joint_names or '(none, will use indices)'}\n"
             f"[monitor] Output: {self._output_dir}\n"
             f"[monitor] Plot:   uv run python scripts/plot_monitor_csv.py {self._csv_path}"
         )
@@ -107,16 +120,24 @@ class InferenceMonitorNode(Node):
     def _log_step(self, obs: np.ndarray, raw: np.ndarray, cmd: np.ndarray, ts: float) -> None:
         if not self._csv_header_written:
             n = len(obs)
+            # Write metadata comment lines before the CSV header so plot_monitor_csv.py
+            # can auto-configure the plot layout without needing CLI flags.
+            joint_names_str = ",".join(self._joint_names) if self._joint_names else ""
+            self._csv_file.write(f"# use_delta_actions: {str(self._use_delta_actions).lower()}\n")
+            self._csv_file.write(f"# joint_names: {joint_names_str}\n")
+
             header = (
                 ["timestamp"]
                 + [f"obs_state_{i}" for i in range(n)]
                 + [f"raw_output_{i}" for i in range(len(raw))]
                 + [f"control_cmd_{i}" for i in range(len(cmd))]
+                + [f"delta_cmd_{i}" for i in range(len(cmd))]
             )
             self._csv_writer.writerow(header)
             self._csv_header_written = True
 
-        row = [f"{ts:.6f}"] + obs.tolist() + raw.tolist() + cmd.tolist()
+        delta_cmd = cmd - obs[:len(cmd)]
+        row = [f"{ts:.6f}"] + obs.tolist() + raw.tolist() + cmd.tolist() + delta_cmd.tolist()
         self._csv_writer.writerow(row)
         self._csv_file.flush()
 
