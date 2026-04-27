@@ -203,7 +203,8 @@ def main() -> None:
             result.predicted, result.ground_truth, result.joint_names, metrics, plot_path,
             raw_output=result.raw_output,
             obs_states=result.obs_states,
-            use_delta_actions=evaluator.use_delta_actions,
+            action_type=evaluator.action_type,
+            raw_ground_truth=result.raw_ground_truth,
         )
         log.info("[anvil-eval] Episode %d MAE: %.4f", ep_idx, metrics.mae)
 

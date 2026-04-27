@@ -8,7 +8,7 @@ a CSV that can be plotted offline with scripts/plot_monitor_csv.py.
 Usage:
     ros2 run lerobot_control inference_monitor_node \\
         --ros-args -p output_dir:=/tmp/monitor \\
-                   -p use_delta_actions:=true \\
+                   -p action_type:=delta_obs_t \\
                    -p joint_names:=right_joint1,right_joint2,right_joint3,right_joint4,right_joint5,right_joint6,right_joint7,right_finger_joint1
 """
 
@@ -34,7 +34,8 @@ class InferenceMonitorNode(Node):
         super().__init__("inference_monitor_node")
 
         self.declare_parameter("output_dir", "")
-        self.declare_parameter("use_delta_actions", False)
+        self.declare_parameter("action_type", "absolute")
+        self.declare_parameter("use_delta_actions", False)  # legacy; overridden by action_type
         self.declare_parameter("joint_names", "")
 
         raw_output_dir = self.get_parameter("output_dir").value
@@ -44,12 +45,18 @@ class InferenceMonitorNode(Node):
         self._output_dir = Path(raw_output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
-        self._use_delta_actions: bool = self.get_parameter("use_delta_actions").value
+        self._action_type: str = self.get_parameter("action_type").value
+        # Promote legacy use_delta_actions=true to delta_obs_t when action_type not set explicitly
+        if self._action_type == "absolute" and self.get_parameter("use_delta_actions").value:
+            self._action_type = "delta_obs_t"
+
         raw_joint_names: str = self.get_parameter("joint_names").value
         self._joint_names: list[str] = (
             [n.strip() for n in raw_joint_names.split(",") if n.strip()]
             if raw_joint_names else []
         )
+
+        self._prev_cmd: np.ndarray | None = None  # for delta_sequential delta_cmd computation
 
         # CSV writer
         self._csv_path = self._output_dir / "inference_data.csv"
@@ -75,7 +82,7 @@ class InferenceMonitorNode(Node):
 
         self.get_logger().info(
             f"[monitor] Listening on /monitor/{{obs_state,raw_output,control_cmd}}\n"
-            f"[monitor] use_delta_actions: {self._use_delta_actions}\n"
+            f"[monitor] action_type: {self._action_type}\n"
             f"[monitor] joint_names: {self._joint_names or '(none, will use indices)'}\n"
             f"[monitor] Output: {self._output_dir}\n"
             f"[monitor] Plot:   uv run python scripts/plot_monitor_csv.py {self._csv_path}"
@@ -123,7 +130,7 @@ class InferenceMonitorNode(Node):
             # Write metadata comment lines before the CSV header so plot_monitor_csv.py
             # can auto-configure the plot layout without needing CLI flags.
             joint_names_str = ",".join(self._joint_names) if self._joint_names else ""
-            self._csv_file.write(f"# use_delta_actions: {str(self._use_delta_actions).lower()}\n")
+            self._csv_file.write(f"# action_type: {self._action_type}\n")
             self._csv_file.write(f"# joint_names: {joint_names_str}\n")
 
             header = (
@@ -136,7 +143,13 @@ class InferenceMonitorNode(Node):
             self._csv_writer.writerow(header)
             self._csv_header_written = True
 
-        delta_cmd = cmd - obs[:len(cmd)]
+        d = len(cmd)
+        if self._action_type == "delta_sequential":
+            prev = self._prev_cmd if self._prev_cmd is not None else obs[:d]
+            delta_cmd = cmd - prev
+        else:  # delta_obs_t or absolute (column kept for schema consistency)
+            delta_cmd = cmd - obs[:d]
+        self._prev_cmd = cmd.copy()
         row = [f"{ts:.6f}"] + obs.tolist() + raw.tolist() + cmd.tolist() + delta_cmd.tolist()
         self._csv_writer.writerow(row)
         self._csv_file.flush()

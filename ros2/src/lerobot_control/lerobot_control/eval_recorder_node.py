@@ -508,6 +508,9 @@ class EvalRecorderNode(Node):
 
         joint_names = self._joint_names[: predicted.shape[1]]
 
+        raw_gt: np.ndarray | None = None
+        raw_trimmed: np.ndarray | None = None
+
         # Evaluate in model-output space so delta and absolute models are compared fairly.
         if raw_output is not None and raw_output.shape[0] > 0:
             t = predicted.shape[0]
@@ -522,7 +525,6 @@ class EvalRecorderNode(Node):
         else:
             pred_for_metrics = predicted
             gt_for_metrics = ground_truth
-            raw_trimmed = None
 
         metrics = compute_episode_metrics(
             pred_for_metrics, gt_for_metrics, joint_names, ep_idx, split_label
@@ -532,9 +534,18 @@ class EvalRecorderNode(Node):
         try:
             from anvil_eval.plotting import plot_episode_joints
             plot_path = self._plots_dir / f"episode_{ep_idx:04d}_{split_label}.png"
+            obs_states_for_plot = (predicted - raw_trimmed) if raw_trimmed is not None else None
+            raw_gt_for_plot = (
+                raw_gt
+                if (raw_trimmed is not None and self._use_delta_actions)
+                else None
+            )
             plot_episode_joints(
                 predicted, ground_truth, joint_names, metrics, plot_path,
                 raw_output=raw_trimmed,
+                obs_states=obs_states_for_plot,
+                action_type=self._action_type,
+                raw_ground_truth=raw_gt_for_plot,
             )
         except ImportError:
             self.get_logger().warning(

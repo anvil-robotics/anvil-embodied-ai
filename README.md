@@ -169,8 +169,8 @@ Checkpoints are saved to `model_zoo/<dataset>/<policy>_<timestamp>/` by default.
 | `--steps=100000` | 100k | Total training steps |
 | `--batch_size=8` | 8 | Reduce if GPU OOM |
 | `--save_freq=10000` | 10k | Checkpoint interval |
-| `--use-delta-actions` | off | Convert actions to delta form (action − observation.state). Persisted to `anvil_config.json` so inference applies the inverse automatically. |
-| `--delta-exclude-joints=JOINT1,JOINT2` | none | Joints to keep in absolute space when `--use-delta-actions` is on. Resolved by name from the dataset's `meta/info.json`. Useful for grippers, which often train better in absolute space (e.g. `--delta-exclude-joints=left_finger,right_finger`). |
+| `--action-type=TYPE` | `absolute` | How actions are represented during training and inference. Three modes:<br><br>**`absolute`** (default) — raw joint positions. No conversion; the model predicts positions directly.<br><br>**`delta_obs_t`** — per-step delta relative to the current observation state: `Δ[t] = action[t] − obs_state[t]`. The model predicts small relative movements rather than absolute positions; inference restores absolute positions by `predicted[t] = raw_output[t] + obs_state[t]`.<br><br>**`delta_sequential`** *(recommended when using delta)* — sequential delta relative to the previous action: `Δ[t] = action[t] − action[t−1]` (with `action[0] − obs_state` as the initial step). The model predicts incremental changes through the chunk; inference integrates them with a running sum. Produces smoother trajectories since consecutive actions in a dataset naturally differ by small amounts.<br><br>Persisted to `anvil_config.json` so inference applies the inverse automatically. |
+| `--delta-exclude-joints=JOINT1,JOINT2` | none | Joints to keep in absolute space when `--action-type` is `delta_obs_t` or `delta_sequential`. Resolved by name from the dataset's `meta/info.json`. Useful for grippers, which often train better in absolute space (e.g. `--delta-exclude-joints=left_finger,right_finger`). |
 | `--delta-stats-n-steps=N` | 1 | Look-ahead steps used when computing delta normalization statistics. Includes multi-step displacements `action[t+k] - state[t]` for k = 0…N in the stats, so the normalizer's range covers the full chunk instead of only single-step deltas. Prevents loss imbalance for ACT + delta and widens the MIN_MAX clip boundary for Diffusion + delta. Set to `1` to revert to single-frame delta stats. Episode boundaries are respected — cross-episode pairs are excluded. |
 | `--policy.normalization_mapping='{...}'` | policy default | e.g. `{"ACTION":"MIN_MAX","STATE":"MEAN_STD","VISUAL":"IDENTITY"}`<br><br>Keys:<br>`ACTION` · `STATE` · `VISUAL`<br>Values:<br>`MEAN_STD`   — normalise by μ/σ<br>`MIN_MAX`    — normalise to [−1, 1] by observed min/max<br>`QUANTILE10` — normalise by p10/p90 (Pi0.5 default; requires quantile stats\*)<br>`IDENTITY`   — passthrough (always use for images)<br><br>**`ACTION` guidance by policy:**<br>• **Diffusion** — use `MIN_MAX` (default). Diffusion clips the denoised action to ±1 in normalised space at every step (`clip_sample=True, clip_sample_range=1.0`); `MEAN_STD` causes extreme actions beyond ±1 σ to be silently truncated, hurting peak tracking.<br>• **ACT / SmolVLA / Pi0** — use `MEAN_STD`.<br>• **Pi0.5** — use `MEAN_STD` unless quantile stats are available (see note below).<br><br>`QUANTILE10` requires `q01`/`q99` stats not produced by `mcap-convert` — see note below. `MIN_MAX` and `MEAN_STD` are always available. |
 | `--resume=PATH` | — | Resume a previous job. `PATH` is the job root or a specific checkpoint dir (e.g. `model_zoo/my-task/checkpoints/020000`). Omit checkpoint to resume from `last`. |
@@ -201,6 +201,7 @@ uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --action-type=delta_sequential \  # optional: absolute (default) · delta_obs_t · delta_sequential
   --wandb.enable=false \  # set true to save training logs to W&B
 ```
 
@@ -213,6 +214,7 @@ uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
   --policy.normalization_mapping='{"ACTION":"MIN_MAX","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --action-type=delta_sequential \  # optional: absolute (default) · delta_obs_t · delta_sequential
   --wandb.enable=false \  # set true to save training logs to W&B
 ```
 
@@ -323,7 +325,7 @@ uv run anvil-trainer --resume=model_zoo/pick-and-place
 uv run anvil-trainer --resume=model_zoo/pick-and-place/checkpoints/020000
 ```
 
-Only pass `--resume` — all other settings are restored from the saved `train_config.json` in the checkpoint. Delta action settings (`--use-delta-actions`, `--delta-exclude-joints`) are inherited automatically from the checkpoint's `anvil_config.json`.
+Only pass `--resume` — all other settings are restored from the saved `train_config.json` in the checkpoint. Delta action settings (`--action-type`, `--delta-exclude-joints`) are inherited automatically from the checkpoint's `anvil_config.json`.
 
 ### 3. Offline Evaluation
 
