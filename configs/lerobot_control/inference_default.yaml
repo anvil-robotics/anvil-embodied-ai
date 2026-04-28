@@ -15,10 +15,6 @@ model:
   # Set to the task the model was trained/finetuned for.
   task_description: null
 
-  # use_delta_actions: read automatically from anvil_config.json in the checkpoint.
-  # Set here only for checkpoints trained before anvil_config.json was introduced.
-  # use_delta_actions: false
-
 # -----------------------------------------------------------------------------
 # Inference Tuning (per model type)
 # -----------------------------------------------------------------------------
@@ -97,8 +93,6 @@ joint_names:
   # Anvil bimanual model uses position + velocity + effort as state inputs
   state_features:
     - position
-    - velocity
-    - effort
 
 # -----------------------------------------------------------------------------
 # Arm Configuration
@@ -141,4 +135,3 @@ camera_mapping:
 # safety:
 #   max_position_delta: 0.1
 #   min_position_delta: 0.05
-

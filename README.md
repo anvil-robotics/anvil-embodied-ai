@@ -94,14 +94,7 @@ Pick the config that matches your recording mode and arm count:
 | `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | Observation lookahead (`action_from_observation`) |
 
 ```bash
-# Leader-follower, bimanual
-uv run mcap-convert --input-dir data/raw/my-sessions --config configs/mcap_converter/openarm_bimanual.yaml
-
-# Quest VR, bimanual
-uv run mcap-convert --input-dir data/raw/my-sessions --config configs/mcap_converter/openarm_bimanual_quest.yaml
-
-# Quest VR, single-arm — command topic was not recorded
-uv run mcap-convert --input-dir data/raw/my-sessions --config configs/mcap_converter/openarm_single_quest_afo.yaml
+uv run mcap-convert --input-dir data/raw/my-sessions --config configs/mcap_converter/target-config.yaml
 ```
 
 **`action_from_observation`**

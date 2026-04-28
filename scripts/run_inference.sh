@@ -97,6 +97,32 @@ if [[ "$ECHO_TOPIC_ONLY_REQUESTED" == true ]]; then
     export ECHO_TOPIC_ONLY=true
 fi
 
+# Auto-detect ACTION_TYPE from model checkpoint's anvil_config.json.
+# Checks pretrained_model/ subdirectory first, then checkpoint root, then HF snapshots/.
+# Always overrides any existing ACTION_TYPE value.
+if [[ -n "${MODEL_PATH:-}" ]]; then
+    _model_root="${MODEL_PATH}"
+    _anvil_config=""
+    # 1. pretrained_model/anvil_config.json (most common)
+    if [[ -f "${_model_root}/pretrained_model/anvil_config.json" ]]; then
+        _anvil_config="${_model_root}/pretrained_model/anvil_config.json"
+    # 2. root-level anvil_config.json
+    elif [[ -f "${_model_root}/anvil_config.json" ]]; then
+        _anvil_config="${_model_root}/anvil_config.json"
+    # 3. HF cache snapshot: snapshots/<hash>/anvil_config.json
+    elif [[ -d "${_model_root}/snapshots" ]]; then
+        _anvil_config=$(find "${_model_root}/snapshots" -maxdepth 2 -name "anvil_config.json" | sort -r | head -1)
+    fi
+
+    if [[ -n "${_anvil_config}" && -f "${_anvil_config}" ]]; then
+        _detected=$(python3 -c "import json; d=json.load(open('${_anvil_config}')); print(d.get('action_type','absolute'))" 2>/dev/null || true)
+        if [[ -n "${_detected}" ]]; then
+            export ACTION_TYPE="${_detected}"
+            echo "[run_inference] ACTION_TYPE=${ACTION_TYPE} (auto-detected from $(basename $(dirname ${_anvil_config})))"
+        fi
+    fi
+fi
+
 # Production-only: MONITOR_ENABLE env var triggers inference_monitor_node inside the container;
 # also pre-create the output dir as current user so Docker can't claim root ownership.
 REAL_MONITOR=false
@@ -113,7 +139,7 @@ echo "[run_inference] compose: $(basename "$COMPOSE_FILE") | args: ${PASSTHROUGH
 
 # Run docker compose and capture exit code (don't let set -e abort before plotting)
 set +e
-docker compose -f "$COMPOSE_FILE" "${PASSTHROUGH[@]}"
+docker compose -f "$COMPOSE_FILE" "${PASSTHROUGH[@]}" --remove-orphans
 COMPOSE_EXIT=$?
 set -e
 

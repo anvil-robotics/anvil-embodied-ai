@@ -43,6 +43,8 @@ class ActionLimiter:
         self.max_delta = max_delta
         self.min_delta_threshold = min_delta_threshold
         self._last_published: np.ndarray | None = None
+        self._pending_delta: np.ndarray | None = None
+        self._last_raw_action: np.ndarray | None = None
         self.model_joint_order = model_joint_order or []
         self.controller_joint_order = controller_joint_order or []
         self.logger = logger
@@ -62,6 +64,8 @@ class ActionLimiter:
     def reset(self) -> None:
         """Reset deadband state (call between episodes or on model reload)."""
         self._last_published = None
+        self._pending_delta = None
+        self._last_raw_action = None
 
 
     def _log(self, level: str, msg: str):
@@ -174,15 +178,29 @@ class ActionLimiter:
         if current_positions is not None:
             action = self.apply_delta_limit(action, current_positions)
 
-        # Deadband: suppress commands smaller than min_delta_threshold to overcome
-        # motor friction when model outputs are consistently tiny.
+        # Deadband: suppress commands whose accumulated pending delta hasn't reached
+        # min_delta_threshold yet. Each step's per-step increment is added to _pending_delta.
+        # When a joint's pending crosses the threshold, publish last_published + pending
+        # and reset that joint's accumulator. This works for all action types:
+        #   delta_sequential: per-step increments are the individual delta_k values (cumsum)
+        #   delta_obs_t:      per-step increments are intra-chunk trajectory steps
+        #   absolute:         per-step increments are step-to-step target changes
         if self.min_delta_threshold is not None:
             if self._last_published is None:
                 self._last_published = action.copy()
+                self._pending_delta = np.zeros_like(action)
+                self._last_raw_action = action.copy()
             else:
-                mask = np.abs(action - self._last_published) >= self.min_delta_threshold
-                action = np.where(mask, action, self._last_published)
+                # Accumulate per-step increment into pending
+                step = action - self._last_raw_action
+                self._last_raw_action = action.copy()
+                self._pending_delta = self._pending_delta + step
+
+                mask = np.abs(self._pending_delta) >= self.min_delta_threshold
+                candidate = self._last_published + self._pending_delta
+                action = np.where(mask, candidate, self._last_published)
                 self._last_published = action.copy()
+                self._pending_delta = np.where(mask, 0.0, self._pending_delta)
 
         return action
 

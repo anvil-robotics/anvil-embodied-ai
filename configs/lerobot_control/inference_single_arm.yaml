@@ -1,35 +1,66 @@
 # =============================================================================
-# LeRobot Inference Configuration — SINGLE ARM (right)
+# LeRobot Inference Configuration
 # =============================================================================
-# For single-arm datasets (8 DOF state, 8 DOF action).
-# For bimanual use: inference_default.yaml
+# Parameters set via ROS2 launch args (not in this file):
+#   model_path, device, control_frequency, image_height/width, echo_topic_only
+#
+# Model type and training flags are auto-read from the checkpoint.
+# Only set fields here to override checkpoint values or provide runtime config.
 
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
 model:
+  # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion
+  # Set to the task the model was trained/finetuned for.
   task_description: null
+
+# -----------------------------------------------------------------------------
+# Inference Tuning (per model type)
+# -----------------------------------------------------------------------------
+# Override checkpoint defaults. null = use the value the model was trained with.
+# Only the section matching your model type is used; others are ignored.
 
 inference_tuning:
 
-  # ACT
+  # ACT — lightweight transformer, single forward pass per chunk
   act:
+    # n_action_steps: steps to execute before re-running inference.
+    #   Tuning: jittery → raise; hesitates → lower; GPU slow → lower
     n_action_steps: null
+    # temporal_ensemble_coeff: re-infers every step, exponentially weights
+    #   overlapping predictions. Use 0.01 (paper default). Forces n_action_steps=1.
     temporal_ensemble_coeff: null
 
-  # Diffusion
+  # Diffusion — iterative denoising (UNet)
   diffusion:
     n_action_steps: null
+    # num_inference_steps: denoising steps at inference time.
+    #   Default (null) = num_train_timesteps (100). Set 10 for real-time (78ms vs 711ms).
     num_inference_steps: 10
 
-  # RTC — VLA models only
+  # RTC — VLA models only (pi0, pi0.5, smolvla), always enabled
+  #   Background thread runs inference continuously; control loop reads from ActionQueue.
   rtc:
+    # inference_delay: fallback step-count for first inference before LatencyTracker kicks in.
+    #   Real-robot tuned: ceil(~330ms × 30Hz) ≈ 10. Auto-adjusted after first inference.
     inference_delay: 10
+    # queue_trigger_threshold: re-trigger inference when queue depth ≤ this.
+    #   Set equal to chunk_size for maximum RTC overlap.
     queue_trigger_threshold: 50
+    # execution_horizon: steps used from each chunk before re-inferring.
+    #   Higher → less frequent inference, slower reaction. Lower → faster reaction.
     execution_horizon: 12
     max_guidance_weight: 10.0
     prefix_attention_schedule: EXP
 
+# -----------------------------------------------------------------------------
+# Joint Configuration
+# -----------------------------------------------------------------------------
 joint_state_topic: "/joint_states"
 
 joint_names:
+  # Joint order as output by ML model (must match training dataset)
   model_joint_order:
     - finger_joint1
     - joint1
@@ -40,6 +71,7 @@ joint_names:
     - joint6
     - joint7
 
+  # Joint order expected by ROS2 forward_position_controller
   controller_joint_order:
     - joint1
     - joint2
@@ -50,14 +82,23 @@ joint_names:
     - joint7
     - finger_joint1
 
-  # Single arm: right only
+  # arm_mapping controls how observation.state is assembled:
+  #   Keys are used in joint name lookup: f"{observation_prefix}_{arm_key}_{joint_id}"
+  #   For bimanual Anvil robot: {l: left, r: right} → 2×8 = 16 DOF state
+  #   For pi05_libero_finetuned (single-arm, 8 DOF): use only one arm below.
   arm_mapping:
+    # l: left
     r: right
 
+  # Anvil bimanual model uses position + velocity + effort as state inputs
   state_features:
     - position
-    - velocity
-    - effort
+
+# -----------------------------------------------------------------------------
+# Arm Configuration — REMAPPED for eval
+# -----------------------------------------------------------------------------
+# Inference node publishes to /eval/* so the recorder can distinguish
+# predicted actions from the GT actions replayed by mcap_player_node.
 
 arms:
   right:
@@ -66,7 +107,24 @@ arms:
     action_start: 0
     action_end: 8
 
+# -----------------------------------------------------------------------------
+# Camera Mapping
+# -----------------------------------------------------------------------------
+# ROS topic -> ML model camera name (must match training config)
+
 camera_mapping:
   "/cam_waist/image_raw/compressed": "waist"
   "/cam_wrist_r/image_raw/compressed": "wrist_r"
   "/cam_chest/image_raw/compressed": "chest"
+
+# -----------------------------------------------------------------------------
+# Safety Parameters
+# -----------------------------------------------------------------------------
+# max_position_delta: maximum joint position change per step (radians).
+# min_position_delta: minimum per-joint change required to publish a new command (radians).
+#   Use to overcome motor friction when model delta outputs are too small to move joints.
+#   Commands are held at last published value until cumulative change exceeds this threshold.
+#   Default: disabled (null). Recommended starting value: 0.05.
+# safety:
+#   max_position_delta: 0.1
+#   min_position_delta: 0.05
