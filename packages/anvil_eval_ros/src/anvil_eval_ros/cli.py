@@ -140,6 +140,41 @@ def parse_args() -> argparse.Namespace:
 # MCAP collection (mirrors mcap_converter.collect_mcap_files)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _find_conversion_config(
+    mcap_root: Path,
+    mcap_root_arg: Path | None = None,
+    dataset_dir: Path | None = None,
+) -> Path | None:
+    """Locate conversion_config.yaml in priority order."""
+    if dataset_dir is not None:
+        direct = dataset_dir / "conversion_config.yaml"
+        if direct.exists():
+            return direct
+    candidates = ([mcap_root_arg] if mcap_root_arg else []) + [mcap_root]
+    for root in candidates:
+        candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _sample_episodes_from_split(
+    split_info: dict,
+    split: str,
+    num_eps: int | None,
+    rng: random.Random,
+) -> list[tuple[int, str]]:
+    """Sample episodes from split_info, return [(ep_idx, split_name)]."""
+    splits_to_run = ("train", "val", "test") if split == "all" else (split,)
+    result = []
+    for split_name in splits_to_run:
+        ep_list = list(split_info.get(split_name, []))
+        if num_eps is not None:
+            ep_list = rng.sample(ep_list, min(len(ep_list), num_eps))
+        result.extend((ep_idx, split_name) for ep_idx in ep_list)
+    return result
+
+
 def _mcap_has_commands_topic(mcap_path: Path) -> bool:
     """Return True if the MCAP file contains any .../commands topic."""
     try:
@@ -168,25 +203,7 @@ def _read_synthesis_info(
     except ImportError:
         return None
 
-    config_path: Path | None = None
-
-    # Highest priority: explicit dataset_dir (e.g. from --dataset-dir CLI arg)
-    if dataset_dir is not None:
-        direct = dataset_dir / "conversion_config.yaml"
-        if direct.exists():
-            config_path = direct
-
-    if config_path is None:
-        candidates: list[Path] = []
-        if mcap_root_arg is not None:
-            candidates.append(mcap_root_arg)
-        candidates.append(mcap_root)
-        for root in candidates:
-            candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
-            if candidate.exists():
-                config_path = candidate
-                break
-
+    config_path = _find_conversion_config(mcap_root, mcap_root_arg, dataset_dir)
     if config_path is None:
         return None
 
@@ -215,7 +232,7 @@ def collect_mcap_files(mcap_root: Path) -> list[Path]:
     """Recursively collect and sort MCAP files — same order as mcap_converter."""
     mcap_paths = []
     for root, _, files in os.walk(mcap_root):
-        for file in sorted(files):
+        for file in files:
             if file.endswith(".mcap"):
                 mcap_paths.append(Path(root) / file)
     return sorted(mcap_paths)
@@ -291,25 +308,7 @@ def _detect_arms_from_conversion_config(
     except ImportError:
         return None
 
-    config_path: Path | None = None
-
-    # Highest priority: explicit dataset_dir
-    if dataset_dir is not None:
-        direct = dataset_dir / "conversion_config.yaml"
-        if direct.exists():
-            config_path = direct
-
-    if config_path is None:
-        candidates: list[Path] = []
-        if mcap_root_arg is not None:
-            candidates.append(mcap_root_arg)
-        candidates.append(mcap_root)
-        for root in candidates:
-            candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
-            if candidate.exists():
-                config_path = candidate
-                break
-
+    config_path = _find_conversion_config(mcap_root, mcap_root_arg, dataset_dir)
     if config_path is None:
         return None
 
@@ -582,15 +581,7 @@ def main() -> None:
         split_info = load_split_info(checkpoint_path)
 
         if split_info:
-            splits_to_run = ("train", "val", "test") if args.split == "all" else (args.split,)
-            episodes_to_eval = []
-            for split_name in splits_to_run:
-                ep_list = split_info.get(split_name, [])
-                if args.num_eps is not None:
-                    n = min(len(ep_list), args.num_eps)
-                    ep_list = rng.sample(ep_list, n)
-                for ep_idx in ep_list:
-                    episodes_to_eval.append((ep_idx, split_name))
+            episodes_to_eval = _sample_episodes_from_split(split_info, args.split, args.num_eps, rng)
         else:
             # No split info: compute a default 8:1:1 split from available MCAP files.
             # WARNING: this may not match the actual training split.
@@ -610,15 +601,7 @@ def main() -> None:
                 "(%d train / %d val / %d test). This may NOT match the actual training split.",
                 n_train, n_val, n_test,
             )
-            splits_to_run = ("train", "val", "test") if args.split == "all" else (args.split,)
-            episodes_to_eval = []
-            for split_name in splits_to_run:
-                ep_list = split_info.get(split_name, [])
-                if args.num_eps is not None:
-                    n = min(len(ep_list), args.num_eps)
-                    ep_list = rng.sample(ep_list, n)
-                for ep_idx in ep_list:
-                    episodes_to_eval.append((ep_idx, split_name))
+            episodes_to_eval = _sample_episodes_from_split(split_info, args.split, args.num_eps, rng)
 
     # Filter to episodes that have corresponding MCAP files
     valid_episodes = []

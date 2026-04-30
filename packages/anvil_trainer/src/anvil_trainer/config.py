@@ -21,9 +21,16 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-# =============================================================================
-# TrainingConfig
-# =============================================================================
+def _pop_argv(flag: str, *, remove: bool = True) -> str | None:
+    """Extract --flag=VALUE from sys.argv, return VALUE or None."""
+    prefix = f"--{flag}="
+    for arg in sys.argv:
+        if arg.startswith(prefix):
+            val = arg.split("=", 1)[1]
+            if remove:
+                sys.argv.remove(arg)
+            return val
+    return None
 
 
 def _parse_resume_path(raw: str) -> tuple[str, str]:
@@ -100,90 +107,40 @@ class TrainingConfig:
             --action-type=absolute|delta_obs_t|delta_sequential
             --use-delta-actions: Legacy flag, maps to --action-type=delta_obs_t
         """
-        # --exclude-observation=images.chest,images.wrist_l,velocity,effort
-        excl_str = None
-        for arg in sys.argv:
-            if arg.startswith("--exclude-observation="):
-                excl_str = arg.split("=", 1)[1]
-                sys.argv.remove(arg)
-                break
-        if excl_str is None:
-            excl_str = os.environ.get("LEROBOT_EXCLUDE_OBSERVATION", "")
+        excl_str = _pop_argv("exclude-observation") or os.environ.get("LEROBOT_EXCLUDE_OBSERVATION", "")
         exclude_observation = [k.strip() for k in excl_str.split(",") if k.strip()] or None
 
-        # Task description from --task-description arg (takes precedence over env var)
-        task_override = None
-        for arg in sys.argv:
-            if arg.startswith("--task-description="):
-                task_override = arg.split("=", 1)[1]
-                sys.argv.remove(arg)
-                break
-        # Fall back to environment variable
-        if task_override is None:
-            task_override = os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
+        task_override = _pop_argv("task-description") or os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
 
-        # action_type from --action-type= arg (remove to avoid lerobot arg parsing error)
-        action_type = "absolute"
-        for arg in list(sys.argv):
-            if arg.startswith("--action-type="):
-                action_type = arg.split("=", 1)[1]
-                sys.argv.remove(arg)
-                break
+        action_type = _pop_argv("action-type") or "absolute"
         # Backward compat: --use-delta-actions maps to delta_obs_t
         if "--use-delta-actions" in sys.argv:
             if action_type == "absolute":
                 action_type = "delta_obs_t"
             sys.argv.remove("--use-delta-actions")
 
-        # Joints to exclude from delta transform (kept in absolute space)
-        delta_exclude_joints: list[str] | None = None
-        for arg in sys.argv:
-            if arg.startswith("--delta-exclude-joints="):
-                raw = arg.split("=", 1)[1]
-                delta_exclude_joints = [j.strip() for j in raw.split(",") if j.strip()]
-                sys.argv.remove(arg)
-                break
+        _dej_raw = _pop_argv("delta-exclude-joints")
+        delta_exclude_joints: list[str] | None = (
+            [j.strip() for j in _dej_raw.split(",") if j.strip()] if _dej_raw else None
+        )
 
-        # Number of look-ahead steps for delta stats computation
-        delta_stats_n_steps = 1
-        for arg in sys.argv:
-            if arg.startswith("--delta-stats-n-steps="):
-                delta_stats_n_steps = int(arg.split("=", 1)[1])
-                sys.argv.remove(arg)
-                break
+        delta_stats_n_steps = int(_pop_argv("delta-stats-n-steps") or 1)
 
-        # Episode split ratios from --split-ratio arg (remove to avoid lerobot arg parsing error)
-        split_ratio = [8.0, 1.0, 1.0]  # default: train/val/test
-        for arg in sys.argv:
-            if arg.startswith("--split-ratio="):
-                parts = [float(x) for x in arg.split("=", 1)[1].split(",")]
-                if len(parts) == 2:
-                    parts.append(0.0)  # no test set
-                split_ratio = parts
-                sys.argv.remove(arg)
-                break
+        _sr_raw = _pop_argv("split-ratio")
+        if _sr_raw:
+            parts = [float(x) for x in _sr_raw.split(",")]
+            split_ratio = parts + [0.0] if len(parts) == 2 else parts
+        else:
+            split_ratio = [8.0, 1.0, 1.0]
 
-        # Random episode subset before split: --max-episodes=N
-        max_episodes: int | None = None
-        for arg in sys.argv:
-            if arg.startswith("--max-episodes="):
-                max_episodes = int(arg.split("=", 1)[1])
-                sys.argv.remove(arg)
-                break
+        _me_raw = _pop_argv("max-episodes")
+        max_episodes: int | None = int(_me_raw) if _me_raw else None
 
-        # Extract dataset_root and policy_type early (needed for naming and backbone injection)
-        dataset_root = None
-        for arg in sys.argv:
-            if arg.startswith("--dataset.root="):
-                dataset_root = arg.split("=", 1)[1]
-                break
+        # peek (no remove) — needed for naming and backbone injection
+        dataset_root = _pop_argv("dataset.root", remove=False)
         dataset_name = Path(dataset_root).name if dataset_root else "dataset"
 
-        policy_type = "run"
-        for arg in sys.argv:
-            if arg.startswith("--policy.type="):
-                policy_type = arg.split("=", 1)[1]
-                break
+        policy_type = _pop_argv("policy.type", remove=False) or "run"
 
         # When --policy.path is given without --policy.type, read the type from
         # the checkpoint's config.json so the auto-generated job_name is meaningful.
@@ -302,29 +259,9 @@ class TrainingConfig:
             if not any(a.startswith("--wandb.project=") for a in sys.argv):
                 sys.argv.append(f"--wandb.project={dataset_name}")
 
-        # Backbone selection from --backbone= arg (for ACT/Diffusion; VLAs use their own vision)
-        backbone = "resnet18"
-        for arg in sys.argv:
-            if arg.startswith("--backbone="):
-                backbone = arg.split("=", 1)[1]
-                sys.argv.remove(arg)
-                break
-
-        # Free-text note for this run (stored in anvil_config.json + wandb)
-        note: str | None = None
-        for arg in sys.argv:
-            if arg.startswith("--note="):
-                note = arg.split("=", 1)[1]
-                sys.argv.remove(arg)
-                break
-
-        # Append text to existing note when resuming (--note-append=TEXT)
-        note_append: str | None = None
-        for arg in sys.argv:
-            if arg.startswith("--note-append="):
-                note_append = arg.split("=", 1)[1]
-                sys.argv.remove(arg)
-                break
+        backbone = _pop_argv("backbone") or "resnet18"
+        note: str | None = _pop_argv("note")
+        note_append: str | None = _pop_argv("note-append")
 
         # Defaults injection — skip if resuming to avoid draccus decoding errors
         if not is_resume:

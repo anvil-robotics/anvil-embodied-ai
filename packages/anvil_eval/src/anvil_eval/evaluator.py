@@ -100,7 +100,7 @@ class EpisodeEvaluator:
         # Shadow queue of pre-restored absolute actions (avoids touching model's normalized queue)
         _abs_shadow_queue: deque[np.ndarray] = deque()
 
-        exclude_indices = list(self._resolve_exclude_indices())
+        exclude_indices = self._resolve_exclude_indices()
 
         def _tensor_to_np(a: object) -> np.ndarray:
             if self.postprocessor:
@@ -161,8 +161,7 @@ class EpisodeEvaluator:
             # Postprocess current action (normalized → denormalized delta)
             action = _tensor_to_np(action_raw)
 
-            # Capture raw model output (denormalized delta) before delta restore
-            raw_actions.append(action.copy())
+            raw_actions.append(action)
 
             # Capture observation state for per-frame diagnostics
             if obs_state is not None:
@@ -170,9 +169,9 @@ class EpisodeEvaluator:
 
             # Compute raw ground truth (same space as raw model output)
             if self.use_delta_actions and _obs_flat is not None:
-                raw_gt_list.append(self._compute_delta_gt(gt_action, _obs_flat, _prev_gt))
+                raw_gt_list.append(self._compute_delta_gt(gt_action, _obs_flat, _prev_gt, exclude_indices))
             else:
-                raw_gt_list.append(gt_action.copy())
+                raw_gt_list.append(gt_action)
             _prev_gt = gt_action.copy()
 
             # Chunk-level delta restore using shadow queue to avoid re-entering normalized space.
@@ -252,40 +251,24 @@ class EpisodeEvaluator:
         gt_action: np.ndarray,
         obs_state: np.ndarray,
         prev_gt: np.ndarray | None = None,
+        exclude: set[int] | None = None,
     ) -> np.ndarray:
         """Compute ground-truth in model-output (delta) space.
 
-        delta_obs_t:     raw_gt[i] = gt_action[i] - obs_state[i]
-        delta_sequential: raw_gt[i] = gt_action[i] - prev_gt[i]  (falls back to obs_state for t=0)
+        delta_obs_t:      raw_gt = gt_action - obs_state
+        delta_sequential: raw_gt = gt_action - prev_gt  (falls back to obs_state for t=0)
         Joints in delta_exclude_joints remain as absolute values (matching training).
         """
+        if exclude is None:
+            exclude = self._resolve_exclude_indices()
+        ref = prev_gt if (self.action_type == "delta_sequential" and prev_gt is not None) else obs_state
+        n = min(len(gt_action), len(ref))
         delta_gt = gt_action.copy()
-        exclude = self._resolve_exclude_indices()
-        if self.action_type == "delta_sequential" and prev_gt is not None:
-            ref = prev_gt
-        else:
-            ref = obs_state
-        for i in range(min(len(delta_gt), len(ref))):
-            if i not in exclude:
-                delta_gt[i] = gt_action[i] - ref[i]
+        delta_gt[:n] = gt_action[:n] - ref[:n]
+        for i in exclude:
+            if i < len(delta_gt):
+                delta_gt[i] = gt_action[i]
         return delta_gt
-
-    def _restore_delta_action(self, predicted_delta: np.ndarray, obs_state: np.ndarray) -> np.ndarray:
-        """Restore absolute action from delta prediction.
-
-        delta = action - observation.state (during training)
-        absolute = delta + observation.state (restore)
-        Joints in delta_exclude_joints stay as-is (already absolute).
-        """
-        predicted_abs = predicted_delta.copy()
-        exclude = self._resolve_exclude_indices()
-
-        for i in range(min(len(predicted_abs), len(obs_state))):
-            if i not in exclude:
-                predicted_abs[i] = predicted_delta[i] + obs_state[i]
-
-        return predicted_abs
-
 
 def load_model(checkpoint: str, device: str):
     """Load model + processors from checkpoint using ModelLoader.
