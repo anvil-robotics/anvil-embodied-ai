@@ -39,6 +39,8 @@
 #   EVAL_USE_DELTA_ACTIONS — "true" when model was trained with delta actions (auto-set from anvil_config.json)
 #   EVAL_ACTION_TYPE       — delta mode: "delta_obs_t" or "delta_sequential" (auto-set from anvil_config.json)
 #   EVAL_DELTA_EXCLUDE_JOINTS — ROS2 array of joints kept absolute in delta mode (auto-set)
+#   EVAL_DATASET_FPS       — training dataset fps (auto-set from meta/info.json, default 30); used to
+#                            downsample 60fps MCAP GT to match training data rate
 #   MONITOR_ENABLE        — "true" to publish /monitor/* topics for inference_monitor_node
 #   MONITOR_OUTPUT_DIR    — host path for monitor CSV (auto-set to OUTPUT_DIR/monitor)
 
@@ -161,6 +163,7 @@ services:
         -p arm_names:=${EVAL_ARM_NAMES:-["left","right"]}
         -p use_delta_actions:=${EVAL_USE_DELTA_ACTIONS:-false}
         -p action_type:=${EVAL_ACTION_TYPE:-delta_obs_t}
+        -p dataset_fps:=${EVAL_DATASET_FPS:-30}
         -p delta_exclude_joints:=${EVAL_DELTA_EXCLUDE_JOINTS:-[]}
 
 networks:

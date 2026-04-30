@@ -466,6 +466,36 @@ def _ros2_list(items: list[str]) -> str:
 # Output dir resolution
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _read_dataset_fps(
+    mcap_root: Path,
+    mcap_root_arg: Path | None = None,
+) -> int:
+    """Read the dataset fps from meta/info.json next to the MCAP root.
+
+    The dataset directory mirrors the MCAP root name under data/datasets/:
+      data/raw/{name}/  →  data/datasets/{name}/meta/info.json
+
+    Returns 30 if the file is not found.
+    """
+    candidates: list[Path] = []
+    if mcap_root_arg is not None:
+        candidates.append(mcap_root_arg)
+    candidates.append(mcap_root)
+
+    for root in candidates:
+        info_path = root.parent.parent / "datasets" / root.name / "meta" / "info.json"
+        if info_path.exists():
+            try:
+                data = json.loads(info_path.read_text())
+                fps = data.get("fps")
+                if fps:
+                    return int(fps)
+            except Exception:
+                pass
+
+    return 30
+
+
 def resolve_output_dir(checkpoint_path: Path, mcap_root: Path) -> Path:
     dataset_name = mcap_root.name
     checkpoint_name = checkpoint_path.name
@@ -510,6 +540,10 @@ def main() -> None:
         _action_type_raw = "delta_obs_t"
     action_type: str = _action_type_raw
     delta_exclude_joints: list[str] = anvil_cfg.get("delta_exclude_joints") or []
+
+    # Read dataset fps (so eval-recorder can downsample 60fps MCAP GT to match)
+    dataset_fps = _read_dataset_fps(mcap_root, mcap_root_arg)
+    log.info("[anvil-eval-ros] dataset_fps=%d (from meta/info.json)", dataset_fps)
 
     # 1. Build episode → MCAP path mapping
     ep_map = build_episode_map(mcap_root)
@@ -689,6 +723,8 @@ def main() -> None:
         "EVAL_USE_DELTA_ACTIONS": "true" if use_delta_actions else "false",
         "EVAL_ACTION_TYPE": action_type,
         "EVAL_DELTA_EXCLUDE_JOINTS": _ros2_list(delta_exclude_joints) if delta_exclude_joints else "[]",
+        # dataset fps for GT downsampling (from meta/info.json)
+        "EVAL_DATASET_FPS": str(dataset_fps),
         # Inference monitor
         "MONITOR_ENABLE": "true" if args.monitor else "false",
         "MONITOR_OUTPUT_DIR": str(output_dir / "monitor"),

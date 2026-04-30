@@ -92,6 +92,7 @@ class EvalRecorderNode(Node):
         self.declare_parameter("use_delta_actions", False)
         self.declare_parameter("action_type", "delta_obs_t")
         self.declare_parameter("delta_exclude_joints", [""])
+        self.declare_parameter("dataset_fps", 30.0)
 
         gt_topics = self.get_parameter("gt_topics").get_parameter_value().string_array_value
         pred_topics = self.get_parameter("pred_topics").get_parameter_value().string_array_value
@@ -127,6 +128,9 @@ class EvalRecorderNode(Node):
             # [] passed via CLI has no type info → ROS2 treats it as PARAMETER_NOT_SET
             _delta_exclude_raw = []
         self._delta_exclude_joints: list[str] = [j for j in _delta_exclude_raw if j]
+        self._dataset_fps: float = (
+            self.get_parameter("dataset_fps").get_parameter_value().double_value
+        )
 
         # Build full joint name list: [left_joint1, ..., right_joint1, ...]
         self._joint_names: list[str] = []
@@ -336,6 +340,8 @@ class EvalRecorderNode(Node):
             pred_buf = dict(self._pred_buf)
             raw_buf = list(self._raw_buf)
 
+        gt_buf = self._downsample_gt_buffer(gt_buf)
+
         self.get_logger().info(
             f"[eval-recorder] Finalizing ep {ep_idx}: "
             f"GT frames={sum(len(v) for v in gt_buf.values())}, "
@@ -368,6 +374,55 @@ class EvalRecorderNode(Node):
         ack_msg.data = json.dumps({"episode_idx": ep_idx})
         self._ep_ack_pub.publish(ack_msg)
         self.get_logger().info(f"[eval-recorder] Ack sent for ep {ep_idx}")
+
+    def _downsample_gt_buffer(
+        self,
+        gt_buf: dict[str, list[tuple[int, list[float]]]],
+    ) -> dict[str, list[tuple[int, list[float]]]]:
+        """Downsample GT buffer to dataset_fps when the MCAP was recorded at a higher rate.
+
+        Raw MCAPs are often recorded at 60 Hz while the training dataset is converted at
+        30 Hz (every-other-frame downsampling).  Replaying the full-rate MCAP gives the
+        eval-recorder 2× as many GT samples, which stretches the frame-based x-axis and
+        produces artificially large MAE scores because pred (at ~30 Hz inference rate) is
+        aligned to 2× more GT timestamps.
+
+        Strategy: estimate the GT arrival rate from the first few inter-message intervals.
+        If detected_fps > 1.5 × dataset_fps, keep every round(detected_fps / dataset_fps)
+        sample so the GT density matches the training data.
+        """
+        if self._dataset_fps <= 0:
+            return gt_buf
+
+        result: dict[str, list[tuple[int, list[float]]]] = {}
+        for arm, entries in gt_buf.items():
+            if len(entries) < 4:
+                result[arm] = entries
+                continue
+
+            n_intervals = min(20, len(entries) - 1)
+            intervals_ns = [
+                entries[i + 1][0] - entries[i][0] for i in range(n_intervals)
+            ]
+            median_ns = sorted(intervals_ns)[len(intervals_ns) // 2]
+            if median_ns <= 0:
+                result[arm] = entries
+                continue
+
+            detected_fps = 1e9 / median_ns
+            stride = round(detected_fps / self._dataset_fps)
+
+            if stride <= 1:
+                result[arm] = entries
+            else:
+                result[arm] = entries[::stride]
+                self.get_logger().info(
+                    f"[eval-recorder] GT downsampled arm '{arm}': "
+                    f"detected {detected_fps:.1f} Hz → stride {stride} "
+                    f"→ {len(result[arm])} frames (dataset_fps={self._dataset_fps:.0f})"
+                )
+
+        return result
 
     def _align_and_stack(
         self,
