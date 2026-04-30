@@ -73,6 +73,7 @@ class TrainingConfig:
     resume_job_path: str | None = None   # Job root dir (before checkpoints/)
     resume_checkpoint: str = "last"       # Checkpoint to resume from ("last" or e.g. "020000")
     split_ratio: list[float] = field(default_factory=lambda: [8.0, 1.0, 1.0])  # train/val/test episode split ratios
+    max_episodes: int | None = None  # Randomly subsample N episodes before train/val/test split (None = use all)
     # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50 (VLA models ignore this)
     backbone: str = "resnet18"
     note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
@@ -162,6 +163,14 @@ class TrainingConfig:
                 sys.argv.remove(arg)
                 break
 
+        # Random episode subset before split: --max-episodes=N
+        max_episodes: int | None = None
+        for arg in sys.argv:
+            if arg.startswith("--max-episodes="):
+                max_episodes = int(arg.split("=", 1)[1])
+                sys.argv.remove(arg)
+                break
+
         # Extract dataset_root and policy_type early (needed for naming and backbone injection)
         dataset_root = None
         for arg in sys.argv:
@@ -240,7 +249,7 @@ class TrainingConfig:
             output_dir = resume_job_path
 
             # Auto-inherit action_type and delta_exclude_joints from checkpoint if not set on CLI
-            if action_type == "absolute" and not use_delta_actions:
+            if action_type == "absolute":
                 ckpt_anvil = (
                     Path(resume_job_path) / "checkpoints" / resume_checkpoint
                     / "pretrained_model" / "anvil_config.json"
@@ -375,6 +384,7 @@ class TrainingConfig:
             resume_job_path=resume_job_path,
             resume_checkpoint=resume_checkpoint,
             split_ratio=split_ratio,
+            max_episodes=max_episodes,
             backbone=backbone,
             note=note,
             note_append=note_append,

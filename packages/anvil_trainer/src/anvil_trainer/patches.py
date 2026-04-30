@@ -382,11 +382,20 @@ class TransformRunner:
                 train_ep = val_ep = test_ep = None
 
             if train_ep is None:
+                # Optional: subsample N episodes before splitting
+                import random as _random
+                pool = list(range(total_ep))
+                max_ep = val_state.config.max_episodes
+                if max_ep is not None and max_ep < total_ep:
+                    _rng = _random.Random(cfg.seed)
+                    pool = sorted(_rng.sample(pool, max_ep))
+                    log.info("[split] Subsampled %d / %d episodes (--max-episodes)", len(pool), total_ep)
+
                 # Random three-way split via shared helper (seeded for reproducibility)
-                splits = compute_split_episodes(total_ep, s, seed=cfg.seed)
-                train_ep = splits["train"]
-                val_ep = splits["val"]
-                test_ep = splits["test"]
+                splits = compute_split_episodes(len(pool), s, seed=cfg.seed)
+                train_ep = [pool[i] for i in splits["train"]]
+                val_ep = [pool[i] for i in splits["val"]]
+                test_ep = [pool[i] for i in splits["test"]]
 
                 if len(train_ep) < 1:
                     log.warning("[split] Not enough episodes (%d) for split %s, using all for training", total_ep, s)
@@ -401,6 +410,7 @@ class TransformRunner:
                 "train_episodes": train_ep,
                 "val_episodes": val_ep,
                 "test_episodes": test_ep,
+                **({"max_episodes": val_state.config.max_episodes} if val_state.config.max_episodes is not None else {}),
             }
 
             def _make_dataloader(dataset):

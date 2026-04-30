@@ -153,6 +153,7 @@ Checkpoints are saved to `model_zoo/<dataset>/<policy>_<timestamp>/` by default.
 | `--exclude-observation=KEY1,KEY2` | Drop observation keys from training. Use the suffix after `observation.` — supports both images and non-image keys: `images.chest`, `images.wrist_l`, `velocity`, `effort`. Can also be set via `LEROBOT_EXCLUDE_OBSERVATION`. |
 | `--backbone=resnet18` | Vision backbone for ACT / Diffusion: `resnet18` (default) · `resnet34` · `resnet50` |
 | `--split-ratio=8,1,1` | Dataset split (train,val,test). Val loss is logged regularly; test loss is logged at every checkpoint |
+| `--max-episodes=N` | Randomly subsample N episodes from the full dataset before splitting. Useful for quick iteration or ablations on large datasets. The subset is drawn with the training seed so runs are reproducible. |
 | `--task-description="..."` | Task prompt — required for SmolVLA / Pi0 / Pi0.5 |
 
 #### Common Hyperparameters
