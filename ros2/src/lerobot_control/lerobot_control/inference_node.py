@@ -879,8 +879,9 @@ class LeRobotInferenceNode(Node):
 
         # VLA latency + queue size (always)
         if hasattr(self, "_latency_tracker"):
-            lat_mean = self._latency_tracker.mean()
-            lat_std = self._latency_tracker.std()
+            vals = self._latency_tracker._values
+            lat_mean = float(np.mean(vals)) if vals else 0.0
+            lat_std = float(np.std(vals)) if vals else 0.0
             lat_p95 = self._latency_tracker.p95() or 0.0
             queue_size = self._action_queue.qsize() if hasattr(self, "_action_queue") else 0
             logger.info(
