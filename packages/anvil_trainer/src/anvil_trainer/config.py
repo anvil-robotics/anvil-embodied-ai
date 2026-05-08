@@ -118,13 +118,25 @@ class TrainingConfig:
             if action_type == "absolute":
                 action_type = "delta_obs_t"
             sys.argv.remove("--use-delta-actions")
+        _VALID_ACTION_TYPES = {"absolute", "delta_obs_t", "delta_sequential"}
+        if action_type not in _VALID_ACTION_TYPES:
+            raise ValueError(
+                f"--action-type={action_type!r} is not valid. "
+                f"Choose from: {sorted(_VALID_ACTION_TYPES)}"
+            )
 
         _dej_raw = _pop_argv("delta-exclude-joints")
         delta_exclude_joints: list[str] | None = (
             [j.strip() for j in _dej_raw.split(",") if j.strip()] if _dej_raw else None
         )
 
-        delta_stats_n_steps = int(_pop_argv("delta-stats-n-steps") or 1)
+        _dsns_raw = _pop_argv("delta-stats-n-steps") or "1"
+        try:
+            delta_stats_n_steps = int(_dsns_raw)
+        except ValueError:
+            raise ValueError(
+                f"--delta-stats-n-steps={_dsns_raw!r} is not a valid integer."
+            ) from None
 
         _sr_raw = _pop_argv("split-ratio")
         if _sr_raw:
@@ -301,6 +313,13 @@ class TrainingConfig:
                     "resnet34": ("resnet34", "ResNet34_Weights.IMAGENET1K_V1"),
                     "resnet50": ("resnet50", "ResNet50_Weights.IMAGENET1K_V1"),
                 }
+                if backbone not in _BACKBONE_MAP:
+                    log.warning(
+                        "[anvil_trainer] Unknown --backbone=%r; falling back to resnet18. "
+                        "Valid choices: %s",
+                        backbone,
+                        sorted(_BACKBONE_MAP),
+                    )
                 _vb, _pw = _BACKBONE_MAP.get(backbone, ("resnet18", "ResNet18_Weights.IMAGENET1K_V1"))
                 if not any(a.startswith("--policy.vision_backbone=") for a in sys.argv):
                     sys.argv.append(f"--policy.vision_backbone={_vb}")

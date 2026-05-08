@@ -26,13 +26,6 @@ anvil-trainer \
     --dataset.root=/path/to/dataset \
     --policy.type=act
 
-# Train with camera filtering
-LEROBOT_CAMERA_FILTER=chest,waist,wrist_l \
-    anvil-trainer \
-    --dataset.repo_id=local \
-    --dataset.root=/path/to/dataset \
-    --policy.type=act
-
 # Train with delta actions
 anvil-trainer \
     --dataset.repo_id=local \
@@ -53,9 +46,8 @@ LEROBOT_TASK_OVERRIDE="Pick up the red cube" anvil-trainer \
 from anvil_trainer import train, TrainingConfig
 
 config = TrainingConfig(
-    cameras=["chest", "waist", "wrist_l"],
     task_override="Pick up the object",
-    use_delta_actions=True,
+    action_type="delta_obs_t",
 )
 train(config)
 ```
@@ -66,8 +58,8 @@ train(config)
 
 | Variable | Description |
 |----------|-------------|
-| `LEROBOT_CAMERA_FILTER` | Comma-separated camera names to include |
 | `LEROBOT_TASK_OVERRIDE` | Override task string for all samples |
+| `LEROBOT_EXCLUDE_OBSERVATION` | Comma-separated observation suffixes to exclude (e.g. `images.chest,velocity`) |
 
 ### Command Line Arguments
 

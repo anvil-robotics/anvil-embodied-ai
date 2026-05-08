@@ -879,9 +879,8 @@ class LeRobotInferenceNode(Node):
 
         # VLA latency + queue size (always)
         if hasattr(self, "_latency_tracker"):
-            vals = self._latency_tracker._values
-            lat_mean = float(np.mean(vals)) if vals else 0.0
-            lat_std = float(np.std(vals)) if vals else 0.0
+            lat_mean = self._latency_tracker.mean()
+            lat_std = self._latency_tracker.std()
             lat_p95 = self._latency_tracker.p95() or 0.0
             queue_size = self._action_queue.qsize() if hasattr(self, "_action_queue") else 0
             logger.info(
@@ -982,7 +981,7 @@ class LeRobotInferenceNode(Node):
 
         # Cancel timers before stopping the inference thread so no new callbacks
         # are scheduled while we wait for the thread to join.
-        for timer_name in ("control_timer", "_obs_timer", "_publish_timer", "_stats_timer"):
+        for timer_name in ("_obs_timer", "_publish_timer", "_stats_timer"):
             timer = getattr(self, timer_name, None)
             if timer:
                 timer.cancel()
