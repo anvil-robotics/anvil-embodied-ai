@@ -466,10 +466,11 @@ class LeRobotInferenceNode(Node):
     def _setup_vla_inference(self) -> None:
         """Initialise ActionQueue and LatencyTracker for VLA / RTC mode."""
         from lerobot.policies.rtc.action_queue import ActionQueue
-        from lerobot.policies.rtc.latency_tracker import LatencyTracker
+
+        from lerobot_control.latency_stats import LatencyStats
 
         self._action_queue = ActionQueue(self.model.config.rtc_config)
-        self._latency_tracker = LatencyTracker(maxlen=100)
+        self._latency_tracker = LatencyStats(maxlen=100)
         self._latest_obs = None
         self._obs_lock = threading.Lock()
         self._inference_stop = threading.Event()
@@ -879,9 +880,8 @@ class LeRobotInferenceNode(Node):
 
         # VLA latency + queue size (always)
         if hasattr(self, "_latency_tracker"):
-            vals = self._latency_tracker._values
-            lat_mean = float(np.mean(vals)) if vals else 0.0
-            lat_std = float(np.std(vals)) if vals else 0.0
+            lat_mean = self._latency_tracker.mean()
+            lat_std = self._latency_tracker.std()
             lat_p95 = self._latency_tracker.p95() or 0.0
             queue_size = self._action_queue.qsize() if hasattr(self, "_action_queue") else 0
             logger.info(
