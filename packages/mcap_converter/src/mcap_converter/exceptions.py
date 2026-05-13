@@ -25,12 +25,6 @@ class DataExtractionError(McapConverterError):
     pass
 
 
-class TimeAlignmentError(McapConverterError):
-    """Raised when sensor data time alignment fails."""
-
-    pass
-
-
 class DatasetWriteError(McapConverterError):
     """Raised when LeRobot dataset writing fails."""
 

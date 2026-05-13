@@ -7,34 +7,29 @@ into LeRobot v3.0 format datasets.
 
 __version__ = "0.1.0"
 
-# Core modules
-from .config import DEFAULT_DATA_CONFIG, ConfigLoader, DataConfig
-from .core import DataExtractor, LeRobotWriter, McapReader, TimeAligner
+from .config import ActionSource, DataConfig, load_config
+from .core import LeRobotWriter, McapReader
 from .exceptions import (
     ConfigurationError,
     DataExtractionError,
     DatasetWriteError,
     McapConverterError,
     McapReadError,
-    TimeAlignmentError,
 )
 
 __all__ = [
     "__version__",
     # Core modules
     "McapReader",
-    "DataExtractor",
-    "TimeAligner",
     "LeRobotWriter",
     # Config
-    "ConfigLoader",
+    "ActionSource",
     "DataConfig",
-    "DEFAULT_DATA_CONFIG",
+    "load_config",
     # Exceptions
     "McapConverterError",
     "ConfigurationError",
     "McapReadError",
     "DataExtractionError",
-    "TimeAlignmentError",
     "DatasetWriteError",
 ]

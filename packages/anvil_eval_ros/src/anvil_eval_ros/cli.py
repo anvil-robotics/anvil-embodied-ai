@@ -194,9 +194,11 @@ def _read_synthesis_info(
     mcap_root_arg: Path | None = None,
     dataset_dir: Path | None = None,
 ) -> dict | None:
-    """Return synthesize info when conversion_config has action_from_observation=true.
+    """Return synthesize info when the dataset was converted with
+    action_source: future_observations.
 
     Returns {"command_topic": str, "joint_names": list[str]} or None.
+    Only single-arm datasets are supported here (we pick the first arm).
     """
     try:
         import yaml
@@ -208,22 +210,27 @@ def _read_synthesis_info(
         return None
 
     cfg = yaml.safe_load(config_path.read_text())
-    if not cfg.get("action_from_observation"):
+    if cfg.get("action_source") != "future_observations":
         return None
 
-    action_topics: dict = cfg.get("action_topics", {})
-    if not action_topics:
+    arms: list[str] = cfg.get("arms") or []
+    if not arms:
         return None
+    arm = arms[0]
 
-    topic, info = next(iter(action_topics.items()))
-    arm: str = info.get("arm", "right")
-    joint_order: list[str] = info.get("joint_order", [])
-    _ARM_PREFIX = {"right": "follower_r", "left": "follower_l"}
-    prefix = _ARM_PREFIX.get(arm, f"follower_{arm[0]}")
-    joint_names = [f"{prefix}_{j}" for j in joint_order]
+    # Hardcoded conventions — must match mcap_converter/core/constants.py.
+    _ARM_PREFIX = {"left": "follower_l", "right": "follower_r"}
+    _QUEST_JOINT_ORDER = [
+        "joint1", "joint2", "joint3", "joint4",
+        "joint5", "joint6", "joint7", "finger_joint1",
+    ]
+    prefix = _ARM_PREFIX[arm]
+    topic = f"/{prefix}_forward_position_controller/commands"
+    joint_names = [f"{prefix}_{j}" for j in _QUEST_JOINT_ORDER]
 
     log.info(
-        "[anvil-eval-ros] action_from_observation: topic=%s joints=%s", topic, joint_names
+        "[anvil-eval-ros] action_source=future_observations: topic=%s joints=%s",
+        topic, joint_names,
     )
     return {"command_topic": topic, "joint_names": joint_names}
 
@@ -314,13 +321,8 @@ def _detect_arms_from_conversion_config(
 
     log.info("[anvil-eval-ros] conversion_config: %s", config_path)
     cfg = yaml.safe_load(config_path.read_text())
-    action_topics: dict = cfg.get("action_topics", {})
-    if not action_topics:
-        return None
-
-    # Return arm names in topic-definition order
-    arm_names = [info.get("arm") for info in action_topics.values() if info.get("arm")]
-    return arm_names if arm_names else None
+    arms: list[str] = cfg.get("arms") or []
+    return arms or None
 
 
 def generate_inference_config(
@@ -551,23 +553,23 @@ def main() -> None:
         sys.exit(1)
     log.info("[anvil-eval-ros] Found %d MCAP files in %s", len(ep_map), mcap_root)
 
-    # 1b. Determine GT source: synthesize from joint_states (action_from_observation=true)
-    # or use the recorded commands topic from the MCAP (action_from_observation=false).
+    # 1b. Determine GT source: synthesize from joint_states (action_source=future_observations)
+    # or use the recorded commands topic from the MCAP (action_source=quest_teleop/leader).
     # We always check the conversion_config first so that datasets recorded WITH a commands
-    # topic but converted with action_from_observation=true still produce correct GT.
+    # topic but converted with action_source=future_observations still produce correct GT.
     first_mcap = next(iter(ep_map.values()), None)
     synthesize_info: dict | None = _read_synthesis_info(mcap_root, mcap_root_arg, dataset_dir)
 
     if synthesize_info:
         log.info(
-            "[anvil-eval-ros] action_from_observation=true → synthesizing GT from "
+            "[anvil-eval-ros] action_source=future_observations → synthesizing GT from "
             "joint_states → %s",
             synthesize_info["command_topic"],
         )
     elif first_mcap is not None and not _mcap_has_commands_topic(first_mcap):
         log.warning(
-            "[anvil-eval-ros] No commands topic in MCAP and action_from_observation not "
-            "configured — GT metrics may be unavailable."
+            "[anvil-eval-ros] No commands topic in MCAP and action_source != future_observations "
+            "— GT metrics may be unavailable."
         )
 
     # 2. Determine episodes to evaluate
@@ -692,7 +694,7 @@ def main() -> None:
         "EVAL_GT_TOPICS": _ros2_list(arm_info["gt_topics"]),
         "EVAL_PRED_TOPICS": _ros2_list(arm_info["pred_topics"]),
         "EVAL_ARM_NAMES": _ros2_list(arm_info["arm_names"]),
-        # action_from_observation: synthesize GT commands from joint_states
+        # action_source=future_observations: synthesize GT commands from joint_states
         "EVAL_SYNTHESIZE_COMMANDS": "true" if synthesize_info else "false",
         **(
             {

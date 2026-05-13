@@ -26,7 +26,7 @@ Key options:
 | `-i, --input-dir` | Directory containing MCAP files | required |
 | `-o, --output-dir` | Output directory | `data/processed/dataset` |
 | `--config` | Robot config YAML file | |
-| `--fps` | Video framerate | `30` |
+| `--frequency` | Output dataset sample rate (Hz). Clamps to source rate if higher. | from config (`60`) |
 | `--vcodec` | Video codec (`h264`, `hevc`, `libsvtav1`) | `h264` |
 | `--task` | Task name for the dataset | `manipulation` |
 | `--push-to-hub` | Upload to HuggingFace Hub after conversion | |

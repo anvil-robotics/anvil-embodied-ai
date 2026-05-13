@@ -1,527 +1,83 @@
 """Data extraction from MCAP files"""
 
 from collections import deque
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+from collections.abc import Callable, Generator
+from pathlib import Path
+from typing import Any
 
 import numpy as np
+from mcap.exceptions import McapError
+from mcap.reader import make_reader as make_mcap_reader
 
-from ..config.schema import DEFAULT_DATA_CONFIG, DataConfig, JointNamePattern
+from ..config import ActionSource, DataConfig
 from ..exceptions import DataExtractionError
-from ..utils.image_utils import decode_compressed_image, decode_image
+from ..utils.image_utils import decode_compressed_image, resize_image
+from .constants import (
+    ARM_PREFIX_TO_NAME,
+    JOINT_NAME_SEPARATOR,
+    LEADER_PREFIX,
+    OBSERVATION_PREFIX,
+    QUEST_JOINT_ORDER,
+    quest_command_topic,
+)
 from .reader import McapReader
 
-# =============================================================================
-# Shared Utilities
-# =============================================================================
+# Map source prefix -> role label, used only inside _buffer_joint_state to
+# dispatch joints into the observation vs. command buffer.
+_ROLE_BY_PREFIX = {OBSERVATION_PREFIX: "observation", LEADER_PREFIX: "action"}
+
+# Canonical joint order for quest Float64MultiArray output (alphabetical).
+_QUEST_CANONICAL_JOINT_NAMES: list[str] = sorted(QUEST_JOINT_ORDER)
+_QUEST_REORDER: np.ndarray = np.array(
+    [QUEST_JOINT_ORDER.index(name) for name in _QUEST_CANONICAL_JOINT_NAMES],
+    dtype=np.intp,
+)
+
+# Buffer entry shapes:
+#   observation: (ts, pos, vel, eff) — full kinematic state
+#   command:     (ts, pos)           — target positions only
+ObsEntry = tuple[float, np.ndarray, np.ndarray, np.ndarray]
+CmdEntry = tuple[float, np.ndarray]
 
 
-def parse_joint_name(
-    joint_name: str,
-    pattern: JointNamePattern,
-) -> Optional[Tuple[str, str, str]]:
+def parse_joint_name(joint_name: str) -> tuple[str, str, str] | None:
     """
-    Parse joint name to extract role, robot, and joint_id.
+    Parse `{source}_{arm}_{joint_id}` into (role, arm, joint_id).
 
-    This is a shared utility used by both DataExtractor and BufferedStreamExtractor.
+    `source` must be one of `follower` (-> role "observation") or `leader`
+    (-> role "action"). `arm` must be `l` (-> "left") or `r` (-> "right").
 
-    Args:
-        joint_name: Full joint name (e.g., "leader_r_joint1")
-        pattern: JointNamePattern configuration
+    Returns None if the name doesn't follow the convention — callers should
+    skip such joints rather than fail.
 
-    Returns:
-        Tuple of (role, robot, joint_id):
-            - role: "observation" or "action"
-            - robot: Robot prefix (e.g., "right", "left") or empty string
-            - joint_id: Remaining joint identifier (e.g., "joint1")
-
-    Raises:
-        DataExtractionError: If joint name doesn't match expected pattern
+    Examples:
+        "follower_r_joint1"        -> ("observation", "right", "joint1")
+        "leader_l_finger_joint1"   -> ("action", "left", "finger_joint1")
     """
-    sep = pattern.separator
-
-    role = None
-    robot = ""
-    joint_id = joint_name  # fallback
-    remaining = ""
-
-    # Find role prefix (first match)
-    for prefix, role_name in pattern.role_prefix.items():
-        if joint_name.startswith(prefix + sep):
-            role = role_name
-            remaining = joint_name[len(prefix) + len(sep) :]
-            break
-
-    if role is None:
-        raise DataExtractionError(
-            f"Cannot determine role for joint '{joint_name}'. "
-            f"Expected prefix from: {list(pattern.role_prefix.keys())}"
-        )
-
-    # Find robot prefix (optional, first part after role)
-    parts = remaining.split(sep, 1)
-    if parts and parts[0] in pattern.robot_prefix:
-        robot = pattern.robot_prefix[parts[0]]
-        joint_id = parts[1] if len(parts) > 1 else parts[0]
-    elif parts and pattern.robot_prefix and len(parts) > 1:
-        # arms map is configured but this arm identifier is not in it — skip joint
+    parts = joint_name.split(JOINT_NAME_SEPARATOR, 2)
+    if len(parts) < 3:
         return None
-    else:
-        joint_id = remaining
-
-    return role, robot, joint_id
-
-
-# =============================================================================
-# DataExtractor - Batch Mode (loads entire episode into memory)
-# =============================================================================
+    source, arm_prefix, joint_id = parts
+    role = _ROLE_BY_PREFIX.get(source)
+    arm = ARM_PREFIX_TO_NAME.get(arm_prefix)
+    if role is None or arm is None:
+        return None
+    return role, arm, joint_id
 
 
-class DataExtractor:
+def message_timestamp(message) -> float:
     """
-    Extract joint states and images from MCAP files
+    POSIX seconds for a message, preferring the ROS `header.stamp` over MCAP log_time.
 
-    Supports new single-topic architecture where all joints are in one JointState
-    message, differentiated by joint names.
-
-    Joint Name Convention:
-        {role}_{robot}_{joint_id}
-        Examples: "leader_r_joint1", "follower_l_joint3"
-
-    Example:
-        config = DataConfig()
-        extractor = DataExtractor(config)
-        data = extractor.extract_episode("recording.mcap")
-
-        # Single robot:
-        print(data['joint_states_observation']['position'])
-        print(data['joint_states_action']['position'])
-
-        # Multi-robot:
-        print(data['joint_states_right_observation']['position'])
-        print(data['joint_states_left_action']['position'])
+    `header.stamp` is closer to when the data was actually captured (camera shutter
+    fired, joint state was sampled); MCAP `log_time` is when the recorder received
+    the message, which can lag by 10-20 ms for JPEG-compressed images. We fall back
+    to log_time for messages without a header (e.g. std_msgs/Float64MultiArray).
     """
-
-    def __init__(self, config: DataConfig = DEFAULT_DATA_CONFIG):
-        """
-        Initialize data extractor
-
-        Args:
-            config: Data configuration specifying topics and features
-        """
-        self.config = config
-        # Cache for action topic reorder permutations: {topic: np.ndarray}
-        self._action_reorder_cache: Dict[str, np.ndarray] = {}
-
-    def _parse_joint_name(self, joint_name: str) -> Optional[Tuple[str, str, str]]:
-        """Parse joint name using shared utility."""
-        return parse_joint_name(joint_name, self.config.joint_name_pattern)
-
-    def _get_joint_state_key(self, role: str, robot: str) -> str:
-        """
-        Generate key for extracted data dictionary.
-
-        Args:
-            role: "observation" or "action"
-            robot: Robot prefix (e.g., "right") or empty string
-
-        Returns:
-            Key string (e.g., "joint_states_right_observation" or "joint_states_action")
-        """
-        if robot:
-            return f"joint_states_{robot}_{role}"
-        return f"joint_states_{role}"
-
-    def extract_episode(self, mcap_path: str) -> Dict[str, Any]:
-        """
-        Extract all data from one MCAP episode
-
-        Args:
-            mcap_path: Path to MCAP file
-
-        Returns:
-            Dictionary with extracted data:
-            {
-                'joint_states_observation': {  # or 'joint_states_right_observation' for multi-robot
-                    'timestamp': np.ndarray,
-                    'joint_names': List[str],
-                    'position': np.ndarray,
-                    'velocity': np.ndarray,
-                    'effort': np.ndarray,
-                },
-                'joint_states_action': {
-                    ... same structure ...
-                },
-                'head': {  # camera name from config
-                    'timestamp': np.ndarray,
-                    'image_data': np.ndarray,
-                    'encoding': str,
-                    'height': int,
-                    'width': int,
-                },
-                ...
-            }
-        """
-        print(f"Reading MCAP file: {mcap_path}")
-
-        # Initialize data structure
-        extracted_data = self._initialize_data_structure()
-
-        # Read messages
-        reader = McapReader(mcap_path)
-
-        # Build list of interested topics
-        interested_topics = [self.config.robot_state_topic] + self.config.camera_topics
-
-        # Also include compressed image topics (append /compressed to each camera topic)
-        compressed_topics = [t + "/compressed" for t in self.config.camera_topics]
-        interested_topics.extend(compressed_topics)
-
-        # Build mapping from compressed topic to camera name
-        self._compressed_topic_mapping = {
-            t + "/compressed": self.config.camera_topic_mapping[t]
-            for t in self.config.camera_topics
-        }
-
-        # Include action command topics if configured (quest teleop mode)
-        if self.config.action_topics:
-            interested_topics.extend(self.config.action_topics.keys())
-
-        # Also include legacy topics if configured
-        if self.config.robot_state_topics:
-            interested_topics.extend(self.config.robot_state_topics)
-
-        for message in reader.read_messages(topics=interested_topics):
-            topic = message.channel.topic
-
-            # Handle single robot state topic (new architecture)
-            if topic == self.config.robot_state_topic:
-                self._extract_joint_state_single_topic(message, extracted_data)
-            # Handle action command topics (quest teleop mode)
-            elif self.config.action_topics and topic in self.config.action_topics:
-                self._extract_action_command(message, topic, extracted_data)
-            # Handle legacy multi-topic architecture
-            elif self.config.robot_state_topics and topic in self.config.robot_state_topics:
-                self._extract_joint_state_legacy(message, extracted_data)
-            # Handle camera topics (detect CompressedImage vs Image by attribute)
-            elif topic in self.config.camera_topics or topic in self._compressed_topic_mapping:
-                if hasattr(message.ros_msg, 'format'):
-                    self._extract_compressed_image(message, extracted_data)
-                else:
-                    self._extract_image(message, extracted_data)
-
-        # Convert lists to numpy arrays
-        self._convert_to_arrays(extracted_data)
-
-        # Print summary
-        self._print_extraction_summary(extracted_data)
-
-        return extracted_data
-
-    def _initialize_data_structure(self) -> Dict[str, Any]:
-        """Initialize empty data structure"""
-        extracted_data = {}
-
-        # Initialize camera data
-        for topic in self.config.camera_topics:
-            cam_name = self.config.camera_topic_mapping[topic]
-            extracted_data[cam_name] = {
-                "timestamp": [],
-                "image_data": [],
-                "encoding": None,
-                "height": None,
-                "width": None,
-            }
-
-        # Note: Joint state structures are created dynamically during extraction
-        # because we don't know the robot prefixes until we see the joint names
-
-        return extracted_data
-
-    def _extract_joint_state_single_topic(self, message, extracted_data: Dict):
-        """
-        Extract joint state from single JointState message containing all joints.
-
-        Parses joint names to determine role and robot, then groups data accordingly.
-        Joints are sorted by joint_id for deterministic canonical ordering.
-        """
-        ros_msg = message.ros_msg
-        # Use MCAP log_time for consistent time domain across all streams
-        time_s = message.log_time.timestamp()
-
-        # Group joints by (role, robot)
-        grouped_data: Dict[Tuple[str, str], Dict] = {}
-
-        for i, joint_name in enumerate(ros_msg.name):
-            try:
-                result = self._parse_joint_name(joint_name)
-            except DataExtractionError as e:
-                print(f"Warning: {e}")
-                continue
-            if result is None:
-                continue
-            role, robot, joint_id = result
-
-            key = (role, robot)
-            if key not in grouped_data:
-                grouped_data[key] = {
-                    "joint_names": [],
-                    "position": [],
-                    "velocity": [],
-                    "effort": [],
-                }
-
-            grouped_data[key]["joint_names"].append(joint_id)
-
-            if ros_msg.position and i < len(ros_msg.position):
-                grouped_data[key]["position"].append(ros_msg.position[i])
-            if ros_msg.velocity and i < len(ros_msg.velocity):
-                grouped_data[key]["velocity"].append(ros_msg.velocity[i])
-            if ros_msg.effort and i < len(ros_msg.effort):
-                grouped_data[key]["effort"].append(ros_msg.effort[i])
-
-        # Sort each group by joint_id for canonical ordering
-        for key, data in grouped_data.items():
-            sort_indices = sorted(
-                range(len(data["joint_names"])),
-                key=lambda idx: data["joint_names"][idx],
-            )
-            data["joint_names"] = [data["joint_names"][idx] for idx in sort_indices]
-            data["position"] = [data["position"][idx] for idx in sort_indices]
-            data["velocity"] = [data["velocity"][idx] for idx in sort_indices]
-            data["effort"] = [data["effort"][idx] for idx in sort_indices]
-
-        # Store in extracted_data with structured keys
-        for (role, robot), data in grouped_data.items():
-            key = self._get_joint_state_key(role, robot)
-
-            if key not in extracted_data:
-                extracted_data[key] = {
-                    "timestamp": [],
-                    "joint_names": data["joint_names"],  # Set once (assumes consistent ordering)
-                    "position": [],
-                    "velocity": [],
-                    "effort": [],
-                }
-
-            extracted_data[key]["timestamp"].append(time_s)
-            extracted_data[key]["position"].append(data["position"])
-            extracted_data[key]["velocity"].append(data["velocity"])
-            extracted_data[key]["effort"].append(data["effort"])
-
-    def _extract_action_command(self, message, topic: str, extracted_data: Dict):
-        """
-        Extract action from a command topic (quest teleop mode).
-
-        Command topics publish std_msgs/Float64MultiArray with joint positions.
-        These messages have no header, so we use MCAP log_time for timestamps.
-        Positions are reordered to canonical (sorted) joint order using joint_order
-        from the ActionTopicConfig.
-
-        Args:
-            message: MCAP message (Float64MultiArray)
-            topic: The ROS topic name
-            extracted_data: Data dictionary to populate
-        """
-        ros_msg = message.ros_msg
-        # Float64MultiArray has no header; use MCAP recording timestamp
-        time_s = message.log_time.timestamp()
-
-        # Get action topic config
-        topic_cfg = self.config.action_topics[topic]
-        robot = topic_cfg.arm
-        key = self._get_joint_state_key("action", robot)
-
-        # Extract position data from Float64MultiArray.data
-        positions = list(ros_msg.data)
-
-        # Compute reorder permutation on first message (cached per topic)
-        if topic not in self._action_reorder_cache:
-            if topic_cfg.joint_order:
-                # Sort joint_order alphabetically to match canonical observation order
-                self._action_reorder_cache[topic] = np.array(
-                    sorted(
-                        range(len(topic_cfg.joint_order)),
-                        key=lambda idx: topic_cfg.joint_order[idx],
-                    ),
-                    dtype=np.intp,
-                )
-            else:
-                # No joint_order specified — identity permutation (no reorder)
-                self._action_reorder_cache[topic] = np.arange(
-                    len(positions), dtype=np.intp
-                )
-
-        reorder = self._action_reorder_cache[topic]
-
-        if key not in extracted_data:
-            # Use canonical (sorted) joint names
-            if topic_cfg.joint_order:
-                joint_names = sorted(topic_cfg.joint_order)
-            else:
-                joint_names = [f"joint{i}" for i in range(len(positions))]
-            extracted_data[key] = {
-                "timestamp": [],
-                "joint_names": joint_names,
-                "position": [],
-                "velocity": [],
-                "effort": [],
-            }
-
-        # Reorder positions to canonical order
-        pos_array = np.array(positions, dtype=np.float64)
-        extracted_data[key]["timestamp"].append(time_s)
-        extracted_data[key]["position"].append(pos_array[reorder].tolist())
-        # Float64MultiArray only contains position commands
-        extracted_data[key]["velocity"].append([0.0] * len(positions))
-        extracted_data[key]["effort"].append([0.0] * len(positions))
-
-    def _extract_joint_state_legacy(self, message, extracted_data: Dict):
-        """
-        Extract joint state from legacy multi-topic architecture.
-
-        For backward compatibility with robot_state_topics configuration.
-        """
-        # Determine if follower (observation) or leader (action)
-        if message.channel.topic == self.config.robot_state_topics[0]:
-            joint_key = "joint_states_observation"
-        else:
-            joint_key = "joint_states_action"
-
-        # Initialize if not exists
-        if joint_key not in extracted_data:
-            extracted_data[joint_key] = {
-                "timestamp": [],
-                "joint_names": [],
-            }
-
-        # Extract data
-        ros_msg = message.ros_msg
-        time_ns = (ros_msg.header.stamp.sec * 1e9 + ros_msg.header.stamp.nanosec) / 1e9
-        extracted_data[joint_key]["timestamp"].append(time_ns)
-
-        # Store joint names (once) - JointState uses 'name' not 'joint_names'
-        if not extracted_data[joint_key]["joint_names"]:
-            extracted_data[joint_key]["joint_names"] = list(ros_msg.name)
-
-        # Extract position, velocity, effort directly from JointState arrays
-        for field_name in ["position", "velocity", "effort"]:
-            field_data = getattr(ros_msg, field_name, None)
-            if field_data is not None and len(field_data) > 0:
-                if field_name not in extracted_data[joint_key]:
-                    extracted_data[joint_key][field_name] = []
-                extracted_data[joint_key][field_name].append(list(field_data))
-
-    def _extract_image(self, message, extracted_data: Dict):
-        """Extract image from ROS Image message"""
-        ros_msg = message.ros_msg
-        # Use MCAP log_time for consistent time domain across all streams
-        time_s = message.log_time.timestamp()
-
-        cam_name = self.config.camera_topic_mapping[message.channel.topic]
-        extracted_data[cam_name]["timestamp"].append(time_s)
-
-        # Decode image
-        img_data = decode_image(ros_msg.data, ros_msg.encoding, ros_msg.height, ros_msg.width)
-        extracted_data[cam_name]["image_data"].append(img_data)
-
-        # Store metadata (once)
-        if extracted_data[cam_name]["encoding"] is None:
-            extracted_data[cam_name]["encoding"] = ros_msg.encoding
-            extracted_data[cam_name]["height"] = ros_msg.height
-            extracted_data[cam_name]["width"] = ros_msg.width
-
-    def _extract_compressed_image(self, message, extracted_data: Dict):
-        """Extract image from ROS CompressedImage message"""
-        ros_msg = message.ros_msg
-        # Use MCAP log_time for consistent time domain across all streams
-        time_s = message.log_time.timestamp()
-
-        topic = message.channel.topic
-        # Look up camera name from either the main mapping or the auto-generated compressed mapping
-        if topic in self.config.camera_topic_mapping:
-            cam_name = self.config.camera_topic_mapping[topic]
-        else:
-            cam_name = self._compressed_topic_mapping[topic]
-        extracted_data[cam_name]["timestamp"].append(time_s)
-
-        # Decode compressed image
-        # CompressedImage format field contains the compression format (e.g., "jpeg", "png")
-        img_data = decode_compressed_image(ros_msg.data, ros_msg.format)
-        extracted_data[cam_name]["image_data"].append(img_data)
-
-        # Store metadata (once) - get dimensions from decoded image
-        if extracted_data[cam_name]["encoding"] is None:
-            extracted_data[cam_name]["encoding"] = ros_msg.format
-            extracted_data[cam_name]["height"] = img_data.shape[0]
-            extracted_data[cam_name]["width"] = img_data.shape[1]
-
-    def _is_joint_state_key(self, key: str) -> bool:
-        """Check if a key is a joint state key."""
-        return key.startswith("joint_states_")
-
-    def _convert_to_arrays(self, extracted_data: Dict):
-        """Convert lists to numpy arrays"""
-        # Convert images
-        for key, value in extracted_data.items():
-            if key in self.config.camera_topic_mapping.values():
-                if len(value["image_data"]) > 0:
-                    value["image_data"] = np.array(value["image_data"], dtype=np.uint8)
-                else:
-                    value["image_data"] = np.empty((0,), dtype=np.uint8)
-
-        # Convert timestamps (relative to first timestamp)
-        # Find global first timestamp
-        first_ts = None
-        for key, value in extracted_data.items():
-            if "timestamp" in value and len(value["timestamp"]) > 0:
-                ts = value["timestamp"][0]
-                if first_ts is None or ts < first_ts:
-                    first_ts = ts
-
-        if first_ts is None:
-            first_ts = 0.0
-
-        # Apply relative timestamps
-        for key, value in extracted_data.items():
-            if "timestamp" in value:
-                ts_list = value["timestamp"]
-                if len(ts_list) > 0:
-                    ts = np.array(ts_list, dtype=np.float64)
-                    ts = ts - first_ts
-                    value["timestamp"] = ts.astype(np.float32)
-                else:
-                    value["timestamp"] = np.empty((0,), dtype=np.float32)
-
-        # Convert joint states
-        for key, value in extracted_data.items():
-            if self._is_joint_state_key(key):
-                for field_name, field_values in value.items():
-                    if field_name in ["timestamp", "joint_names"]:
-                        continue
-                    if isinstance(field_values, list) and len(field_values) > 0:
-                        value[field_name] = np.array(field_values, dtype=np.float32)
-                    elif isinstance(field_values, list):
-                        value[field_name] = np.empty((0,), dtype=np.float32)
-
-    def _print_extraction_summary(self, extracted_data: Dict):
-        """Print extraction summary"""
-        # Print joint state summaries
-        for key, value in extracted_data.items():
-            if self._is_joint_state_key(key):
-                count = len(value["timestamp"])
-                joint_count = len(value.get("joint_names", []))
-                print(f"[OK] Extracted {count} samples for {key} ({joint_count} joints)")
-
-        # Print camera summaries
-        for cam_name in self.config.camera_topic_mapping.values():
-            if cam_name in extracted_data:
-                count = len(extracted_data[cam_name]["image_data"])
-                print(f"[OK] Extracted {count} images ({cam_name})")
-
-
-# =============================================================================
-# BufferedStreamExtractor - Streaming Mode (memory-bounded)
-# =============================================================================
+    stamp = getattr(getattr(message.ros_msg, "header", None), "stamp", None)
+    if stamp is not None:
+        return stamp.sec + stamp.nanosec * 1e-9
+    return message.log_time_ns * 1e-9
 
 
 class BufferedStreamExtractor:
@@ -530,6 +86,10 @@ class BufferedStreamExtractor:
 
     Uses a sliding window buffer for time alignment while keeping memory bounded.
     Extracts both images and joint states (full teleop data).
+
+    Time base: the first camera in `config.camera_topic_mapping` is the
+    `main_cam` and drives the cursor + yield cadence. Other cameras and all
+    joint streams are nearest-neighbor matched to its timestamps.
 
     Algorithm:
         1. Fill buffer to half_buffer, then start processing from cursor=0
@@ -543,7 +103,7 @@ class BufferedStreamExtractor:
         - Joint state samples aligned to camera timestamps via nearest-neighbor
 
     Example:
-        extractor = BufferedStreamExtractor(config, buffer_seconds=5.0, fps=30)
+        extractor = BufferedStreamExtractor(config, buffer_seconds=5.0)
         for frame in extractor.extract_frames("recording.mcap", task="teleop"):
             dataset.add_frame(frame)
     """
@@ -552,330 +112,308 @@ class BufferedStreamExtractor:
         self,
         config: DataConfig,
         buffer_seconds: float = 5.0,
-        fps: int = 30,
         quiet: bool = False,
-        progress_callback: Optional[Callable[[int], None]] = None,
+        progress_callback: Callable[[int], None] | None = None,
     ):
         """
         Initialize buffered stream extractor.
 
         Args:
-            config: Data configuration specifying topics and camera mapping
+            config: Data configuration (includes `frequency`, topics, camera mapping)
             buffer_seconds: Total buffer window size in seconds (default: 5.0)
-            fps: Frame rate for buffer size calculation (default: 30)
             quiet: If True, suppress all print output (default: False)
             progress_callback: Called with frames_yielded count after each frame
         """
         self.config = config
-        self.fps = fps
-        self.frame_interval = 1.0 / fps  # seconds between output frames (for subsampling)
+        self.frequency = config.frequency
+        self.frame_interval = 1.0 / self.frequency  # seconds between output frames (for subsampling)
         self.buffer_seconds = buffer_seconds
-        self.half_buffer = int(buffer_seconds * fps / 2)  # 75 frames for 5s @ 30fps
+        self.half_buffer = int(buffer_seconds * self.frequency / 2)  # 75 frames for 5s @ 30Hz
         self.full_buffer = self.half_buffer * 2  # 150 frames
         self.target_size = tuple(config.image_resolution)  # (width, height)
         self.quiet = quiet
         self.progress_callback = progress_callback
 
-        # Joint name pattern for parsing (reuse from DataExtractor)
-        self._joint_pattern = config.joint_name_pattern
-
-        # Cache for action topic reorder permutations: {topic: np.ndarray}
-        self._action_reorder_cache: Dict[str, np.ndarray] = {}
+        # For quest_teleop: map each command topic to its arm.
+        self._quest_topic_to_arm: dict[str, str] = (
+            {quest_command_topic(arm): arm for arm in config.arms}
+            if config.action_source is ActionSource.quest_teleop
+            else {}
+        )
 
     @staticmethod
-    def _check_action_topics_present(mcap_path: str, action_topic_set: set) -> None:
-        """Raise DataExtractionError when none of the configured action topics are in the MCAP.
+    def _check_quest_topics_present(mcap_path: Path, expected: set[str]) -> None:
+        """Raise DataExtractionError when none of the quest command topics are in the MCAP.
 
         Uses the MCAP footer index (O(1)) — does not scan all messages.
         """
-        from mcap.reader import make_reader as _make_mcap_reader
-
         try:
             with open(mcap_path, "rb") as _f:
-                _summary = _make_mcap_reader(_f).get_summary()
-        except Exception:
+                _summary = make_mcap_reader(_f).get_summary()
+        except (McapError, OSError):
             return  # Cannot read summary — let streaming fail naturally
 
         if _summary is None:
             return
 
         available = {ch.topic for ch in _summary.channels.values()}
-        if action_topic_set and action_topic_set.isdisjoint(available):
+        if expected and expected.isdisjoint(available):
             raise DataExtractionError(
-                f"\n[ACTION SOURCE ERROR] action_from_observation=false, but none of the "
-                f"configured action topics were found in this MCAP.\n"
-                f"  Expected (from config): {sorted(action_topic_set)}\n"
-                f"  Available in MCAP:      {sorted(available)}\n\n"
+                f"\n[ACTION SOURCE ERROR] action_source=quest_teleop, but none of the "
+                f"expected command topics were found in this MCAP.\n"
+                f"  Expected: {sorted(expected)}\n"
+                f"  Available in MCAP: {sorted(available)}\n\n"
                 "Fix options:\n"
-                "  1. Set action_from_observation: true in config to derive actions from "
-                "observations.\n"
+                "  1. Set action_source: future_observations in config to derive actions "
+                "from observations.\n"
                 "  2. Record a new session that captures the action-command topics.\n"
-                "  3. Use a different --config that matches this recording's topic layout.\n"
+                "  3. Check the `arms` field in your config matches what was recorded.\n"
             )
 
     def extract_frames(
         self,
-        mcap_path: str,
-        task: str = "teleop",
-    ) -> Generator[Dict[str, Any], None, None]:
+        mcap_path: Path,
+        task: str,
+    ) -> Generator[dict[str, Any], None, None]:
         """
-        Generator yielding time-aligned frames with bounded memory.
+        Generator with bounded memory usage, yielding complete time-aligned frames.
 
         Args:
             mcap_path: Path to MCAP file
-            task: Task name for each frame (default: "teleop")
+            task: Task description stored in every frame (e.g. "fold the towel").
+                  LeRobot requires this; "" passes validation but provides no
+                  task-conditioning signal.
 
         Yields:
             Dictionary with aligned frame data:
             {
                 'observation.images.{camera}': np.ndarray (H, W, C),
-                'observation.state': np.ndarray,        # or '{robot}.observation.state'
-                'observation.velocity': np.ndarray,     # optional
-                'observation.effort': np.ndarray,       # optional
-                'action': np.ndarray,                   # or '{robot}.action'
+                'observation.state': np.ndarray,
+                'observation.velocity': np.ndarray,
+                'observation.effort': np.ndarray,
+                'action': np.ndarray,
                 'task': str,
             }
         """
-        from ..utils.image_utils import resize_image
-
         if not self.quiet:
             print(f"[BufferedStream] Reading MCAP: {mcap_path}")
             print(f"[BufferedStream] Buffer: {self.full_buffer} frames ({self.half_buffer}x2)")
 
-        reader = McapReader(mcap_path)
-
-        # Build camera topic lists
-        camera_topics = list(self.config.camera_topics)
-        compressed_topics = [t + "/compressed" for t in camera_topics]
-        all_camera_topics = camera_topics + compressed_topics
-
-        # Mapping from topic to camera name
+        reader = McapReader(str(mcap_path))
         topic_to_cam = dict(self.config.camera_topic_mapping)
-        for t in camera_topics:
-            topic_to_cam[t + "/compressed"] = self.config.camera_topic_mapping[t]
 
-        # Per-camera buffers: {cam_name: deque of (timestamp, image)}
-        camera_buffers: Dict[str, deque] = {
+        # Per-camera image buffers, keyed by camera name.
+        camera_buffers: dict[str, deque] = {
             cam: deque() for cam in self.config.camera_topic_mapping.values()
         }
+        # Per-arm joint buffers, split by purpose (see ObsEntry / CmdEntry above).
+        joint_observation_buffers: dict[str, deque] = {}
+        joint_command_buffers: dict[str, deque] = {}
 
-        # Joint state buffers: {(role, robot): {'buffer': deque, 'joint_names': list}}
-        joint_buffers: Dict[Tuple[str, str], Dict] = {}
-
-        # Build topic list for reading (cameras + joint states + action commands)
-        all_topics = list(all_camera_topics)
-        all_topics.append(self.config.robot_state_topic)
-
-        # Include action command topics if configured (quest teleop mode).
-        # When action_from_observation=True the config explicitly requests
-        # observation-shifted actions — ignore any recorded command topics so
-        # the pipeline is deterministic regardless of what was captured.
-        action_topic_set = set()
-        if self.config.action_topics:
-            if self.config.action_from_observation:
-                n = self.config.action_from_observation_n
-                ms = int(n / self.fps * 1000)
-                topic_lines = "\n".join(f"    {t}" for t in self.config.action_topics)
+        # Build subscription topic list
+        all_topics = [self.config.camera_topic_mapping.keys()] + [self.config.robot_state_topic]
+        if self.config.action_source is ActionSource.quest_teleop:
+            expected_cmd_topics = set(self._quest_topic_to_arm.keys())
+            all_topics.extend(expected_cmd_topics)
+            self._check_quest_topics_present(mcap_path, expected_cmd_topics)
+        elif self.config.action_source is ActionSource.future_observations:
+            assert self.config.action_n_step is not None
+            n = self.config.action_n_step
+            ms = int(n / self.frequency * 1000)
+            if not self.quiet:
                 print(
-                    f"\n[ACTION SOURCE] action_from_observation=true — "
-                    f"command topic(s) in config will be IGNORED:\n"
-                    f"{topic_lines}\n"
-                    f"  → action[t] = observation[t + {n}]  "
-                    f"(≈{ms} ms lookahead at {self.fps} fps)\n"
+                    f"\n[ACTION SOURCE] action_source=future_observations — "
+                    f"action[t] = observation[t + {n}] (~{ms} ms lookahead at {self.frequency} Hz)\n"
                 )
-            else:
-                action_topic_set = set(self.config.action_topics.keys())
-                all_topics.extend(action_topic_set)
-                # Fast-fail: verify at least one action topic is recorded in this MCAP.
-                # Reads only the file footer index (O(1)) — no message scanning.
-                self._check_action_topics_present(mcap_path, action_topic_set)
 
-        # Get main camera (first one in config)
-        main_cam = list(self.config.camera_topic_mapping.values())[0]
+        # We arbitrarily pick one of the cameras to designate the "main cam", which will key off observation frames
+        main_cam = next(iter(self.config.camera_topic_mapping.values()))
 
-        cursor = 0  # Index of frame to process next
+        # cursor is the index (in main_cam buffer) of the next frame to consider
+        # Yielding requires us having half_buffer frames AHEAD of cursor, ensuring we have enough lookahead data
+        # to find the closest
+        cursor = 0
         frames_yielded = 0
-        next_yield_ts = None  # Next target timestamp for subsampling
+        frames_dropped = 0
+        next_yield_ts: float | None = None  # subsampling target; anchored on first yield attempt
 
         for message in reader.read_messages(topics=all_topics):
             topic = message.channel.topic
 
-            # Handle joint state messages
             if topic == self.config.robot_state_topic:
-                self._buffer_joint_state(message, joint_buffers)
+                self._buffer_joint_state(message, joint_observation_buffers, joint_command_buffers)
                 continue
 
-            # Handle action command messages (quest teleop mode)
-            if topic in action_topic_set:
-                self._buffer_action_command(message, topic, joint_buffers)
+            if topic in self._quest_topic_to_arm:
+                arm = self._quest_topic_to_arm[topic]
+                self._buffer_action_command(message, arm, joint_command_buffers)
                 continue
 
-            # Handle camera messages
             if topic not in topic_to_cam:
                 continue
             cam_name = topic_to_cam[topic]
-
-            # Use MCAP log_time for consistent time domain across all streams
-            time_s = message.log_time.timestamp()
-
-            # Decode image — detect CompressedImage vs Image by attribute
             ros_msg = message.ros_msg
-            if hasattr(ros_msg, 'format'):
-                img = decode_compressed_image(ros_msg.data, ros_msg.format)
-            else:
-                img = decode_image(ros_msg.data, ros_msg.encoding, ros_msg.height, ros_msg.width)
+            img = decode_compressed_image(ros_msg.data, ros_msg.format)
+            camera_buffers[cam_name].append((message_timestamp(message), img))
 
-            # Add to buffer
-            camera_buffers[cam_name].append((time_s, img))
-
-            # Start processing when main camera buffer reaches threshold
             main_buffer_len = len(camera_buffers[main_cam])
 
-            # Condition: buffer has at least half_buffer frames ahead of cursor
-            if main_buffer_len >= self.half_buffer + cursor:
-                frame_ts = camera_buffers[main_cam][cursor][0]
+            # Lookahead not ready yet: need half_buffer frames past cursor
+            if main_buffer_len < self.half_buffer + cursor:
+                continue
 
-                # Initialize subsampling anchor on first frame
-                if next_yield_ts is None:
-                    next_yield_ts = frame_ts
+            frame, next_yield_ts, attempted = self._try_yield_at_cursor(
+                cursor,
+                camera_buffers,
+                joint_observation_buffers,
+                joint_command_buffers,
+                main_cam,
+                task,
+                next_yield_ts,
+            )
+            if frame is not None:
+                yield frame
+                frames_yielded += 1
+            elif attempted:
+                frames_dropped += 1
 
-                # Subsampling: only yield if this frame is at or past the next target timestamp
-                if frame_ts >= next_yield_ts:
-                    frame = self._align_frame_at_cursor(
-                        camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
+            cursor += 1
+
+            # Report progress every cursor advance (including subsampled/dropped frames).
+            if self.progress_callback:
+                self.progress_callback(frames_yielded)
+            elif not self.quiet and frames_yielded % 100 == 0:
+                print(f"[BufferedStream] Processed {frames_yielded} frames...")
+
+            # Steady state: buffer holds full_buffer frames (~±half_buffer around cursor).
+            # Popleft + decrement cursor keeps cursor pointing at the same logical frame.
+            if main_buffer_len > self.full_buffer:
+                for buf in camera_buffers.values():
+                    if len(buf) > 0:
+                        buf.popleft()
+                if camera_buffers[main_cam]:
+                    new_oldest_ts = camera_buffers[main_cam][0][0]
+                    self._sync_joint_buffers(
+                        joint_observation_buffers,
+                        joint_command_buffers,
+                        new_oldest_ts,
                     )
-                    if frame is not None:
-                        yield frame
-                        frames_yielded += 1
-                        next_yield_ts += self.frame_interval
+                cursor -= 1
 
-                cursor += 1
-
-                # Always report progress after each cursor advance (including skipped frames)
-                if self.progress_callback:
-                    self.progress_callback(frames_yielded)
-                elif not self.quiet and frames_yielded % 100 == 0:
-                    print(f"[BufferedStream] Processed {frames_yielded} frames...")
-
-                # Once buffer reaches full size, remove oldest to maintain size
-                if main_buffer_len > self.full_buffer:
-                    for buffer in camera_buffers.values():
-                        if len(buffer) > 0:
-                            buffer.popleft()
-
-                    # Sync joint buffers to remove old samples
-                    if camera_buffers[main_cam]:
-                        new_oldest_ts = camera_buffers[main_cam][0][0]
-                        self._sync_joint_buffers(joint_buffers, new_oldest_ts)
-
-                    cursor -= 1  # Adjust cursor after removal
-
-        # Flush: process remaining frames in buffer
+        # Flush: walk remaining frames with shrinking lookahead.
         if not self.quiet:
             print("[BufferedStream] Flushing remaining buffer...")
         while cursor < len(camera_buffers[main_cam]):
-            frame_ts = camera_buffers[main_cam][cursor][0]
-            if next_yield_ts is None or frame_ts >= next_yield_ts:
-                frame = self._align_frame_at_cursor(
-                    camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
-                )
-                if frame is not None:
-                    yield frame
-                    frames_yielded += 1
-                    if next_yield_ts is not None:
-                        next_yield_ts += self.frame_interval
-                    if self.progress_callback:
-                        self.progress_callback(frames_yielded)
+            frame, next_yield_ts, attempted = self._try_yield_at_cursor(
+                cursor,
+                camera_buffers,
+                joint_observation_buffers,
+                joint_command_buffers,
+                main_cam,
+                task,
+                next_yield_ts,
+            )
+            if frame is not None:
+                yield frame
+                frames_yielded += 1
+                if self.progress_callback:
+                    self.progress_callback(frames_yielded)
+            elif attempted:
+                frames_dropped += 1
             cursor += 1
 
         if not self.quiet:
-            print(f"[BufferedStream] [OK] Extracted {frames_yielded} frames total")
+            if frames_dropped:
+                print(
+                    f"[BufferedStream] [OK] Extracted {frames_yielded} frames total "
+                    f"({frames_dropped} dropped during alignment)"
+                )
+            else:
+                print(f"[BufferedStream] [OK] Extracted {frames_yielded} frames total")
 
         if frames_yielded == 0:
-            # Diagnostic: show why no frames were produced
-            cam_counts = {cam: len(buf) for cam, buf in camera_buffers.items()}
-            joint_keys = {
-                f"{role}:{robot or 'default'}": len(d["buffer"])
-                for (role, robot), d in joint_buffers.items()
-            }
-            print(f"[BufferedStream] WARNING: 0 frames produced — diagnostics:")
-            print(f"  Camera buffers: {cam_counts}")
-            print(f"  Joint buffers:  {joint_keys if joint_keys else '(empty — no joint data received)'}")
-            if not cam_counts or all(c == 0 for c in cam_counts.values()):
-                print(f"  -> No camera images found. Check that these topics exist in the MCAP:")
-                for t in self.config.camera_topics:
-                    print(f"       {t}")
-            if not joint_keys:
-                print(f"  -> No joint state data. Check robot_state_topic: {self.config.robot_state_topic}")
-                if self.config.action_topics:
-                    print(f"  -> No action data. Check action_topics: {list(self.config.action_topics.keys())}")
-            elif not any(k.startswith("action:") for k in joint_keys):
-                if self.config.action_topics:
-                    print(f"  -> No action data received from action_topics:")
-                    for t in self.config.action_topics:
-                        print(f"       {t}")
-                else:
-                    print(f"  -> No action data parsed from joint_states (no leader prefix matched).")
+            self._log_empty_diagnostics(
+                camera_buffers,
+                joint_observation_buffers,
+                joint_command_buffers,
+                frames_dropped,
+            )
+
+    def _try_yield_at_cursor(
+        self,
+        cursor: int,
+        camera_buffers: dict[str, deque],
+        joint_observation_buffers: dict[str, deque],
+        joint_command_buffers: dict[str, deque],
+        main_cam: str,
+        task: str,
+        next_yield_ts: float | None,
+    ) -> tuple[dict[str, Any] | None, float | None, bool]:
+        """
+        Attempt to produce a yieldable frame at `cursor`.
+
+        Returns (frame_or_None, advanced_next_yield_ts, alignment_attempted):
+          - frame_or_None: aligned frame, or None if subsampled away / alignment failed
+          - advanced_next_yield_ts: subsampling target; advances iff a frame is produced
+          - alignment_attempted: True if alignment ran (caller uses this to count drops)
+        """
+        frame_ts: float = camera_buffers[main_cam][cursor][0]
+
+        # Anchor subsampling clock to the first processed frame so output cadence is exactly self.frequency.
+        yield_target = next_yield_ts if next_yield_ts is not None else frame_ts
+
+        if frame_ts < yield_target:
+            return None, yield_target, False
+
+        frame = self._align_frame_at_cursor(
+            camera_buffers,
+            joint_observation_buffers,
+            joint_command_buffers,
+            cursor,
+            main_cam,
+            task,
+        )
+        if frame is None:
+            return None, yield_target, True
+        return frame, yield_target + self.frame_interval, True
 
     def _align_frame_at_cursor(
         self,
-        camera_buffers: Dict[str, deque],
-        joint_buffers: Dict[Tuple[str, str], Dict],
+        camera_buffers: dict[str, deque],
+        joint_observation_buffers: dict[str, deque],
+        joint_command_buffers: dict[str, deque],
         cursor: int,
         main_cam: str,
         task: str,
-        resize_func,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Align frame at cursor position using entire buffer for matching.
 
-        Args:
-            camera_buffers: Per-camera buffers
-            joint_buffers: Joint state buffers (keyed by (role, robot))
-            cursor: Index of frame to align in main camera buffer
-            main_cam: Name of main camera
-            task: Task name
-            resize_func: Function to resize images
-
-        Returns:
-            Aligned frame dictionary, or None if not all data available
+        Returns aligned frame dictionary, or None if any required data is missing.
         """
-        # Get main camera frame at cursor
         main_ts, main_img = camera_buffers[main_cam][cursor]
+        frame: dict[str, Any] = {
+            f"observation.images.{main_cam}": resize_image(main_img, self.target_size)
+        }
 
-        # Resize main camera image
-        resized_main = resize_func(main_img, self.target_size)
-        frame = {f"observation.images.{main_cam}": resized_main}
-
-        # Find nearest match for each other camera
+        # Nearest-neighbor match each non-main camera to main_ts.
         for cam_name, buffer in camera_buffers.items():
             if cam_name == main_cam:
                 continue
-
-            # If any camera has no data, skip this frame
             if len(buffer) == 0:
                 return None
-
-            # Search entire buffer for nearest timestamp match
             nearest_idx = self._find_nearest_in_buffer(buffer, main_ts)
-            if nearest_idx is not None:
-                _, img = buffer[nearest_idx]
-                resized_img = resize_func(img, self.target_size)
-                frame[f"observation.images.{cam_name}"] = resized_img
-            else:
+            if nearest_idx is None:
                 return None
+            _, img = buffer[nearest_idx]
+            frame[f"observation.images.{cam_name}"] = resize_image(img, self.target_size)
 
-        # Align joint states
-        if joint_buffers:
-            has_action_buffer = any(role == "action" for (role, _) in joint_buffers)
-            action_ts = (
-                main_ts + self.frame_interval * self.config.action_from_observation_n
-                if self.config.action_from_observation and not has_action_buffer
-                else None
+        if joint_observation_buffers or joint_command_buffers:
+            joint_aligned = self._align_joint_states(
+                joint_observation_buffers, joint_command_buffers, main_ts
             )
-            joint_aligned = self._align_joint_states(joint_buffers, main_ts, action_ts=action_ts)
             if joint_aligned is None:
-                return None  # Skip frame if joint states not available
+                return None
             frame.update(joint_aligned)
 
         frame["task"] = task
@@ -883,139 +421,72 @@ class BufferedStreamExtractor:
 
     def _align_joint_states(
         self,
-        joint_buffers: Dict[Tuple[str, str], Dict],
+        joint_observation_buffers: dict[str, deque],
+        joint_command_buffers: dict[str, deque],
         target_ts: float,
-        action_ts: Optional[float] = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
-        Align joint states to target timestamp.
+        Align joint streams to `target_ts`. Concatenates per-arm features in sorted
+        arm order (left then right).
 
-        For multi-robot setups (left/right), concatenates features into single arrays:
-        - observation.state = [left_joints..., right_joints...]
-        - action = [left_joints..., right_joints...]
+        Observation entries are (ts, pos, vel, eff); command entries are (ts, pos).
+        `observation.state/velocity/effort` come from the observation buffers at
+        `target_ts`. `action` comes from:
+          - command buffers at target_ts, when action_source is quest_teleop or leader
+          - observation buffers at target_ts + N*frame_interval, when action_source
+            is future_observations (action[t] = observation[t + N])
 
-        Args:
-            joint_buffers: Joint state buffers keyed by (role, robot)
-            target_ts: Target timestamp for observation alignment
-            action_ts: If provided, look up observation data at this timestamp as
-                       the action (used with action_from_observation=True so that
-                       action[t] = observation[t+1] rather than observation[t]).
-
-        Returns:
-            Dictionary with aligned joint state features, or None if data missing
+        Returns None if any required arm is missing data.
         """
-        # Collect data by role, then concatenate robots in sorted order
-        obs_data = {}  # {robot: {pos, vel, eff}}
-        action_data = {}  # {robot: {pos}}
+        arms = sorted(self.config.arms)
 
-        for (role, robot), data in joint_buffers.items():
-            buffer = data["buffer"]
-
-            if len(buffer) == 0:
-                return None  # Required joint data missing
-
-            # Find nearest joint state sample for observation
-            nearest_idx = self._find_nearest_in_buffer(buffer, target_ts)
-            if nearest_idx is None:
+        # Observation lookup at target_ts: always needed (state/velocity/effort, and
+        # also the source for action when action_source == future_observations).
+        obs_at_target: dict[str, ObsEntry] = {}
+        for arm in arms:
+            buf = joint_observation_buffers.get(arm)
+            if not buf:
                 return None
-
-            ts, pos, vel, eff = buffer[nearest_idx]
-
-            if role == "observation":
-                obs_data[robot] = {
-                    "pos": pos.copy(),
-                    "vel": vel.copy() if vel.size > 0 else None,
-                    "eff": eff.copy() if eff.size > 0 else None,
-                }
-            else:  # action
-                action_data[robot] = {"pos": pos.copy()}
-
-        # Fallback: use observation at action_ts (t+1) as action when action_topics
-        # are configured but not recorded in this MCAP.
-        if not action_data and obs_data and self.config.action_from_observation:
-            if action_ts is None:
-                # No next timestamp available (last frame) — skip this frame
+            idx = self._find_nearest_in_buffer(buf, target_ts)
+            if idx is None:
                 return None
-            action_data = {}
-            for (role, robot), data in joint_buffers.items():
-                if role != "observation":
-                    continue
-                buffer = data["buffer"]
-                action_idx = self._find_nearest_in_buffer(buffer, action_ts)
-                if action_idx is None:
+            obs_at_target[arm] = buf[idx]
+
+        # Action lookup, branched on action_source.
+        action_positions: dict[str, np.ndarray] = {}
+        if self.config.action_source is ActionSource.future_observations:
+            assert self.config.action_n_step is not None
+            action_ts = target_ts + self.frame_interval * self.config.action_n_step
+            for arm in arms:
+                buf = joint_observation_buffers[arm]  # non-empty per loop above
+                idx = self._find_nearest_in_buffer(buf, action_ts)
+                if idx is None:
                     return None
-                _, pos, _, _ = buffer[action_idx]
-                action_data[robot] = {"pos": pos.copy()}
-
-        # Check if multi-robot (has named robots like 'left', 'right')
-        robots = sorted([r for r in set(obs_data.keys()) | set(action_data.keys()) if r])
-
-        if robots:
-            # Multi-robot: require ALL robots to have both observation and action data
-            # to ensure consistent output shape (e.g., 16 = 8 left + 8 right)
-            for r in robots:
-                if r not in obs_data:
-                    return None  # Observation data not yet available for this arm
-                if r not in action_data:
-                    return None  # Action data not yet available for this arm
-
-            # Multi-robot: concatenate in sorted order (left, right)
-            result = {}
-
-            # Concatenate observation state
-            obs_positions = [obs_data[r]["pos"] for r in robots]
-            if obs_positions:
-                result["observation.state"] = np.concatenate(obs_positions)
-
-            # Concatenate observation velocity (only if enabled in config)
-            if "velocity" in self.config.observation_feature_mapping.others:
-                obs_velocities = [
-                    obs_data[r]["vel"]
-                    for r in robots
-                    if obs_data[r]["vel"] is not None
-                ]
-                if obs_velocities:
-                    result["observation.velocity"] = np.concatenate(obs_velocities)
-
-            # Concatenate observation effort (only if enabled in config)
-            if "effort" in self.config.observation_feature_mapping.others:
-                obs_efforts = [
-                    obs_data[r]["eff"]
-                    for r in robots
-                    if obs_data[r]["eff"] is not None
-                ]
-                if obs_efforts:
-                    result["observation.effort"] = np.concatenate(obs_efforts)
-
-            # Concatenate action
-            action_positions = [action_data[r]["pos"] for r in robots]
-            if action_positions:
-                result["action"] = np.concatenate(action_positions)
-
-            return result
+                _, pos, _, _ = buf[idx]
+                action_positions[arm] = pos
         else:
-            # Single robot: use original naming (no prefix)
-            result = {}
+            for arm in arms:
+                buf = joint_command_buffers.get(arm)
+                if not buf:
+                    return None
+                idx = self._find_nearest_in_buffer(buf, target_ts)
+                if idx is None:
+                    return None
+                _, pos = buf[idx]
+                action_positions[arm] = pos
 
-            if "" in obs_data:
-                result["observation.state"] = obs_data[""]["pos"]
-                if "velocity" in self.config.observation_feature_mapping.others:
-                    if obs_data[""]["vel"] is not None:
-                        result["observation.velocity"] = obs_data[""]["vel"]
-                if "effort" in self.config.observation_feature_mapping.others:
-                    if obs_data[""]["eff"] is not None:
-                        result["observation.effort"] = obs_data[""]["eff"]
-
-            if "" in action_data:
-                result["action"] = action_data[""]["pos"]
-
-            return result
+        return {
+            "observation.state": np.concatenate([obs_at_target[a][1] for a in arms]),
+            "observation.velocity": np.concatenate([obs_at_target[a][2] for a in arms]),
+            "observation.effort": np.concatenate([obs_at_target[a][3] for a in arms]),
+            "action": np.concatenate([action_positions[a] for a in arms]),
+        }
 
     def _find_nearest_in_buffer(
         self,
         buffer: deque,
         target_ts: float,
-    ) -> Optional[int]:
+    ) -> int | None:
         """
         Find index of frame with nearest timestamp in buffer.
 
@@ -1042,199 +513,121 @@ class BufferedStreamExtractor:
 
         return nearest_idx
 
-    def _parse_joint_name(self, joint_name: str) -> Optional[Tuple[str, str, str]]:
-        """Parse joint name using shared utility."""
-        return parse_joint_name(joint_name, self._joint_pattern)
-
     def _buffer_joint_state(
         self,
         message,
-        joint_buffers: Dict[Tuple[str, str], Dict],
+        joint_observation_buffers: dict[str, deque],
+        joint_command_buffers: dict[str, deque],
     ) -> None:
         """
-        Parse joint state message and add to appropriate buffers.
+        Parse a JointState message and append per-arm samples.
 
-        Joints are sorted by joint_id for deterministic canonical ordering.
-
-        Args:
-            message: MCAP message with ROS JointState
-            joint_buffers: Dict keyed by (role, robot) containing buffer and metadata
+        Follower joints route to `joint_observation_buffers` with (ts, pos, vel, eff).
+        Leader joints (used when action_source == leader) route to
+        `joint_command_buffers` with (ts, pos). Joint values within each arm are
+        sorted alphabetically by joint_id for deterministic canonical order.
         """
         ros_msg = message.ros_msg
-        # Use MCAP log_time for consistent time domain across all streams
-        timestamp = message.log_time.timestamp()
+        timestamp = message_timestamp(message)
 
-        # Group joints by (role, robot)
-        grouped: Dict[Tuple[str, str], Dict] = {}
-
+        # Group by (role, arm) so we can sort each group's parallel arrays together.
+        grouped: dict[tuple[str, str], dict] = {}
         for i, joint_name in enumerate(ros_msg.name):
-            try:
-                result = self._parse_joint_name(joint_name)
-            except DataExtractionError:
-                continue  # Skip unparseable joints
-            if result is None:
-                continue  # arm not in configured arms map, skip
-            role, robot, joint_id = result
+            parsed = parse_joint_name(joint_name)
+            if parsed is None:
+                continue
+            role, arm, joint_id = parsed
 
-            key = (role, robot)
-            if key not in grouped:
-                grouped[key] = {
-                    "joint_ids": [],
-                    "position": [],
-                    "velocity": [],
-                    "effort": [],
-                }
-
-            grouped[key]["joint_ids"].append(joint_id)
-
+            key = (role, arm)
+            g = grouped.setdefault(
+                key, {"joint_ids": [], "position": [], "velocity": [], "effort": []}
+            )
+            g["joint_ids"].append(joint_id)
             if ros_msg.position and i < len(ros_msg.position):
-                grouped[key]["position"].append(ros_msg.position[i])
+                g["position"].append(ros_msg.position[i])
             if ros_msg.velocity and i < len(ros_msg.velocity):
-                grouped[key]["velocity"].append(ros_msg.velocity[i])
+                g["velocity"].append(ros_msg.velocity[i])
             if ros_msg.effort and i < len(ros_msg.effort):
-                grouped[key]["effort"].append(ros_msg.effort[i])
+                g["effort"].append(ros_msg.effort[i])
 
-        # Sort each group by joint_id for canonical ordering
-        for key, data in grouped.items():
-            sort_indices = sorted(
-                range(len(data["joint_ids"])),
-                key=lambda idx: data["joint_ids"][idx],
-            )
-            data["joint_ids"] = [data["joint_ids"][idx] for idx in sort_indices]
-            data["position"] = [data["position"][idx] for idx in sort_indices]
-            data["velocity"] = [data["velocity"][idx] for idx in sort_indices]
-            data["effort"] = [data["effort"][idx] for idx in sort_indices]
+        for g in grouped.values():
+            order = sorted(range(len(g["joint_ids"])), key=lambda idx: g["joint_ids"][idx])
+            for field in ("joint_ids", "position", "velocity", "effort"):
+                g[field] = [g[field][idx] for idx in order] if g[field] else []
 
-        # Add to buffers
-        for key, data in grouped.items():
-            if key not in joint_buffers:
-                joint_buffers[key] = {
-                    "buffer": deque(),
-                    "joint_names": data["joint_ids"],  # Store sorted joint names once
-                }
-
-            # Create arrays
-            pos = (
-                np.array(data["position"], dtype=np.float32)
-                if data["position"]
-                else np.array([], dtype=np.float32)
-            )
-            vel = (
-                np.array(data["velocity"], dtype=np.float32)
-                if data["velocity"]
-                else np.array([], dtype=np.float32)
-            )
-            eff = (
-                np.array(data["effort"], dtype=np.float32)
-                if data["effort"]
-                else np.array([], dtype=np.float32)
-            )
-
-            # Append as tuple: (timestamp, position, velocity, effort)
-            joint_buffers[key]["buffer"].append((timestamp, pos, vel, eff))
+        for (role, arm), g in grouped.items():
+            pos = np.array(g["position"], dtype=np.float32)
+            if role == "observation":
+                vel = np.array(g["velocity"], dtype=np.float32)
+                eff = np.array(g["effort"], dtype=np.float32)
+                joint_observation_buffers.setdefault(arm, deque()).append(
+                    (timestamp, pos, vel, eff)
+                )
+            else:
+                joint_command_buffers.setdefault(arm, deque()).append((timestamp, pos))
 
     def _buffer_action_command(
         self,
         message,
-        topic: str,
-        joint_buffers: Dict[Tuple[str, str], Dict],
+        arm: str,
+        joint_command_buffers: dict[str, deque],
     ) -> None:
         """
-        Parse action command message (Float64MultiArray) and add to joint buffers.
+        Parse a Float64MultiArray action command and append to `joint_command_buffers`.
 
-        Used in quest teleop mode where actions come from separate command topics
-        instead of from leader joints in the JointState topic.
-        Positions are reordered to canonical (sorted) joint order using joint_order
-        from the ActionTopicConfig.
-
-        Args:
-            message: MCAP message with Float64MultiArray
-            topic: The ROS topic name
-            joint_buffers: Dict keyed by (role, robot) containing buffer and metadata
+        Values arrive in QUEST_JOINT_ORDER and are reordered to canonical
+        (alphabetical) joint order to match observation grouping.
         """
-        ros_msg = message.ros_msg
-        # Float64MultiArray has no header; use MCAP recording timestamp
-        timestamp = message.log_time.timestamp()
-
-        # Get action topic config
-        topic_cfg = self.config.action_topics[topic]
-        robot = topic_cfg.arm
-        key = ("action", robot)
-
-        # Extract position data from Float64MultiArray.data
-        positions = list(ros_msg.data)
-
-        # Compute reorder permutation on first message (cached per topic)
-        if topic not in self._action_reorder_cache:
-            if topic_cfg.joint_order:
-                # Sort joint_order alphabetically to match canonical observation order
-                self._action_reorder_cache[topic] = np.array(
-                    sorted(
-                        range(len(topic_cfg.joint_order)),
-                        key=lambda idx: topic_cfg.joint_order[idx],
-                    ),
-                    dtype=np.intp,
-                )
-            else:
-                # No joint_order specified — identity permutation (no reorder)
-                self._action_reorder_cache[topic] = np.arange(
-                    len(positions), dtype=np.intp
-                )
-
-        reorder = self._action_reorder_cache[topic]
-
-        if key not in joint_buffers:
-            # Use canonical (sorted) joint names
-            if topic_cfg.joint_order:
-                joint_names = sorted(topic_cfg.joint_order)
-            else:
-                joint_names = [f"joint{i}" for i in range(len(positions))]
-            joint_buffers[key] = {
-                "buffer": deque(),
-                "joint_names": joint_names,
-            }
-
-        # Reorder positions to canonical order
-        pos = np.array(positions, dtype=np.float32)[reorder]
-        vel = np.array([], dtype=np.float32)
-        eff = np.array([], dtype=np.float32)
-
-        # Append as tuple: (timestamp, position, velocity, effort)
-        joint_buffers[key]["buffer"].append((timestamp, pos, vel, eff))
+        timestamp = message_timestamp(message)
+        positions = np.array(message.ros_msg.data, dtype=np.float32)[_QUEST_REORDER]
+        joint_command_buffers.setdefault(arm, deque()).append((timestamp, positions))
 
     def _sync_joint_buffers(
         self,
-        joint_buffers: Dict[Tuple[str, str], Dict],
+        joint_observation_buffers: dict[str, deque],
+        joint_command_buffers: dict[str, deque],
         oldest_camera_ts: float,
     ) -> None:
-        """
-        Remove joint state samples older than the oldest camera frame.
+        """Drop joint samples older than the oldest remaining camera frame."""
+        for buf in joint_observation_buffers.values():
+            while buf and buf[0][0] < oldest_camera_ts:
+                buf.popleft()
+        for buf in joint_command_buffers.values():
+            while buf and buf[0][0] < oldest_camera_ts:
+                buf.popleft()
 
-        This keeps joint state buffers synchronized with camera buffer time window.
-
-        Args:
-            joint_buffers: Joint state buffers to sync
-            oldest_camera_ts: Timestamp of oldest remaining camera frame
-        """
-        for key, data in joint_buffers.items():
-            buffer = data["buffer"]
-            while buffer and buffer[0][0] < oldest_camera_ts:
-                buffer.popleft()
-
-    def _get_joint_names(
+    def _log_empty_diagnostics(
         self,
-        joint_buffers: Dict[Tuple[str, str], Dict],
-    ) -> Dict[str, List[str]]:
-        """
-        Extract joint names from buffers for dataset feature creation.
+        camera_buffers: dict[str, deque],
+        joint_observation_buffers: dict[str, deque],
+        joint_command_buffers: dict[str, deque],
+        frames_dropped: int,
+    ) -> None:
+        """Print diagnostics when extraction produced 0 frames."""
+        cam_counts = {cam: len(buf) for cam, buf in camera_buffers.items()}
+        obs_counts = {arm: len(buf) for arm, buf in joint_observation_buffers.items()}
+        cmd_counts = {arm: len(buf) for arm, buf in joint_command_buffers.items()}
 
-        Returns:
-            Dict mapping robot prefix to joint names (e.g., {"right": ["joint1", ...], "left": [...]})
-        """
-        joint_names = {}
-        for (role, robot), data in joint_buffers.items():
-            if role == "observation":  # Use observation to get joint names (same for action)
-                prefix = robot if robot else ""
-                if prefix not in joint_names:
-                    joint_names[prefix] = data["joint_names"]
-        return joint_names
+        print(
+            f"[BufferedStream] WARNING: 0 frames produced "
+            f"({frames_dropped} dropped during alignment) — diagnostics:"
+        )
+        print(f"  Camera buffers:        {cam_counts}")
+        print(f"  Joint obs buffers:     {obs_counts or '(empty)'}")
+        print(f"  Joint command buffers: {cmd_counts or '(empty)'}")
+
+        if not cam_counts or all(c == 0 for c in cam_counts.values()):
+            print("  -> No camera images found. Check these topics exist in the MCAP:")
+            for t in self.config.camera_topic_mapping:
+                print(f"       {t}")
+        if not obs_counts:
+            print(
+                f"  -> No joint state data. Check robot_state_topic: "
+                f"{self.config.robot_state_topic}"
+            )
+        elif self.config.action_source is ActionSource.quest_teleop and not cmd_counts:
+            print("  -> No action data from quest command topics:")
+            for t in self._quest_topic_to_arm:
+                print(f"       {t}")
+        elif self.config.action_source is ActionSource.leader and not cmd_counts:
+            print("  -> No 'leader_*' joints found in /joint_states.")

@@ -30,12 +30,13 @@ from rich.progress import (
 from rich.table import Table
 
 from mcap_converter import (
-    ConfigLoader,
+    ActionSource,
     DataConfig,
     LeRobotWriter,
     McapReader,
+    load_config,
 )
-from mcap_converter.core.extractor import BufferedStreamExtractor
+from mcap_converter.core.extractor import BufferedStreamExtractor, parse_joint_name
 from mcap_converter.core.reader import snap_fps
 
 console = Console()
@@ -90,94 +91,21 @@ def collect_mcap_files(input_dir: str) -> List[Path]:
     return sorted(mcap_paths)
 
 
-def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
-    """
-    Quick scan to extract joint names from first JointState message.
-
-    Only reads the first message, so memory-efficient for large files.
-
-    In leader-follower mode: parses joint names to find observation (follower) joints.
-    In quest teleop mode: all joints in the JointState topic are observations,
-    so we group by arm without filtering by source/role prefix.
-
-    Returns:
-        Dictionary mapping robot prefix to joint names:
-        - {"right": ["joint1", ...], "left": [...]} for multi-robot
-        - {"": ["joint1", ...]} for single robot
-        Joint names are extracted from the observation role.
-    """
-    reader = McapReader(mcap_path)
-    joint_pattern = config.joint_name_pattern
-    sep = joint_pattern.separator
-    quest_mode = bool(config.action_topics)
-
+def quick_scan_joint_names(mcap_path: Path, config: DataConfig) -> dict[str, list[str]]:
+    """Scan the first JointState message; return {arm: [joint_ids]} per configured arm."""
+    reader = McapReader(str(mcap_path))
+    arms_wanted = set(config.arms)
     for message in reader.read_messages(topics=[config.robot_state_topic]):
-        ros_msg = message.ros_msg
-
-        # Group joint names by robot prefix
-        robot_joints: dict = {}  # {robot_prefix: [joint_ids]}
-
-        for joint_name in ros_msg.name:
-            if quest_mode:
-                # Quest teleop mode: all joints are observations (no leader prefix).
-                # Parse arm identifier and joint_id directly.
-                # Joint names are like "follower_l_joint1" — still use source
-                # prefix to strip it, then extract arm and joint_id.
-                remaining = joint_name
-                robot = ""
-
-                # Try to strip known source prefixes
-                for prefix in joint_pattern.role_prefix.keys():
-                    if joint_name.startswith(prefix + sep):
-                        remaining = joint_name[len(prefix) + len(sep) :]
-                        break
-
-                # Extract robot prefix and joint_id
-                parts = remaining.split(sep, 1)
-                if parts and parts[0] in joint_pattern.robot_prefix:
-                    robot = joint_pattern.robot_prefix[parts[0]]
-                    joint_id = parts[1] if len(parts) > 1 else parts[0]
-                else:
-                    robot = ""
-                    joint_id = remaining
-
-                if robot not in robot_joints:
-                    robot_joints[robot] = []
-                robot_joints[robot].append(joint_id)
-            else:
-                # Leader-follower mode: only extract observation (follower) joints
-                role = None
-                robot = ""
-                remaining = ""
-
-                for prefix, role_name in joint_pattern.role_prefix.items():
-                    if joint_name.startswith(prefix + sep):
-                        role = role_name
-                        remaining = joint_name[len(prefix) + len(sep) :]
-                        break
-
-                if role != "observation":
-                    continue
-
-                # Extract robot prefix and joint_id
-                parts = remaining.split(sep, 1)
-                if parts and parts[0] in joint_pattern.robot_prefix:
-                    robot = joint_pattern.robot_prefix[parts[0]]
-                    joint_id = parts[1] if len(parts) > 1 else parts[0]
-                else:
-                    robot = ""
-                    joint_id = remaining
-
-                if robot not in robot_joints:
-                    robot_joints[robot] = []
-                robot_joints[robot].append(joint_id)
-
-        if robot_joints:
-            # Sort each arm's joint list for canonical ordering
-            for robot in robot_joints:
-                robot_joints[robot] = sorted(robot_joints[robot])
-            return robot_joints
-
+        per_arm: dict[str, list[str]] = {arm: [] for arm in arms_wanted}
+        for joint_name in message.ros_msg.name:
+            parsed = parse_joint_name(joint_name)
+            if parsed is None:
+                continue
+            role, arm, joint_id = parsed
+            if role == "observation" and arm in per_arm:
+                per_arm[arm].append(joint_id)
+        if any(per_arm.values()):
+            return {arm: sorted(joints) for arm, joints in per_arm.items() if joints}
     return {}
 
 
@@ -186,7 +114,7 @@ def convert_session(
     output_dir: str,
     repo_id: str,
     robot_type: str = "anvil_openarm",
-    fps: int = 30,
+    frequency: int = 30,
     tolerance_s: float = 1e-3,
     task: str = "manipulation",
     config: DataConfig = None,
@@ -206,7 +134,7 @@ def convert_session(
         output_dir: Output directory for dataset
         repo_id: HuggingFace repository ID
         robot_type: Robot type identifier
-        fps: Video frames per second
+        frequency: Output dataset sample rate in Hz
         tolerance_s: Time synchronization tolerance
         task: Task name for the dataset
         config: Data configuration
@@ -217,7 +145,10 @@ def convert_session(
     session_start_time = time.time()
 
     if config is None:
-        config = ConfigLoader.get_default()
+        raise ValueError("config is required")
+
+    # Stamp the resolved frequency onto config so the extractor reads the same value.
+    config.frequency = frequency
 
     # Find all MCAP files (use pre-collected list if provided)
     if mcap_files is None:
@@ -237,34 +168,31 @@ def convert_session(
         output_dir=output_dir,
         repo_id=repo_id,
         robot_type=robot_type,
-        fps=fps,
+        frequency=frequency,
         config=config,
         vcodec=vcodec,
         quiet=True,
     )
 
-    # Get joint names
+    # Get joint names per arm from the first JointState message.
     log(f"Quick scan for joint names: [dim]{mcap_files[0]}[/dim]")
-    joint_names = quick_scan_joint_names(str(mcap_files[0]), config)
+    joint_names = quick_scan_joint_names(mcap_files[0], config)
     if not joint_names:
-        raise ValueError("Cannot get joint names from reference MCAP (no observation joints found)")
+        raise ValueError(
+            "Cannot get joint names from reference MCAP (no follower_* joints matching "
+            f"configured arms={config.arms} found in {config.robot_state_topic})"
+        )
 
-    # Log detected robot mode
-    robots = [r for r in joint_names.keys() if r]
     total_joints = sum(len(v) for v in joint_names.values())
-    quest_mode = bool(config.action_topics)
-    teleop_label = "[bold magenta]quest teleop[/bold magenta]" if quest_mode else "[bold cyan]leader-follower[/bold cyan]"
-    if robots:
-        log(f"Detected [bold cyan]bimanual[/bold cyan] robot ({teleop_label}): {robots}")
-        for robot in sorted(robots):
-            log(f"  {robot}: {joint_names[robot]}")
-    else:
-        log(f"Detected [bold cyan]single-arm[/bold cyan] robot ({teleop_label})")
-        log(f"  joints: {joint_names.get('', [])}")
+    layout = "bimanual" if len(joint_names) > 1 else "single-arm"
+    log(
+        f"Detected [bold cyan]{layout}[/bold cyan] robot "
+        f"([bold magenta]{config.action_source.value}[/bold magenta]): "
+        f"{sorted(joint_names.keys())}"
+    )
+    for arm in sorted(joint_names.keys()):
+        log(f"  {arm}: {joint_names[arm]}")
     log(f"Total joints: [bold]{total_joints}[/bold] (observation + action)")
-    if quest_mode:
-        for topic, topic_cfg in config.action_topics.items():
-            log(f"  Action topic ({topic_cfg.arm}): [dim]{topic}[/dim]")
 
     # Get camera names
     camera_names = list(config.camera_topic_mapping.values())
@@ -282,7 +210,7 @@ def convert_session(
             camera_names=camera_names,
         )
 
-    # Copy conversion config for inference generation during training (skip if resuming)
+    # Snapshot the conversion config alongside the dataset (used by downstream tooling).
     conversion_config_dest = os.path.join(output_dir, "conversion_config.yaml")
     if resume_from > 0:
         log(f"Skipping config copy — using existing [dim]{conversion_config_dest}[/dim]")
@@ -290,27 +218,9 @@ def convert_session(
         shutil.copy(config_path, conversion_config_dest)
         log(f"Copied conversion config: [dim]{conversion_config_dest}[/dim]")
     else:
-        # Save config from DataConfig object
         import yaml
-
-        config_to_save = {
-            "robot_state_topic": config.robot_state_topic,
-            "joint_names": {
-                "separator": config.joint_name_pattern.separator,
-                "source": config.joint_name_pattern.source,
-                "arms": config.joint_name_pattern.arms,
-            },
-            "camera_topic_mapping": config.camera_topic_mapping,
-        }
-        if config.action_topics:
-            config_to_save["action_topics"] = config.action_topics
-
         with open(conversion_config_dest, "w") as f:
-            yaml.dump(
-                config_to_save,
-                f,
-                default_flow_style=False,
-            )
+            yaml.safe_dump(config.model_dump(mode="json"), f, sort_keys=False)
         log(f"Saved conversion config: [dim]{conversion_config_dest}[/dim]")
 
     # Process each MCAP file as one episode
@@ -364,12 +274,11 @@ def convert_session(
             stream_extractor = BufferedStreamExtractor(
                 config=config,
                 buffer_seconds=buffer_seconds,
-                fps=fps,
                 quiet=True,
                 progress_callback=on_frame_progress,
             )
 
-            for frame in stream_extractor.extract_frames(str(mcap_path), task=task):
+            for frame in stream_extractor.extract_frames(mcap_path, task=task):
                 dataset.add_frame(frame)
 
             if frame_count == 0:
@@ -440,7 +349,7 @@ def convert_session(
             plot_conversion_debug(
                 output_dir,
                 n_episodes=debug_plot_episodes,
-                action_from_observation_n=config.action_from_observation_n,
+                action_n_step=config.action_n_step,
             )
         log(f"Debug plots saved to [dim]{output_dir}/debug_plots/[/dim]")
 
@@ -507,7 +416,7 @@ examples:
   # output goes to data/datasets/my-session/
 
   mcap-convert -i data/raw/my-session -o data/datasets --vcodec libsvtav1
-  mcap-convert -i data/raw/my-session -o data/datasets --fps 15 --push-to-hub
+  mcap-convert -i data/raw/my-session -o data/datasets --frequency 15 --push-to-hub
   mcap-convert -i data/raw/my-session -o data/datasets --max-episodes 5
   mcap-convert -i data/raw/my-session -o data/datasets --resume
 """,
@@ -521,7 +430,7 @@ examples:
         help="output base directory — dataset is saved to <output-dir>/<input-dir-name>/ (default: data/datasets)",
     )
     parser.add_argument(
-        "--config", type=str,
+        "--config", type=str, required=True,
         help="path to YAML config file",
     )
     parser.add_argument(
@@ -538,8 +447,12 @@ examples:
         help="robot type (default: anvil_openarm)",
     )
     parser.add_argument(
-        "--fps", type=int, default=None,
-        help="output fps — overrides auto-detected source fps; must not exceed source fps",
+        "--frequency", type=int, default=None,
+        help=(
+            "output dataset frequency in Hz — overrides `frequency` from the YAML config. "
+            "If the source MCAP rate is lower than this target, the converter clamps to "
+            "the source rate (no upsampling)."
+        ),
     )
     parser.add_argument(
         "--tolerance-s", type=float, default=1e-3,
@@ -572,9 +485,10 @@ examples:
         help="only convert the first N episodes (default: convert all)",
     )
     parser.add_argument(
-        "--act-from-obs-n-step", type=int, default=None,
+        "--action-n-step", type=int, default=None,
         metavar="N",
-        help="override action_from_observation_n in config: action[t] = observation[t+N] (default: use config value, factory default 10)",
+        help="override action_n_step in config (action[t] = observation[t+N]); only valid when "
+             "action_source == future_observations",
     )
     parser.add_argument(
         "--debug-plot-episodes", type=int, default=5,
@@ -602,58 +516,64 @@ examples:
     dataset_name = args.hf_repo if args.hf_repo else Path(args.output_dir).name
     repo_id = f"{hf_username}/{dataset_name}"
 
-    # Load configuration
-    if args.config:
-        config = ConfigLoader.from_yaml(args.config)
-        log(f"Loaded config from: [dim]{args.config}[/dim]")
-    else:
-        config = ConfigLoader.get_default()
-        log("Using default configuration")
+    config = load_config(args.config)
+    log(f"Loaded config from: [dim]{args.config}[/dim]")
 
-    if args.act_from_obs_n_step is not None:
-        config.action_from_observation_n = args.act_from_obs_n_step
-        log(f"action_from_observation_n overridden to [bold]{args.act_from_obs_n_step}[/bold] via --act-from-obs-n-step")
+    if args.action_n_step is not None:
+        if config.action_source is not ActionSource.future_observations:
+            console.print(
+                "[bold red]ERROR: --action-n-step is only valid when "
+                "action_source == future_observations[/bold red]"
+            )
+            exit(1)
+        config.action_n_step = args.action_n_step
+        log(f"action_n_step overridden to [bold]{args.action_n_step}[/bold] via --action-n-step")
 
-    # Collect MCAP files once (reused for fps detection and conversion)
+    # Collect MCAP files once (reused for source rate detection and conversion)
     all_mcap_files = collect_mcap_files(args.input_dir)
 
-    # Always auto-detect input fps from all episodes (fast — reads MCAP summary only)
+    # Auto-detect source rate from MCAP (fast — reads summary only).
     ref_topic = list(config.camera_topic_mapping.keys())[0] if config.camera_topic_mapping else None
-    ep_fps_raw = []
+    ep_rates_raw = []
     if ref_topic:
         for f in all_mcap_files:
             v = McapReader(str(f)).estimate_fps(ref_topic)
             if v:
-                ep_fps_raw.append(v)
+                ep_rates_raw.append(v)
 
-    if ep_fps_raw:
-        snapped = [snap_fps(v) for v in ep_fps_raw]
-        input_fps = snap_fps(min(ep_fps_raw))
-        input_fps_label = str(input_fps)
+    if ep_rates_raw:
+        snapped = [snap_fps(v) for v in ep_rates_raw]
+        source_frequency = snap_fps(min(ep_rates_raw))
+        source_label = str(source_frequency)
         if len(set(snapped)) > 1:
-            input_fps_label = f"{input_fps} [yellow](mixed: {snapped})[/yellow]"
+            source_label = f"{source_frequency} [yellow](mixed: {snapped})[/yellow]"
     else:
-        input_fps = None
-        input_fps_label = "unknown"
+        source_frequency = None
+        source_label = "unknown"
 
-    # Resolve output fps: CLI --fps > auto-detect min > 30
-    if args.fps is not None:
-        fps = args.fps
-        output_fps_label = f"{fps} (manual override)"
-        if input_fps is not None and fps > input_fps:
-            console.print(
-                f"\n[bold red]ERROR: Output fps ({fps}) is higher than source session fps ({input_fps}).[/bold red]\n"
-                "Upsampling is not supported — it creates duplicate frames and degrades dataset quality.\n"
-                f"Use [bold]--fps {input_fps}[/bold] or lower, or omit --fps to use the source fps automatically.\n"
-            )
-            exit(1)
-    elif input_fps is not None:
-        fps = input_fps
-        output_fps_label = f"{fps} (default as source)"
+    # Resolve output frequency. Priority: CLI --frequency > config.frequency.
+    # Clamp at source rate (can't upsample).
+    if args.frequency is not None:
+        target_frequency = args.frequency
+        target_origin = "CLI override"
     else:
-        fps = 30
-        output_fps_label = "30 (default)"
-        log("[yellow]Cannot detect fps — defaulting to 30[/yellow]")
+        target_frequency = config.frequency
+        target_origin = "from config"
+
+    if source_frequency is None:
+        log("[yellow]Cannot detect source rate — using target frequency as-is.[/yellow]")
+        frequency = target_frequency
+        output_frequency_label = f"{frequency} ({target_origin}; source unknown)"
+    elif target_frequency > source_frequency:
+        log(
+            f"[yellow]Target frequency ({target_frequency} Hz, {target_origin}) exceeds "
+            f"source rate ({source_frequency} Hz); clamping to source (no upsampling).[/yellow]"
+        )
+        frequency = source_frequency
+        output_frequency_label = f"{frequency} (clamped to source; {target_origin} was {target_frequency})"
+    else:
+        frequency = target_frequency
+        output_frequency_label = f"{frequency} ({target_origin})"
 
     # Startup banner
     banner = Table(show_header=False, box=None, padding=(0, 2))
@@ -663,17 +583,19 @@ examples:
     banner.add_row("Output directory", args.output_dir)
     banner.add_row("HuggingFace Repo", repo_id)
     banner.add_row("Robot Type", args.robot_type)
-    banner.add_row("Source Session FPS", input_fps_label)
-    banner.add_row("Output FPS", output_fps_label)
+    banner.add_row("Source Session Rate", f"{source_label} Hz")
+    banner.add_row("Output Frequency", f"{output_frequency_label} Hz")
     banner.add_row("Buffer", f"{args.buffer_seconds}s")
     banner.add_row("Video codec", args.vcodec)
     banner.add_row("Resume", "yes" if args.resume else "no")
     banner.add_row("Max episodes", str(args.max_episodes) if args.max_episodes else "all")
-    if config.action_from_observation:
-        n_label = str(config.action_from_observation_n)
-        if args.act_from_obs_n_step is not None:
+    banner.add_row("Action source", config.action_source.value)
+    banner.add_row("Arms", ", ".join(config.arms))
+    if config.action_source is ActionSource.future_observations:
+        n_label = str(config.action_n_step)
+        if args.action_n_step is not None:
             n_label += " [yellow](CLI override)[/yellow]"
-        banner.add_row("act-from-obs n", n_label)
+        banner.add_row("action n-step", n_label)
     banner.add_row("Debug plots", f"first {args.debug_plot_episodes} episodes")
 
     console.print(Panel(
@@ -706,7 +628,7 @@ examples:
             output_dir=args.output_dir,
             repo_id=repo_id,
             robot_type=args.robot_type,
-            fps=fps,
+            frequency=frequency,
             tolerance_s=args.tolerance_s,
             task=args.task,
             config=config,

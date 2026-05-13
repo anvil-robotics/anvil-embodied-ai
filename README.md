@@ -115,10 +115,10 @@ uv run mcap-convert \
 
 Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`).
 
-**`action_from_observation`** — use when `/follower_*/commands` was not recorded. Shifts observation forward by N frames:
+**`action_source: future_observations`** — use when `/follower_*/commands` was not recorded. Synthesizes the action by shifting observation forward by `action_n_step` frames:
 
 ```
-action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
+action[t] = observation.state[t + action_n_step]   (e.g. n=10 ≈ 333ms at 30fps)
 ```
 
 **Common flags:**
@@ -127,7 +127,7 @@ action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
 |------|-------------|
 | `--resume` | Skip already-converted episodes — safe to re-run after interruption |
 | `--max-episodes N` | Convert only the first N episodes |
-| `--fps N` | Override output FPS (auto-detected by default) |
+| `--frequency N` | Override output dataset frequency in Hz (taken from config by default; clamps to source rate if higher) |
 | `--vcodec` | `h264` (default) · `hevc` · `libsvtav1` |
 | `--robot-type` | `anvil_openarm` (default) · `anvil_yam` |
 

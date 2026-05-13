@@ -4,8 +4,8 @@
 Four scenarios are tested against the fixture at data/raw/test-session (5 stub MCAPs,
 single right arm):
 
-  AFO              — action_from_observation=true,  action_type=absolute
-  CMD              — action_from_observation=false, action_type=absolute
+  AFO              — action_source=future_observations, action_type=absolute
+  CMD              — action_source=quest_teleop,         action_type=absolute
   CMD_DELTA_OBS_T       — CMD dataset + --action-type=delta_obs_t
   CMD_DELTA_SEQUENTIAL  — CMD dataset + --action-type=delta_sequential
 

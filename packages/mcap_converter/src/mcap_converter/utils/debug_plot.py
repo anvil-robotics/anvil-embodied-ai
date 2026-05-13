@@ -1,7 +1,7 @@
 """Debug plots for converted LeRobot datasets.
 
 Generates per-episode observation.state vs action comparison plots to visually
-verify action_from_observation_n alignment after conversion.
+verify action_n_step alignment after conversion.
 """
 
 from __future__ import annotations
@@ -9,13 +9,12 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Optional
 
 
 def plot_conversion_debug(
     output_dir: str,
     n_episodes: int = 5,
-    action_from_observation_n: Optional[int] = None,
+    action_n_step: int | None = None,
 ) -> None:
     """Generate obs_state vs action debug plots for the first N episodes.
 
@@ -25,18 +24,18 @@ def plot_conversion_debug(
     Args:
         output_dir: Path to the converted LeRobot dataset directory.
         n_episodes: Number of episodes to plot (default 5).
-        action_from_observation_n: Frame offset used during conversion, shown
-            in plot titles. If None, attempts to read from conversion_config.yaml.
+        action_n_step: Frame offset shown in plot titles (only meaningful when
+            action_source == future_observations). If None and not present in
+            the snapshot, plots are still drawn but without an offset label.
     """
     import matplotlib.pyplot as plt
-    import pyarrow.parquet as pq
     import numpy as np
+    import pyarrow.parquet as pq
 
     root = Path(output_dir)
     plots_dir = root / "debug_plots"
     plots_dir.mkdir(exist_ok=True)
 
-    # Load joint names from meta/info.json
     info_path = root / "meta" / "info.json"
     joint_names: list[str] = []
     fps: int = 30
@@ -46,18 +45,17 @@ def plot_conversion_debug(
         joint_names = obs_feature.get("names", [])
         fps = info.get("fps", 30)
 
-    # Try to read action_from_observation_n from saved conversion config
-    if action_from_observation_n is None:
+    # Try to read action_n_step from saved conversion config (may not be set
+    # for non-future_observations action sources).
+    if action_n_step is None:
         config_path = root / "conversion_config.yaml"
         if config_path.exists():
             try:
                 import yaml
                 cfg = yaml.safe_load(config_path.read_text())
-                action_from_observation_n = cfg.get("action_from_observation_n", 10)
+                action_n_step = cfg.get("action_n_step")
             except Exception:
-                action_from_observation_n = 10
-        else:
-            action_from_observation_n = 10
+                action_n_step = None
 
     # Collect parquet files sorted by chunk/file order
     data_files = sorted((root / "data").rglob("*.parquet"))
@@ -96,8 +94,11 @@ def plot_conversion_debug(
         episodes[ep]["obs"].append(obs)
         episodes[ep]["act"].append(act)
 
-    offset_sec = action_from_observation_n / fps
-    offset_label = f"n={action_from_observation_n} ({offset_sec*1000:.0f}ms @ {fps}fps)"
+    if action_n_step is None:
+        offset_label = "action_n_step: n/a"
+    else:
+        offset_sec = action_n_step / fps
+        offset_label = f"n={action_n_step} ({offset_sec*1000:.0f}ms @ {fps}fps)"
 
     for ep_idx in sorted(episodes.keys())[:n_episodes]:
         ep_data = episodes[ep_idx]
