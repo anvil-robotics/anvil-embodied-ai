@@ -92,7 +92,15 @@ def decode_compressed_image(data: bytes, format: str) -> np.ndarray:
     if compression in ["jpeg", "jpg"]:
         img_bgr = cv2.imdecode(img_data, cv2.IMREAD_COLOR)
         if img_bgr is None:
-            raise ValueError("Failed to decode JPEG image")
+            # cv2 failed — try PIL as a more lenient fallback
+            try:
+                img_pil = Image.open(io.BytesIO(bytes(data)))
+                img_pil.load()  # force full decode so errors surface here
+                return np.array(img_pil.convert("RGB"))
+            except Exception as pil_err:
+                raise ValueError(
+                    f"Failed to decode JPEG image (cv2 and PIL both failed: {pil_err})"
+                ) from pil_err
         return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
     elif compression == "png":

@@ -369,8 +369,35 @@ def convert_session(
                 progress_callback=on_frame_progress,
             )
 
-            for frame in stream_extractor.extract_frames(str(mcap_path), task=task):
-                dataset.add_frame(frame)
+            corrupt_frame_error: Exception | None = None
+            try:
+                for frame in stream_extractor.extract_frames(str(mcap_path), task=task):
+                    dataset.add_frame(frame)
+            except ValueError as exc:
+                corrupt_frame_error = exc
+
+            if corrupt_frame_error is not None:
+                # Discard any partially-buffered frames for this episode
+                if dataset.has_pending_frames():
+                    dataset.clear_episode_buffer(delete_images=True)
+                progress.update(
+                    episode_task,
+                    total=1,
+                    completed=1,
+                    status=f"[red]skipped (corrupt frame: {corrupt_frame_error})[/red]",
+                )
+                progress.advance(overall_task)
+                progress.update(
+                    overall_task,
+                    status=f"{episode_idx + 1}/{len(mcap_files)} episodes",
+                )
+                episode_frame_counts.append(0)
+                episode_times.append(time.time() - episode_start_time)
+                log(
+                    f"[yellow]⚠ Skipped episode {mcap_path.name} — corrupt frame: "
+                    f"{corrupt_frame_error}[/yellow]"
+                )
+                continue
 
             if frame_count == 0:
                 # Skip empty episodes — don't call save_episode on an empty buffer
