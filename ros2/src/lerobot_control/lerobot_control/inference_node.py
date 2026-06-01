@@ -341,6 +341,8 @@ class LeRobotInferenceNode(Node):
         if self._is_vla and not self.rtc_config_yaml:
             self.rtc_config_yaml = self.config.get("rtc", {})
 
+        self.n_action_steps_override = config_overrides.get("n_action_steps")
+
         loader = ModelLoader(
             self.model_path,
             self.device,

@@ -71,6 +71,18 @@ def parse_joint_name(
     return role, robot, joint_id
 
 
+def message_timestamp(message) -> float:
+    """
+    POSIX seconds for a message, preferring the ROS `header.stamp` over MCAP log_time.
+    Falls back to log_time for messages without a header (e.g. std_msgs/Float64MultiArray).
+    """
+    ros_msg = message.ros_msg
+    if hasattr(ros_msg, "header"):
+        stamp = ros_msg.header.stamp
+        return stamp.sec + stamp.nanosec * 1e-9
+    return message.log_time_ns * 1e-9
+
+
 # =============================================================================
 # DataExtractor - Batch Mode (loads entire episode into memory)
 # =============================================================================
@@ -204,7 +216,7 @@ class DataExtractor:
                 self._extract_joint_state_legacy(message, extracted_data)
             # Handle camera topics (detect CompressedImage vs Image by attribute)
             elif topic in self.config.camera_topics or topic in self._compressed_topic_mapping:
-                if hasattr(message.ros_msg, 'format'):
+                if hasattr(message.ros_msg, "format"):
                     self._extract_compressed_image(message, extracted_data)
                 else:
                     self._extract_image(message, extracted_data)
@@ -245,8 +257,7 @@ class DataExtractor:
         Joints are sorted by joint_id for deterministic canonical ordering.
         """
         ros_msg = message.ros_msg
-        # Use MCAP log_time for consistent time domain across all streams
-        time_s = message.log_time.timestamp()
+        time_s = message_timestamp(message)
 
         # Group joints by (role, robot)
         grouped_data: Dict[Tuple[str, str], Dict] = {}
@@ -313,7 +324,7 @@ class DataExtractor:
         Extract action from a command topic (quest teleop mode).
 
         Command topics publish std_msgs/Float64MultiArray with joint positions.
-        These messages have no header, so we use MCAP log_time for timestamps.
+        Float64MultiArray has no header — message_timestamp falls back to log_time.
         Positions are reordered to canonical (sorted) joint order using joint_order
         from the ActionTopicConfig.
 
@@ -323,8 +334,7 @@ class DataExtractor:
             extracted_data: Data dictionary to populate
         """
         ros_msg = message.ros_msg
-        # Float64MultiArray has no header; use MCAP recording timestamp
-        time_s = message.log_time.timestamp()
+        time_s = message_timestamp(message)
 
         # Get action topic config
         topic_cfg = self.config.action_topics[topic]
@@ -347,9 +357,7 @@ class DataExtractor:
                 )
             else:
                 # No joint_order specified — identity permutation (no reorder)
-                self._action_reorder_cache[topic] = np.arange(
-                    len(positions), dtype=np.intp
-                )
+                self._action_reorder_cache[topic] = np.arange(len(positions), dtype=np.intp)
 
         reorder = self._action_reorder_cache[topic]
 
@@ -414,8 +422,7 @@ class DataExtractor:
     def _extract_image(self, message, extracted_data: Dict):
         """Extract image from ROS Image message"""
         ros_msg = message.ros_msg
-        # Use MCAP log_time for consistent time domain across all streams
-        time_s = message.log_time.timestamp()
+        time_s = message_timestamp(message)
 
         cam_name = self.config.camera_topic_mapping[message.channel.topic]
         extracted_data[cam_name]["timestamp"].append(time_s)
@@ -433,8 +440,7 @@ class DataExtractor:
     def _extract_compressed_image(self, message, extracted_data: Dict):
         """Extract image from ROS CompressedImage message"""
         ros_msg = message.ros_msg
-        # Use MCAP log_time for consistent time domain across all streams
-        time_s = message.log_time.timestamp()
+        time_s = message_timestamp(message)
 
         topic = message.channel.topic
         # Look up camera name from either the main mapping or the auto-generated compressed mapping
@@ -715,12 +721,11 @@ class BufferedStreamExtractor:
                 continue
             cam_name = topic_to_cam[topic]
 
-            # Use MCAP log_time for consistent time domain across all streams
-            time_s = message.log_time.timestamp()
+            time_s = message_timestamp(message)
 
             # Decode image — detect CompressedImage vs Image by attribute
             ros_msg = message.ros_msg
-            if hasattr(ros_msg, 'format'):
+            if hasattr(ros_msg, "format"):
                 img = decode_compressed_image(ros_msg.data, ros_msg.format)
             else:
                 img = decode_image(ros_msg.data, ros_msg.encoding, ros_msg.height, ros_msg.width)
@@ -800,22 +805,30 @@ class BufferedStreamExtractor:
             }
             print(f"[BufferedStream] WARNING: 0 frames produced — diagnostics:")
             print(f"  Camera buffers: {cam_counts}")
-            print(f"  Joint buffers:  {joint_keys if joint_keys else '(empty — no joint data received)'}")
+            print(
+                f"  Joint buffers:  {joint_keys if joint_keys else '(empty — no joint data received)'}"
+            )
             if not cam_counts or all(c == 0 for c in cam_counts.values()):
                 print(f"  -> No camera images found. Check that these topics exist in the MCAP:")
                 for t in self.config.camera_topics:
                     print(f"       {t}")
             if not joint_keys:
-                print(f"  -> No joint state data. Check robot_state_topic: {self.config.robot_state_topic}")
+                print(
+                    f"  -> No joint state data. Check robot_state_topic: {self.config.robot_state_topic}"
+                )
                 if self.config.action_topics:
-                    print(f"  -> No action data. Check action_topics: {list(self.config.action_topics.keys())}")
+                    print(
+                        f"  -> No action data. Check action_topics: {list(self.config.action_topics.keys())}"
+                    )
             elif not any(k.startswith("action:") for k in joint_keys):
                 if self.config.action_topics:
                     print(f"  -> No action data received from action_topics:")
                     for t in self.config.action_topics:
                         print(f"       {t}")
                 else:
-                    print(f"  -> No action data parsed from joint_states (no leader prefix matched).")
+                    print(
+                        f"  -> No action data parsed from joint_states (no leader prefix matched)."
+                    )
 
     def _align_frame_at_cursor(
         self,
@@ -970,20 +983,14 @@ class BufferedStreamExtractor:
             # Concatenate observation velocity (only if enabled in config)
             if "velocity" in self.config.observation_feature_mapping.others:
                 obs_velocities = [
-                    obs_data[r]["vel"]
-                    for r in robots
-                    if obs_data[r]["vel"] is not None
+                    obs_data[r]["vel"] for r in robots if obs_data[r]["vel"] is not None
                 ]
                 if obs_velocities:
                     result["observation.velocity"] = np.concatenate(obs_velocities)
 
             # Concatenate observation effort (only if enabled in config)
             if "effort" in self.config.observation_feature_mapping.others:
-                obs_efforts = [
-                    obs_data[r]["eff"]
-                    for r in robots
-                    if obs_data[r]["eff"] is not None
-                ]
+                obs_efforts = [obs_data[r]["eff"] for r in robots if obs_data[r]["eff"] is not None]
                 if obs_efforts:
                     result["observation.effort"] = np.concatenate(obs_efforts)
 
@@ -1061,8 +1068,7 @@ class BufferedStreamExtractor:
             joint_buffers: Dict keyed by (role, robot) containing buffer and metadata
         """
         ros_msg = message.ros_msg
-        # Use MCAP log_time for consistent time domain across all streams
-        timestamp = message.log_time.timestamp()
+        timestamp = message_timestamp(message)
 
         # Group joints by (role, robot)
         grouped: Dict[Tuple[str, str], Dict] = {}
@@ -1153,8 +1159,8 @@ class BufferedStreamExtractor:
             joint_buffers: Dict keyed by (role, robot) containing buffer and metadata
         """
         ros_msg = message.ros_msg
-        # Float64MultiArray has no header; use MCAP recording timestamp
-        timestamp = message.log_time.timestamp()
+        # Float64MultiArray has no header — message_timestamp falls back to log_time.
+        timestamp = message_timestamp(message)
 
         # Get action topic config
         topic_cfg = self.config.action_topics[topic]
@@ -1177,9 +1183,7 @@ class BufferedStreamExtractor:
                 )
             else:
                 # No joint_order specified — identity permutation (no reorder)
-                self._action_reorder_cache[topic] = np.arange(
-                    len(positions), dtype=np.intp
-                )
+                self._action_reorder_cache[topic] = np.arange(len(positions), dtype=np.intp)
 
         reorder = self._action_reorder_cache[topic]
 
