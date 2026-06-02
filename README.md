@@ -63,7 +63,12 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv)
+- FFmpeg (required by `torchcodec` for video decoding)
 - Docker (for inference and ROS2 eval)
+
+```bash
+sudo apt install ffmpeg   # Ubuntu / Debian
+```
 
 ```bash
 git clone https://github.com/anvil-robotics/anvil-embodied-ai.git
@@ -319,7 +324,7 @@ uv run anvil-trainer \
 | `--policy.use_group_norm` | `true` | `false` | Required when using pretrained ImageNet backbone (preserves BatchNorm) |
 
 > **Inference-only flags** — set these in `inference_tuning.diffusion` in the YAML config, not at training time:
-> - `n_action_steps: 16` — steps to execute per chunk before re-planning (default from checkpoint: 8)
+> - `n_action_steps: 10` — steps to execute per chunk before re-planning. Shipped default is 10; checkpoint default is 8. Raise if jittery, lower if hesitant.
 > - `num_inference_steps: 10` — denoising iterations; reduces from 100 steps (~300ms) to 10 steps (~30ms) without retraining
 
 ---
@@ -635,7 +640,35 @@ inference_tuning:
 #   # overcoming motor dead zones / friction. Default: disabled (null).
 ```
 
-### Distributed Inference Architecture
+### DDS Middleware Selection
+
+Both Fast DDS and CycloneDDS are supported. **CycloneDDS is the default** (faster in our tests). ⚠ Both sides of the link must use the same RMW — mixing Fast DDS and CycloneDDS = zero discovery.
+
+| Deployment | `RMW_IMPLEMENTATION` | `CYCLONEDDS_URI` | anvil-loader `.env.config` |
+|-----------|----------------------|------------------|---------------------------|
+| **Single-PC · CycloneDDS** *(default)* | `rmw_cyclonedds_cpp` | `file://.../single_pc.xml` | `ENABLE_CYCLONEDDS=true`<br>`CYCLONEDDS_PEER_IP=127.0.0.1` |
+| Single-PC · Fast DDS | `rmw_fastrtps_cpp` | *(ignored)* | `ENABLE_CYCLONEDDS=false` |
+| Two-PC · CycloneDDS | `rmw_cyclonedds_cpp` | `file://.../gpu_pc.xml` | `ENABLE_CYCLONEDDS=true`<br>`CYCLONEDDS_PEER_IP=<gpu_pc_ip>` |
+
+All configs live in `configs/cyclonedds/`. The defaults in `docker-compose.yml` and `.env.example` target single-PC CycloneDDS — override any variable in `.env` to switch modes.
+
+### Inference Architecture
+
+**Single-PC** — inference and workcell on the same machine:
+
+```
+  Same machine
+┌────────────────────────────────────────────────────────────┐
+│  anvil-loader (ros2_control)       anvil-embodied-ai       │
+│  joint_states (500 Hz)  ◄─────────  inference_node (30 Hz) │
+│  cameras (4× 30 Hz)      CycloneDDS  action commands       │
+│                           (host net)                       │
+└────────────────────────────────────────────────────────────┘
+```
+
+Both sides use CycloneDDS over the host network interface — multicast handles peer discovery automatically. Set `ENABLE_CYCLONEDDS=true` and `CYCLONEDDS_PEER_IP=127.0.0.1` in anvil-loader's `.env.config`.
+
+**Two-PC** — GPU PC separate from the robot PC:
 
 ```
   Anvil Devbox (anvil-loader)             CycloneDDS              GPU PC (anvil-embodied-ai)
@@ -646,7 +679,7 @@ inference_tuning:
 └─────────────────────────────┘    └────────────────────┘    └─────────────────────────────┘
 ```
 
-The Anvil Devbox streams joint states and camera feeds over CycloneDDS. The GPU PC subscribes to those streams, runs the policy, and publishes action commands back. See the [full documentation](https://docs.anvil.bot/) for network setup.
+Set `CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/gpu_pc.xml` and configure peer IPs in both `gpu_pc.xml` and anvil-loader's `.env.config`. See the [full documentation](https://docs.anvil.bot/) for network setup.
 
 ---
 
@@ -669,6 +702,8 @@ anvil-embodied-ai/
 │   └── inference/                 # Dockerfile + entrypoint
 ├── scripts/
 │   ├── run_inference.sh           # Entry point for all inference scenarios
+│   ├── sync_model_zoo.sh          # rsync a model_zoo subfolder from a remote machine
+│   ├── training_metrics.sh        # Parse and display training metrics from W&B/logs
 │   └── plot_monitor_csv.py        # Plot obs.state / raw_output / control_cmd from CSV
 ├── docker-compose.yml             # Production inference
 ├── docker-compose.fake-hardware.yml  # Simulate 2-PC setup locally

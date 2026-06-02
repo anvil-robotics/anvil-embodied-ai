@@ -16,15 +16,20 @@ else
     echo "[entrypoint] ROS_DOMAIN_ID not set — localhost-only mode"
 fi
 
-# Export CycloneDDS middleware if configured
+# Configure RMW middleware
 if [ -n "${RMW_IMPLEMENTATION}" ]; then
     export RMW_IMPLEMENTATION
     echo "[entrypoint] RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION}"
+else
+    unset RMW_IMPLEMENTATION
+    echo "[entrypoint] RMW_IMPLEMENTATION not set — using Fast DDS (default)"
 fi
 
 if [ -n "${CYCLONEDDS_URI}" ]; then
     export CYCLONEDDS_URI
     echo "[entrypoint] CYCLONEDDS_URI=${CYCLONEDDS_URI}"
+else
+    unset CYCLONEDDS_URI
 fi
 
 # When DEBUG=true, auto-configure debug image capture

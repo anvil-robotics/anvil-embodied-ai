@@ -13,8 +13,8 @@ services:
     privileged: true
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}
-      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}
-      - CYCLONEDDS_URI=${CYCLONEDDS_URI:-}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      - CYCLONEDDS_URI=${CYCLONEDDS_URI:-file:///workspace/configs/cyclonedds/single_pc.xml}
       - ECHO_TOPIC_ONLY=${ECHO_TOPIC_ONLY:-false}
       - DEBUG=${DEBUG:-false}
       - MONITOR_ENABLE=${MONITOR_ENABLE:-false}
@@ -50,8 +50,8 @@ services:
       - inference
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}
-      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}
-      - CYCLONEDDS_URI=${CYCLONEDDS_URI:-}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      - CYCLONEDDS_URI=${CYCLONEDDS_URI:-file:///workspace/configs/cyclonedds/single_pc.xml}
       - ACTION_TYPE=${ACTION_TYPE:-absolute}
     volumes:
       - ${MONITOR_OUTPUT_DIR:-./monitor_output}:/workspace/monitor_output

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- CycloneDDS config for single-PC deployment (host network mode).
+     Both inference container and workcell run on the same machine — no explicit
+     peer addresses needed; multicast on the autodetermined interface handles discovery. -->
+<CycloneDDS xmlns="https://cdds.io/config">
+    <Domain id="any">
+        <General>
+            <Interfaces>
+                <NetworkInterface autodetermine="true"/>
+            </Interfaces>
+            <AllowMulticast>true</AllowMulticast>
+            <MaxMessageSize>65535B</MaxMessageSize>
+            <FragmentSize>4000B</FragmentSize>
+        </General>
+        <Internal>
+            <SocketReceiveBufferSize min="128MB"/>
+            <Watermarks>
+                <WhcHigh>8MB</WhcHigh>
+            </Watermarks>
+        </Internal>
+    </Domain>
+</CycloneDDS>
