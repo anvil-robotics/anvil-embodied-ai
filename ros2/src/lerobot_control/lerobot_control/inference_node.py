@@ -361,6 +361,11 @@ class LeRobotInferenceNode(Node):
         if self._is_vla:
             self._setup_vla_inference()
             self._start_inference_thread()
+        else:
+            # Classic (ACT/Diffusion): initialise latency tracker
+            from lerobot_control.latency_stats import LatencyStats
+
+            self._latency_tracker = LatencyStats(maxlen=100)
 
         if self.model_type in {"smolvla", "pi0", "pi05"} and not self.task_description:
             self.get_logger().warn(
@@ -607,6 +612,12 @@ class LeRobotInferenceNode(Node):
                     and len(self.model._queues.get("action", [])) == 0
                 )
 
+                # True when the model will actually run a forward pass this tick
+                _will_run_forward = (
+                    hasattr(self.model, "_queues")
+                    and len(self.model._queues.get("action", [])) == 0
+                ) or not hasattr(self.model, "_queues")
+
                 if self.preprocessor:
                     observation = self.preprocessor(dict(observation))
                 observation = self._move_to_device(observation)
@@ -622,7 +633,11 @@ class LeRobotInferenceNode(Node):
                     )
 
                 with torch.inference_mode():
+                    if _will_run_forward:
+                        _t0 = time.monotonic()
                     action = self.model.select_action(observation)
+                    if _will_run_forward:
+                        self._latency_tracker.add(time.monotonic() - _t0)
                     # Collect remaining normalized queue items BEFORE postprocessing so
                     # the whole chunk can be denormalized together for delta restore.
                     if _is_new_chunk and self.use_delta_actions and hasattr(self.model, "_queues"):
@@ -673,7 +688,8 @@ class LeRobotInferenceNode(Node):
                         action = restore_delta_chunk(action[np.newaxis], self._delta_ref_state, self.action_type, self._delta_exclude_indices)[0]
 
                 self._classic_action_deque.append(action)
-                self.metrics.record_inference()
+                if _will_run_forward:
+                    self.metrics.record_inference()
 
         except Exception as e:
             import traceback
@@ -875,21 +891,30 @@ class LeRobotInferenceNode(Node):
             else:
                 self._log_stats_classic(logger, dt, stats, control_hz, inference_hz, action_output_hz, bottleneck_name, camera_hz)
 
-    def _log_stats_vla(self, logger, dt, stats, inference_hz, action_output_hz, bottleneck_name, camera_hz) -> None:
-        """Log VLA (RTC) specific stats."""
-        logger.info(f"  Action output{action_output_hz:7.1f} Hz")
-        logger.info(f"  Inference    {inference_hz:7.1f} Hz  ({stats['inference_count']} total)")
-
-        # VLA latency + queue size (always)
+    def _log_stats_common(self, logger, inference_hz, action_output_hz, stats) -> None:
+        """Log model-agnostic stats shared across all model types."""
+        logger.info(f"  Inference FPS{inference_hz:7.1f} Hz  ({stats['inference_count']} total)")
+        logger.info(f"  Action FPS   {action_output_hz:7.1f} Hz")
         if hasattr(self, "_latency_tracker"):
             lat_mean = self._latency_tracker.mean()
             lat_std = self._latency_tracker.std()
             lat_p95 = self._latency_tracker.p95() or 0.0
-            queue_size = self._action_queue.qsize() if hasattr(self, "_action_queue") else 0
-            logger.info(
-                f"  VLA latency  mean={lat_mean * 1000:.1f}ms  "
-                f"std={lat_std * 1000:.1f}ms  p95={lat_p95 * 1000:.1f}ms  queue={queue_size}"
-            )
+            if lat_mean > 0:
+                logger.info(
+                    f"  Infer latency mean={lat_mean * 1000:.1f}ms  "
+                    f"std={lat_std * 1000:.1f}ms  p95={lat_p95 * 1000:.1f}ms"
+                )
+
+    def _log_stats_vla(self, logger, dt, stats, inference_hz, action_output_hz, bottleneck_name, camera_hz) -> None:
+        """Log VLA (RTC) specific stats."""
+        self._log_stats_common(logger, inference_hz, action_output_hz, stats)
+
+        # VLA: additionally log queue size
+        if hasattr(self, "_latency_tracker"):
+            lat_mean = self._latency_tracker.mean()
+            if lat_mean > 0 and hasattr(self, "_action_queue"):
+                queue_size = self._action_queue.qsize()
+                logger.info(f"  VLA queue    {queue_size}")
 
             # Debug: Action FPS, Eff ctrl Hz, queue depth stats, smoothness
             if self._debug and lat_mean > 0:
@@ -920,8 +945,7 @@ class LeRobotInferenceNode(Node):
 
     def _log_stats_classic(self, logger, dt, stats, control_hz, inference_hz, action_output_hz, bottleneck_name, camera_hz) -> None:
         """Log non-VLA (ACT/Diffusion) stats."""
-        logger.info(f"  Action output{action_output_hz:7.1f} Hz")
-        logger.info(f"  Inference    {inference_hz:7.1f} Hz  ({stats['inference_count']} total)")
+        self._log_stats_common(logger, inference_hz, action_output_hz, stats)
 
         if self._debug and self._smooth_tracker is not None:
             smooth = self._smooth_tracker.get_stats()
@@ -945,9 +969,10 @@ class LeRobotInferenceNode(Node):
         if self._is_vla and hasattr(self, "_action_queue"):
             from lerobot.policies.rtc.action_queue import ActionQueue
             self._action_queue = ActionQueue(self.model.config.rtc_config)
-            self._latency_tracker.reset()
             with self._obs_lock:
                 self._latest_obs = None
+        if hasattr(self, "_latency_tracker"):
+            self._latency_tracker.reset()
         self.get_logger().info("Policy state reset complete")
 
     def get_input_stats(self) -> dict:
