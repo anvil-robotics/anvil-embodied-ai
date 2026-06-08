@@ -872,7 +872,7 @@ class LeRobotInferenceNode(Node):
         bottleneck_name = None
         if not self.echo_topic_only and camera_hz:
             slowest = min(camera_hz.items(), key=lambda x: x[1])
-            if slowest[1] < self.control_freq:
+            if slowest[1] < self.control_freq * 2 / 3:
                 bottleneck_name = slowest[0]
 
         # Common header: joint state + cameras
@@ -941,7 +941,7 @@ class LeRobotInferenceNode(Node):
                 )
 
         if bottleneck_name is not None:
-            logger.warn(f"  '{bottleneck_name}' limits to {camera_hz[bottleneck_name]:.1f} Hz (target: {self.control_freq:.0f} Hz)")
+            logger.warn(f"  '{bottleneck_name}' is slow: {camera_hz[bottleneck_name]:.1f} Hz (threshold: {self.control_freq * 2 / 3:.0f} Hz, target: {self.control_freq:.0f} Hz)")
 
     def _log_stats_classic(self, logger, dt, stats, control_hz, inference_hz, action_output_hz, bottleneck_name, camera_hz) -> None:
         """Log non-VLA (ACT/Diffusion) stats."""
@@ -957,7 +957,7 @@ class LeRobotInferenceNode(Node):
                 )
 
         if bottleneck_name is not None:
-            logger.warn(f"  '{bottleneck_name}' limits to {camera_hz[bottleneck_name]:.1f} Hz (target: {self.control_freq:.0f} Hz)")
+            logger.warn(f"  '{bottleneck_name}' is slow: {camera_hz[bottleneck_name]:.1f} Hz (threshold: {self.control_freq * 2 / 3:.0f} Hz, target: {self.control_freq:.0f} Hz)")
 
     def reset_policy(self) -> None:
         """Reset policy state."""
