@@ -337,6 +337,7 @@ def convert_session(
             if episode_idx < resume_from:
                 progress.advance(overall_task)
                 progress.update(overall_task, status=f"{episode_idx + 1}/{len(mcap_files)} episodes [dim](skipped)[/dim]")
+                console.print(f"  [dim]↷ [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}  skipped (already converted)[/dim]")
                 continue
 
             episode_start_time = time.time()
@@ -391,6 +392,11 @@ def convert_session(
                     overall_task,
                     status=f"{episode_idx + 1}/{len(mcap_files)} episodes",
                 )
+                progress.remove_task(episode_task)
+                console.print(
+                    f"  [yellow]⚠[/yellow] [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
+                    f"  [yellow]skipped (corrupt frame)[/yellow]"
+                )
                 episode_frame_counts.append(0)
                 episode_times.append(time.time() - episode_start_time)
                 log(
@@ -411,6 +417,11 @@ def convert_session(
                 progress.update(
                     overall_task,
                     status=f"{episode_idx + 1}/{len(mcap_files)} episodes",
+                )
+                progress.remove_task(episode_task)
+                console.print(
+                    f"  [yellow]⚠[/yellow] [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
+                    f"  [yellow]skipped (0 frames)[/yellow]"
                 )
                 episode_frame_counts.append(0)
                 episode_times.append(time.time() - episode_start_time)
@@ -440,6 +451,14 @@ def convert_session(
             progress.update(
                 overall_task,
                 status=f"{episode_idx + 1}/{len(mcap_files)} episodes",
+            )
+            progress.remove_task(episode_task)
+            ep_fps = frame_count / episode_time if episode_time > 0 else 0
+            console.print(
+                f"  [green]✓[/green] [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
+                f"  [green]{frame_count} frames[/green]"
+                f"  {format_duration(episode_time)}"
+                f"  {ep_fps:.0f} f/s"
             )
 
     # Check for all-empty conversion
