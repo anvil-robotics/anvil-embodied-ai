@@ -187,13 +187,14 @@ class LeRobotInferenceNode(Node):
         self.min_position_delta = safety_config.get("min_position_delta", None)
 
         self.joint_state_topic = self.config.get("joint_state_topic", "/joint_states")
-        self.camera_mapping = self.config.get("camera_mapping", {})
+        _cameras_cfg: dict = self.config.get("cameras", {})
+        self.camera_mapping = _cameras_cfg.get("mapping", {})
         self.camera_names = list(self.camera_mapping.values())
 
         # Build per-camera expected fps dict (camera name → expected fps).
         # Warning threshold = expected * 2/3, independent of control_frequency.
-        _global_expected_fps: float = self.config.get("expected_camera_fps", 30.0)
-        _fps_overrides: dict = self.config.get("camera_fps_overrides", {})
+        _global_expected_fps: float = _cameras_cfg.get("fps", 30.0)
+        _fps_overrides: dict = _cameras_cfg.get("fps_overrides", {})
         # overrides are keyed by ROS topic; map to camera name via camera_mapping
         self._expected_camera_fps: dict[str, float] = {
             name: _fps_overrides.get(topic, _global_expected_fps)
