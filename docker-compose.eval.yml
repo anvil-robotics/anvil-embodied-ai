@@ -41,6 +41,7 @@
 #   EVAL_DELTA_EXCLUDE_JOINTS — ROS2 array of joints kept absolute in delta mode (auto-set)
 #   EVAL_DATASET_FPS       — training dataset fps (auto-set from meta/info.json, default 30); used to
 #                            downsample 60fps MCAP GT to match training data rate
+#   CONTROL_FREQ          — target action publish rate in Hz; robot receives this many commands/sec (default: 30.0)
 #   MONITOR_ENABLE        — "true" to publish /monitor/* topics for inference_monitor_node
 #   MONITOR_OUTPUT_DIR    — host path for monitor CSV (auto-set to OUTPUT_DIR/monitor)
 
@@ -88,6 +89,7 @@ services:
         model_path:=/workspace/model
         config_file:=/workspace/config.yaml
         monitor_enable:=${MONITOR_ENABLE:-false}
+        control_frequency:=${CONTROL_FREQ:-30.0}
 
   # ── 4. Inference monitor — real-time Rerun + CSV (optional, profile: monitor) ──
   inference-monitor:

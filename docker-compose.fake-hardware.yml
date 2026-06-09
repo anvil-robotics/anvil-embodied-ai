@@ -21,6 +21,7 @@
 #   CAMERA_FPS    — camera publish rate (default: 30)
 #   CONFIG_FILE   — host path to config yaml (default: ./configs/lerobot_control/inference_default.yaml)
 #   IMAGE_TAG     — Docker image tag (default: latest)
+#   CONTROL_FREQ  — target action publish rate in Hz; robot receives this many commands/sec (default: 30.0)
 #   HF_CACHE      — host path to HuggingFace cache (default: ~/.cache/huggingface)
 #                   VLA models (pi0/pi05/smolvla) need the PaliGemma tokenizer from this cache.
 
@@ -30,7 +31,7 @@ x-base: &base
     context: .
     dockerfile: docker/inference/Dockerfile
     args:
-      LEROBOT_VERSION: ${LEROBOT_VERSION:-0.5.0}
+      LEROBOT_VERSION: ${LEROBOT_VERSION:-0.5.1}
       LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-}
   networks:
     - ros2_test
@@ -101,7 +102,7 @@ services:
               capabilities: [gpu]
     # MODEL_PATH is mounted at /workspace/model. HF cache structure (blobs/ + snapshots/)
     # is auto-detected by inference_node — no need for MODEL_SNAPSHOT_PATH.
-    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml debug:=${DEBUG:-false}
+    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml debug:=${DEBUG:-false} control_frequency:=${CONTROL_FREQ:-30.0}
 
 networks:
   ros2_test:

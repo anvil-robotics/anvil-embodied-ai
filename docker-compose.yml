@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: docker/inference/Dockerfile
       args:
-        LEROBOT_VERSION: ${LEROBOT_VERSION:-0.5.0}
+        LEROBOT_VERSION: ${LEROBOT_VERSION:-0.5.1}
         LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-}
     container_name: lerobot-inference
     network_mode: host
@@ -37,7 +37,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml echo_topic_only:=${ECHO_TOPIC_ONLY:-false} debug:=${DEBUG:-false} monitor_enable:=${MONITOR_ENABLE:-false}
+    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml echo_topic_only:=${ECHO_TOPIC_ONLY:-false} debug:=${DEBUG:-false} monitor_enable:=${MONITOR_ENABLE:-false} control_frequency:=${CONTROL_FREQ:-30.0}
 
   inference-monitor:
     image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}
