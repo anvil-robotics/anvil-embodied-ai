@@ -602,21 +602,21 @@ class LeRobotInferenceNode(Node):
                 # capture the joint-state baseline when a new chunk is generated.
                 _raw_obs = observation
 
+                # True when the model will actually run a forward pass this tick.
+                # ACT uses self._action_queue; Diffusion uses self._queues["action"].
+                if hasattr(self.model, "_action_queue"):
+                    _will_run_forward = len(self.model._action_queue) == 0
+                elif hasattr(self.model, "_queues") and self.model._queues is not None:
+                    action_q = self.model._queues.get("action")
+                    _will_run_forward = action_q is None or len(action_q) == 0
+                else:
+                    _will_run_forward = True
+
                 # Detect whether a new action chunk is about to be generated.
                 # When the queue is empty, select_action will run the model and fill
                 # it with n_action_steps new predictions, all computed relative to
                 # the current state.  We capture that state as the delta reference.
-                _is_new_chunk = (
-                    self.use_delta_actions
-                    and hasattr(self.model, "_queues")
-                    and len(self.model._queues.get("action", [])) == 0
-                )
-
-                # True when the model will actually run a forward pass this tick
-                _will_run_forward = (
-                    hasattr(self.model, "_queues")
-                    and len(self.model._queues.get("action", [])) == 0
-                ) or not hasattr(self.model, "_queues")
+                _is_new_chunk = self.use_delta_actions and _will_run_forward
 
                 if self.preprocessor:
                     observation = self.preprocessor(dict(observation))
