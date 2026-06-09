@@ -189,6 +189,17 @@ class LeRobotInferenceNode(Node):
         self.joint_state_topic = self.config.get("joint_state_topic", "/joint_states")
         self.camera_mapping = self.config.get("camera_mapping", {})
         self.camera_names = list(self.camera_mapping.values())
+
+        # Build per-camera expected fps dict (camera name → expected fps).
+        # Warning threshold = expected * 2/3, independent of control_frequency.
+        _global_expected_fps: float = self.config.get("expected_camera_fps", 30.0)
+        _fps_overrides: dict = self.config.get("camera_fps_overrides", {})
+        # overrides are keyed by ROS topic; map to camera name via camera_mapping
+        self._expected_camera_fps: dict[str, float] = {
+            name: _fps_overrides.get(topic, _global_expected_fps)
+            for topic, name in self.camera_mapping.items()
+        }
+
         self.arms_config = self.config.get("arms", {})
         self.joint_names_config = self.config.get("joint_names", {})
 
@@ -868,12 +879,17 @@ class LeRobotInferenceNode(Node):
         self._prev_action_output_count = stats["action_output_count"]
         self._prev_frame_counters = dict(frame_counters)
 
-        # Find bottleneck camera (only relevant when not echo_topic_only)
+        # Find bottleneck camera: compare each camera against its own expected fps,
+        # not control_freq (camera target rate is independent of the control loop).
         bottleneck_name = None
         if not self.echo_topic_only and camera_hz:
-            slowest = min(camera_hz.items(), key=lambda x: x[1])
-            if slowest[1] < self.control_freq * 2 / 3:
-                bottleneck_name = slowest[0]
+            slow_cameras = [
+                (name, hz)
+                for name, hz in camera_hz.items()
+                if hz < self._expected_camera_fps.get(name, 30.0) * 2 / 3
+            ]
+            if slow_cameras:
+                bottleneck_name = min(slow_cameras, key=lambda x: x[1])[0]
 
         # Common header: joint state + cameras
         logger = self.get_logger()
@@ -941,7 +957,11 @@ class LeRobotInferenceNode(Node):
                 )
 
         if bottleneck_name is not None:
-            logger.warn(f"  '{bottleneck_name}' is slow: {camera_hz[bottleneck_name]:.1f} Hz (threshold: {self.control_freq * 2 / 3:.0f} Hz, target: {self.control_freq:.0f} Hz)")
+            exp = self._expected_camera_fps.get(bottleneck_name, 30.0)
+            logger.warn(
+                f"  '{bottleneck_name}' is slow: {camera_hz[bottleneck_name]:.1f} Hz"
+                f" (threshold: {exp * 2 / 3:.0f} Hz, expected: {exp:.0f} Hz)"
+            )
 
     def _log_stats_classic(self, logger, dt, stats, control_hz, inference_hz, action_output_hz, bottleneck_name, camera_hz) -> None:
         """Log non-VLA (ACT/Diffusion) stats."""
@@ -957,7 +977,11 @@ class LeRobotInferenceNode(Node):
                 )
 
         if bottleneck_name is not None:
-            logger.warn(f"  '{bottleneck_name}' is slow: {camera_hz[bottleneck_name]:.1f} Hz (threshold: {self.control_freq * 2 / 3:.0f} Hz, target: {self.control_freq:.0f} Hz)")
+            exp = self._expected_camera_fps.get(bottleneck_name, 30.0)
+            logger.warn(
+                f"  '{bottleneck_name}' is slow: {camera_hz[bottleneck_name]:.1f} Hz"
+                f" (threshold: {exp * 2 / 3:.0f} Hz, expected: {exp:.0f} Hz)"
+            )
 
     def reset_policy(self) -> None:
         """Reset policy state."""

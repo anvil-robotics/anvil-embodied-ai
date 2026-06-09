@@ -117,6 +117,14 @@ camera_mapping:
   "/cam_wrist_r/image_raw/compressed": "wrist_r"
   "/cam_chest/image_raw/compressed": "chest"
 
+# expected_camera_fps: target publish rate for cameras; warning fires if any camera
+#   drops below 2/3 of its expected fps. Independent of control_frequency.
+# camera_fps_overrides: per-topic overrides for cameras running at a different rate
+#   (e.g. a 60 fps wrist camera). Keys must match camera_mapping keys above.
+expected_camera_fps: 30.0
+# camera_fps_overrides:
+#   "/cam_wrist_r/image_raw/compressed": 60.0
+
 # -----------------------------------------------------------------------------
 # Safety Parameters
 # -----------------------------------------------------------------------------
