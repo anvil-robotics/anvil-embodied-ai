@@ -13,7 +13,7 @@
 model:
   # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion
   # Set to the task the model was trained/finetuned for.
-  task_description: null
+  task_description: "Pick up the block and place it on the target location"
 
 # -----------------------------------------------------------------------------
 # Inference Tuning (per model type)
