@@ -26,10 +26,10 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import subprocess
 from pathlib import Path
 from typing import Any
 
+from anvil_shared.provenance import git_provenance
 from anvil_shared.splits import compute_split_episodes, load_split_info, save_split_info
 
 from anvil_trainer.config import TrainingConfig
@@ -40,37 +40,6 @@ from anvil_trainer.transforms import (
     TaskOverrideTransform,
     Transform,
 )
-
-_HERE = Path(__file__).resolve()
-
-
-def _git_provenance() -> dict[str, str]:
-    """Return {'code_commit': <sha>, 'code_tag': <tag>} for the current repo HEAD.
-
-    Both keys are omitted when the information is unavailable (not a git repo,
-    git not installed, etc.).  code_tag is only present when HEAD sits exactly
-    on an annotated or lightweight tag.
-    """
-    result: dict[str, str] = {}
-    try:
-        result["code_commit"] = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=_HERE.parent,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except Exception:
-        pass
-    try:
-        result["code_tag"] = subprocess.check_output(
-            ["git", "describe", "--tags", "--exact-match", "HEAD"],
-            cwd=_HERE.parent,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except Exception:
-        pass
-    return result
 
 log = logging.getLogger(__name__)
 
@@ -521,7 +490,7 @@ class TransformRunner:
             # Backward compat: old inference nodes read use_delta_actions
             "use_delta_actions": self.config.use_delta_actions,
             "delta_sequential": self.config.delta_sequential,
-            **_git_provenance(),
+            **git_provenance(),
         }
         if self.config.delta_exclude_joints:
             anvil_cfg_base["delta_exclude_joints"] = self.config.delta_exclude_joints

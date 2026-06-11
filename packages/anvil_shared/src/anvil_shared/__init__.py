@@ -1,4 +1,5 @@
 """Shared pure-Python utilities used across anvil packages."""
+from anvil_shared.provenance import git_provenance
 from anvil_shared.splits import (
     compute_split_episodes,
     load_split_info,
@@ -11,4 +12,5 @@ __all__ = [
     "compute_split_episodes",
     "load_split_info",
     "save_split_info",
+    "git_provenance",
 ]

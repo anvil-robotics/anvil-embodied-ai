@@ -9,7 +9,6 @@ import contextlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -30,6 +29,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from anvil_shared.provenance import git_provenance
 from mcap_converter import (
     ConfigLoader,
     DataConfig,
@@ -40,36 +40,6 @@ from mcap_converter.core.extractor import BufferedStreamExtractor
 from mcap_converter.core.reader import snap_fps
 
 console = Console()
-
-_HERE = Path(__file__).resolve()
-
-
-def _git_provenance() -> dict[str, str]:
-    """Return {'code_commit': <sha>, 'code_tag': <tag>} for the current repo HEAD.
-
-    Both keys are omitted when the information is unavailable.
-    code_tag is only present when HEAD sits exactly on a tag.
-    """
-    result: dict[str, str] = {}
-    try:
-        result["code_commit"] = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=_HERE.parent,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except Exception:
-        pass
-    try:
-        result["code_tag"] = subprocess.check_output(
-            ["git", "describe", "--tags", "--exact-match", "HEAD"],
-            cwd=_HERE.parent,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except Exception:
-        pass
-    return result
 
 
 def log(message: str) -> None:
@@ -346,7 +316,7 @@ def convert_session(
 
     # Append git provenance to conversion_config.yaml (skip when resuming — already present)
     if resume_from == 0:
-        provenance = _git_provenance()
+        provenance = git_provenance()
         if provenance:
             import yaml
             with open(conversion_config_dest, "a") as _f:
