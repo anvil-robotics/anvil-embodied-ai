@@ -32,6 +32,17 @@ from typing import Any
 
 from anvil_shared.splits import compute_split_episodes, load_split_info, save_split_info
 
+from anvil_trainer.config import TrainingConfig
+from anvil_trainer.transforms import (
+    DataIntegrityError,
+    DeltaActionTransform,
+    ExcludeObservationTransform,
+    TaskOverrideTransform,
+    Transform,
+)
+
+_HERE = Path(__file__).resolve()
+
 
 def _git_provenance() -> dict[str, str]:
     """Return {'code_commit': <sha>, 'code_tag': <tag>} for the current repo HEAD.
@@ -41,11 +52,10 @@ def _git_provenance() -> dict[str, str]:
     on an annotated or lightweight tag.
     """
     result: dict[str, str] = {}
-    _here = Path(__file__).resolve()
     try:
         result["code_commit"] = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
-            cwd=_here.parent,
+            cwd=_HERE.parent,
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
@@ -54,22 +64,13 @@ def _git_provenance() -> dict[str, str]:
     try:
         result["code_tag"] = subprocess.check_output(
             ["git", "describe", "--tags", "--exact-match", "HEAD"],
-            cwd=_here.parent,
+            cwd=_HERE.parent,
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
     except Exception:
         pass
     return result
-
-from anvil_trainer.config import TrainingConfig
-from anvil_trainer.transforms import (
-    DataIntegrityError,
-    DeltaActionTransform,
-    ExcludeObservationTransform,
-    TaskOverrideTransform,
-    Transform,
-)
 
 log = logging.getLogger(__name__)
 
