@@ -107,39 +107,28 @@ Pick the config that matches your recording setup:
 | `openarm_single_quest.yaml` | Quest VR | Single (right) | Command topics |
 | `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | Observation lookahead |
 
-**`action_from_observation`** — used by `openarm_single_quest_afo.yaml` when `/follower_*/commands` was not recorded. Instead of reading from command topics, the converter derives actions from the follower's own joint positions shifted N frames forward in time:
-
-```
-action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
-```
-
-Enable in your conversion config YAML:
+**action_from_observation** — used by `openarm_single_quest_afo.yaml` when `/follower_*/commands` was not recorded. Instead of reading from command topics, the converter derives actions from the follower's own joint positions shifted N frames forward in time. Enable in your conversion config YAML:
 
 ```yaml
 action_from_observation: true
-action_from_observation_n: 10   # frames to look ahead (default 10)
+action_from_observation_n: 10 # action[t] = observation.state[t + n] (default n=10, ≈333ms at 30fps)
 ```
 
-**CLI Command**
+**CLI Command:**
 
 ```bash
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
   --config configs/mcap_converter/target-config.yaml \
   --output-dir data/datasets \
+  # Optional: override output path (bypasses auto-naming)
+  # --output-path data/datasets/my-custom-name
   --fps 30
 ```
 
-Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`). To write to an exact path instead, use `--output-path`:
+**`--output-dir`** sets the base output directory for converted datasets. Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`).
 
-```bash
-uv run mcap-convert \
-  --input-dir data/raw/my-sessions \
-  --config configs/mcap_converter/target-config.yaml \
-  --output-path data/datasets/my-custom-name
-```
-
-`--output-path` bypasses auto-naming entirely — the dataset lands exactly where you point it.
+**`--output-path`** bypasses auto-naming entirely — the dataset lands exactly where you point it. Use it to override the output path. (`data/datasets/my-custom-name/`)
 
 **Common flags:**
 
