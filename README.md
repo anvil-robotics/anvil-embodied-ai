@@ -126,11 +126,29 @@ uv run mcap-convert \
 
 `--output-path` bypasses auto-naming entirely — the dataset lands exactly where you point it.
 
-**`action_from_observation`** — use when `/follower_*/commands` was not recorded. Shifts observation forward by N frames:
+**`action_from_observation`** — use when `/follower_*/commands` was not recorded. Instead of reading from command topics, the converter derives actions from the follower's own joint positions shifted N frames forward in time:
 
 ```
 action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
 ```
+
+Enable in your conversion config YAML:
+
+```yaml
+action_from_observation: true
+action_from_observation_n: 10   # frames to look ahead (default 10)
+```
+
+Override N at conversion time without editing the config:
+
+```bash
+uv run mcap-convert \
+  --input-dir data/raw/my-sessions \
+  --config configs/mcap_converter/openarm_single_quest_afo.yaml \
+  --act-from-obs-n-step 15
+```
+
+> **Tuning N:** N = round(reaction_delay_ms × fps / 1000). At 30 fps, 10 frames ≈ 333 ms. Raise N if the derived action appears to lag behind the actual motion; lower it if it overshoots.
 
 **Common flags:**
 
