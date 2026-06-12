@@ -107,26 +107,7 @@ Pick the config that matches your recording setup:
 | `openarm_single_quest.yaml` | Quest VR | Single (right) | Command topics |
 | `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | Observation lookahead |
 
-```bash
-uv run mcap-convert \
-  --input-dir data/raw/my-sessions \
-  --config configs/mcap_converter/target-config.yaml \
-  --output-dir data/datasets \
-  --fps 30
-```
-
-Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`). To write to an exact path instead, use `--output-path`:
-
-```bash
-uv run mcap-convert \
-  --input-dir data/raw/my-sessions \
-  --config configs/mcap_converter/target-config.yaml \
-  --output-path data/datasets/my-custom-name
-```
-
-`--output-path` bypasses auto-naming entirely — the dataset lands exactly where you point it.
-
-**`action_from_observation`** — use when `/follower_*/commands` was not recorded. Instead of reading from command topics, the converter derives actions from the follower's own joint positions shifted N frames forward in time:
+**`action_from_observation`** — used by `openarm_single_quest_afo.yaml` when `/follower_*/commands` was not recorded. Instead of reading from command topics, the converter derives actions from the follower's own joint positions shifted N frames forward in time:
 
 ```
 action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
@@ -149,6 +130,25 @@ uv run mcap-convert \
 ```
 
 > **Tuning N:** N = round(reaction_delay_ms × fps / 1000). At 30 fps, 10 frames ≈ 333 ms. Raise N if the derived action appears to lag behind the actual motion; lower it if it overshoots.
+
+```bash
+uv run mcap-convert \
+  --input-dir data/raw/my-sessions \
+  --config configs/mcap_converter/target-config.yaml \
+  --output-dir data/datasets \
+  --fps 30
+```
+
+Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`). To write to an exact path instead, use `--output-path`:
+
+```bash
+uv run mcap-convert \
+  --input-dir data/raw/my-sessions \
+  --config configs/mcap_converter/target-config.yaml \
+  --output-path data/datasets/my-custom-name
+```
+
+`--output-path` bypasses auto-naming entirely — the dataset lands exactly where you point it.
 
 **Common flags:**
 
