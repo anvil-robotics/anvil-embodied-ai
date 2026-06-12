@@ -115,7 +115,16 @@ uv run mcap-convert \
   --fps 30
 ```
 
-Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`).
+Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`). To write to an exact path instead, use `--output-path`:
+
+```bash
+uv run mcap-convert \
+  --input-dir data/raw/my-sessions \
+  --config configs/mcap_converter/target-config.yaml \
+  --output-path data/datasets/my-custom-name
+```
+
+`--output-path` bypasses auto-naming entirely — the dataset lands exactly where you point it.
 
 **`action_from_observation`** — use when `/follower_*/commands` was not recorded. Shifts observation forward by N frames:
 
