@@ -577,6 +577,10 @@ examples:
         help="output base directory — dataset is saved to <output-dir>/<input-dir-name>/ (default: data/datasets)",
     )
     parser.add_argument(
+        "--output-path", type=str, default=None,
+        help="full output path override — use this exact directory instead of <output-dir>/<input-dir-name>/",
+    )
+    parser.add_argument(
         "--config", type=str,
         help="path to YAML config file",
     )
@@ -639,9 +643,12 @@ examples:
     )
     args = parser.parse_args(args)
 
-    # Resolve output path: <output-dir>/<input-dir-name>/
+    # Resolve output path: --output-path wins; otherwise <output-dir>/<input-dir-name>/
     input_name = Path(args.input_dir.rstrip("/")).name
-    args.output_dir = str(Path(args.output_dir.rstrip("/")) / input_name)
+    if args.output_path:
+        args.output_dir = args.output_path.rstrip("/")
+    else:
+        args.output_dir = str(Path(args.output_dir.rstrip("/")) / input_name)
 
     # Handle HuggingFace username
     if args.hf_user:

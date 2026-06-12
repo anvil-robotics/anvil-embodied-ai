@@ -110,7 +110,9 @@ Pick the config that matches your recording setup:
 ```bash
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
-  --config configs/mcap_converter/target-config.yaml
+  --config configs/mcap_converter/target-config.yaml \
+  --output-dir data/datasets \
+  --fps 30
 ```
 
 Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`).
@@ -123,13 +125,17 @@ action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
 
 **Common flags:**
 
-| Flag | Description |
-|------|-------------|
-| `--resume` | Skip already-converted episodes — safe to re-run after interruption |
-| `--max-episodes N` | Convert only the first N episodes |
-| `--fps N` | Override output FPS (auto-detected by default) |
-| `--vcodec` | `h264` (default) · `hevc` · `libsvtav1` |
-| `--robot-type` | `anvil_openarm` (default) · `anvil_yam` |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input-dir PATH` | _(required)_ | Directory containing MCAP session folders |
+| `--config PATH` | _(required)_ | Conversion config YAML (see table above) |
+| `--output-dir PATH` | `data/datasets` | Base output directory — dataset lands at `<output-dir>/<input-dir-name>/` |
+| `--output-path PATH` | — | Full output path override — use this exact directory instead of auto-naming |
+| `--resume` | — | Skip already-converted episodes — safe to re-run after interruption |
+| `--max-episodes N` | all | Convert only the first N episodes |
+| `--fps N` | auto | Override output FPS (auto-detected by default) |
+| `--vcodec` | `h264` | `h264` · `hevc` · `libsvtav1` |
+| `--robot-type` | `anvil_openarm` | `anvil_openarm` · `anvil_yam` |
 
 Then validate:
 
