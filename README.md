@@ -120,16 +120,7 @@ action_from_observation: true
 action_from_observation_n: 10   # frames to look ahead (default 10)
 ```
 
-Override N at conversion time without editing the config:
-
-```bash
-uv run mcap-convert \
-  --input-dir data/raw/my-sessions \
-  --config configs/mcap_converter/openarm_single_quest_afo.yaml \
-  --act-from-obs-n-step 15
-```
-
-> **Tuning N:** N = round(reaction_delay_ms × fps / 1000). At 30 fps, 10 frames ≈ 333 ms. Raise N if the derived action appears to lag behind the actual motion; lower it if it overshoots.
+**CLI Command**
 
 ```bash
 uv run mcap-convert \
