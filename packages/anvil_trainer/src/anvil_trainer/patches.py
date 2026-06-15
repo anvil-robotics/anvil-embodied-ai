@@ -80,6 +80,8 @@ class TransformRunner:
         # List of (module, attr_name, original_value) — populated by _patch in
         # insertion order so restore_all_patches can revert in reverse.
         self._saved_originals: list[tuple[Any, str, Any]] = []
+        # Registry alias names added by apply_processor_compat_aliases — unregistered on restore.
+        self._registered_aliases: list[str] = []
 
     # -------------------------------------------------------------------------
     # Patch install / restore infrastructure
@@ -112,6 +114,8 @@ class TransformRunner:
 
         Called by :func:`patched_lerobot` on context exit.  Safe to call more
         than once — the originals list is cleared after restoration.
+        Also unregisters any processor aliases registered by
+        :meth:`apply_processor_compat_aliases`.
         """
         while self._saved_originals:
             module, attr_name, original = self._saved_originals.pop()
@@ -122,6 +126,63 @@ class TransformRunner:
                     "[anvil_trainer] Failed to restore %s.%s: %s",
                     getattr(module, "__name__", module), attr_name, e,
                 )
+        # Unregister processor registry aliases added by apply_processor_compat_aliases.
+        if self._registered_aliases:
+            try:
+                from lerobot.processor.pipeline import ProcessorStepRegistry
+
+                for alias in self._registered_aliases:
+                    ProcessorStepRegistry.unregister(alias)
+                log.debug(
+                    "[anvil_trainer] Unregistered processor aliases: %s",
+                    self._registered_aliases,
+                )
+            except Exception as e:  # pragma: no cover
+                log.warning("[anvil_trainer] Failed to unregister processor aliases: %s", e)
+            finally:
+                self._registered_aliases.clear()
+
+    def apply_processor_compat_aliases(self) -> None:
+        """Register backward-compatibility aliases for renamed ProcessorStep registry names.
+
+        Some lerobot Hub checkpoints (e.g. ``lerobot/pi05_base``) were published with
+        an older registry name ``relative_actions_processor`` that was later renamed to
+        ``delta_actions_processor`` in lerobot 0.5.x.  Loading those checkpoints fails
+        with an ImportError because the old name is no longer in the registry.
+
+        This method registers the old name as an alias pointing to the same class
+        (``RelativeActionsProcessorStep``) so that deserialization succeeds.  Crucially,
+        it restores the class's ``_registry_name`` attribute to the *canonical* new name
+        after registration, so that any checkpoints saved during this training run still
+        use ``delta_actions_processor`` rather than the legacy name.
+
+        The alias is unregistered automatically in :meth:`restore_all_patches`.
+        """
+        try:
+            from lerobot.processor.pipeline import ProcessorStepRegistry
+            from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
+        except ImportError as e:
+            log.warning(
+                "[anvil_trainer] Could not import lerobot processor for compat aliases: %s", e
+            )
+            return
+
+        if "relative_actions_processor" in ProcessorStepRegistry.list():
+            return  # Already registered — no-op.
+
+        canonical_name = getattr(RelativeActionsProcessorStep, "_registry_name", "delta_actions_processor")
+        try:
+            ProcessorStepRegistry.register("relative_actions_processor")(RelativeActionsProcessorStep)
+            # register() overwrites _registry_name on the class; restore it so that checkpoints
+            # produced during this training run serialize with the current canonical name.
+            RelativeActionsProcessorStep._registry_name = canonical_name
+            self._registered_aliases.append("relative_actions_processor")
+            log.info(
+                "[anvil_trainer] Registered compat alias 'relative_actions_processor' → %s",
+                canonical_name,
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("[anvil_trainer] Failed to register processor compat alias: %s", e)
 
     def log_config(self) -> None:
         """Log active transforms."""
@@ -675,6 +736,7 @@ def patched_lerobot(config: TrainingConfig):
     runner = TransformRunner(config)
     runner.log_config()
     runner.apply_metadata_patches()
+    runner.apply_processor_compat_aliases()
     # Note: the dataset/val_loss/checkpoint patches need lerobot imported,
     # which apply_metadata_patches typically triggers indirectly via
     # Transform.patch_metadata.  Keep the same install order as train().
