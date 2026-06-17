@@ -69,7 +69,12 @@ def scan_image_topics(mcap_path: str) -> dict[str, dict]:
             if schema:
                 msg_type = schema.name
                 # Check if it's an image type
-                if msg_type in ["sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"]:
+                if msg_type in [
+                    "sensor_msgs/msg/Image",
+                    "sensor_msgs/msg/CompressedImage",
+                    "sensor_msgs/Image",
+                    "sensor_msgs/CompressedImage",
+                ]:
                     image_topics[channel.topic] = {
                         "type": msg_type,
                         "schema_id": channel.schema_id,
