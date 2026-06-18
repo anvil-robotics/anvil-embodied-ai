@@ -7,7 +7,7 @@
 #
 # Options:
 #   --fake-hardware    Use docker-compose.fake-hardware.yml (DDS bridge test, no real robot)
-#   --monitor          Enable monitor profile; for production also sets MONITOR_ENABLE=true,
+#   --monitor-enable          Enable monitor profile; for production also sets MONITOR_ENABLE=true,
 #                      pre-creates MONITOR_OUTPUT_DIR as current user, and plots CSV on exit
 #   --echo-topic-only  Subscribe + log FPS without loading a model (sets ECHO_TOPIC_ONLY=true);
 #                      useful to verify DDS connectivity on the GPU PC without a checkpoint
@@ -28,10 +28,10 @@
 #   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh up --build
 #
 #   # Production inference with real-time monitor + auto-plot
-#   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh --monitor up --build
+#   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh --monitor-enable up --build
 #
 #   # Fake-hardware DDS test (FPS monitor only, no GPU)
-#   ./scripts/run_inference.sh --fake-hardware --monitor up --build
+#   ./scripts/run_inference.sh --fake-hardware --monitor-enable up --build
 #
 #   # Verify DDS connectivity without a model (no MODEL_PATH needed)
 #   ./scripts/run_inference.sh --echo-topic-only up --build
@@ -63,7 +63,7 @@ while [[ $# -gt 0 ]]; do
             COMPOSE_FILE="${REPO_ROOT}/docker-compose.fake-hardware.yml"
             shift
             ;;
-        --monitor)
+        --monitor-enable)
             MONITOR_REQUESTED=true
             shift
             ;;
