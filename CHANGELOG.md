@@ -1,0 +1,55 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+---
+
+## [Unreleased]
+
+### Fixed
+- Add context-managed alias for `relative_actions_processor` in pi05 training
+
+---
+
+## [2026-06]
+
+### Added
+- Add `--output-path` flag to `mcap-convert` and improve data conversion description in README (#29)
+- Add `merge-datasets` CLI to `mcap_converter` (#24)
+- Add artifact provenance tracking (#28)
+
+### Fixed
+- Show per-episode scrolling summary in `mcap-convert` progress (#26)
+- Fix inference node FPS regression (#25)
+- Add PIL fallback and skip corrupt-JPEG episodes in `mcap_converter` (#22)
+- Initialize `n_action_steps_override` before `_log_startup()` (#23)
+
+---
+
+## [2026-05]
+
+### Changed
+- Use ROS header timestamp for time syncing (#19)
+- Upgrade to lerobot v0.5.1 (#17)
+
+---
+
+## [2026-04]
+
+### Added
+- Inference node refactor with lerobot v0.5.0 VLA policy support (#15)
+- Smart `output_dir` auto-generation and per-checkpoint `anvil_config.json` (#14)
+
+---
+
+## [2026-03]
+
+### Added
+- Checkpoint-aware inference config and `anvil-trainer` CLI
+- Initial public release of the repository
+
+---
+
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
