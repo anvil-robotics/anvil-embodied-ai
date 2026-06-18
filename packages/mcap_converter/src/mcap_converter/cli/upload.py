@@ -182,9 +182,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  mcap-upload /tmp/test-dataset
-  mcap-upload /tmp/test-dataset --repo-id anvil-robot/my_dataset --private
-  mcap-upload /tmp/test-dataset --force
+  hf-upload /tmp/test-dataset
+  hf-upload /tmp/test-dataset --repo-id anvil-robot/my_dataset --private
+  hf-upload /tmp/test-dataset --force
 """,
     )
     parser.add_argument(

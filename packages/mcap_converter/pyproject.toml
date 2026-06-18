@@ -49,7 +49,7 @@ dev = [
 mcap-convert = "mcap_converter.cli.convert:main"
 mcap-inspect = "mcap_converter.cli.inspect:main"
 dataset-validate = "mcap_converter.cli.validate:main"
-mcap-upload = "mcap_converter.cli.upload:main"
+hf-upload = "mcap_converter.cli.upload:main"
 mcap-to-video = "mcap_converter.cli.video:main"
 merge-datasets = "mcap_converter.cli.merge_datasets:main"
 
