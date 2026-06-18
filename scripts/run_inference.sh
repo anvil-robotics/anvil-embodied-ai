@@ -11,6 +11,7 @@
 #                      pre-creates MONITOR_OUTPUT_DIR as current user, and plots CSV on exit
 #   --echo-topic-only  Subscribe + log FPS without loading a model (sets ECHO_TOPIC_ONLY=true);
 #                      useful to verify DDS connectivity on the GPU PC without a checkpoint
+#   --debug            Enable debug metrics: action smoothness, queue depth, Action FPS (sets DEBUG=true)
 #   -h, --help         Show this message
 #
 # All other arguments (e.g. up --build, down, logs) are passed directly to docker compose.
@@ -49,6 +50,7 @@ COMPOSE_FILE="${REPO_ROOT}/docker-compose.yml"
 FAKE_HARDWARE=false
 MONITOR_REQUESTED=false
 ECHO_TOPIC_ONLY_REQUESTED=false
+DEBUG_REQUESTED=false
 PASSTHROUGH=()
 
 usage() {
@@ -69,6 +71,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --echo-topic-only)
             ECHO_TOPIC_ONLY_REQUESTED=true
+            shift
+            ;;
+        --debug)
+            DEBUG_REQUESTED=true
             shift
             ;;
         -h|--help)
@@ -95,6 +101,11 @@ fi
 # ECHO_TOPIC_ONLY: subscribe + log FPS without loading a model (DDS connectivity check)
 if [[ "$ECHO_TOPIC_ONLY_REQUESTED" == true ]]; then
     export ECHO_TOPIC_ONLY=true
+fi
+
+# DEBUG: enable extra metrics inside the container
+if [[ "$DEBUG_REQUESTED" == true ]]; then
+    export DEBUG=true
 fi
 
 # Auto-detect ACTION_TYPE from model checkpoint's anvil_config.json.
