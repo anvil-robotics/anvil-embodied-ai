@@ -38,7 +38,8 @@
 #   ./scripts/run_inference.sh --echo-topic-only up --build
 #
 #   # Fake-hardware full inference pipeline
-#   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh --fake-hardware up --build --profile inference
+#   # NOTE: --profile is a docker compose global flag and must come BEFORE the subcommand.
+#   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh --fake-hardware --profile inference up --build
 
 set -euo pipefail
 

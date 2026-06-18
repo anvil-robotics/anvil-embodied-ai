@@ -77,27 +77,31 @@ class Transform(ABC):
 
 
 class ExcludeObservationTransform(Transform):
-    """Exclude observation keys from training via --exclude-observation suffixes.
+    """Exclude observation keys from training via --exclude-observs.
 
-    Each suffix is prepended with "observation." to form the full dataset key:
+    Drop observations by suffix after "observation.":
       "images.chest"  -> "observation.images.chest"
       "velocity"      -> "observation.velocity"
     """
 
     @property
     def name(self) -> str:
-        return "exclude_observation"
+        return "exclude_observs"
 
     def is_enabled(self, config: TrainingConfig) -> bool:
-        return bool(config.exclude_observation)
+        return bool(config.exclude_observs)
 
     @staticmethod
-    def _full_keys(config: TrainingConfig) -> set[str]:
-        return {f"observation.{s}" for s in config.exclude_observation}
+    def _excluded_keys(config: TrainingConfig) -> set[str]:
+        if not config.exclude_observs:
+            return set()
+        return {f"observation.{s}" for s in config.exclude_observs}
 
     def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
-        for full_key in self._full_keys(config):
-            item.pop(full_key, None)
+        excluded = self._excluded_keys(config)
+        for key in list(item.keys()):
+            if key in excluded:
+                item.pop(key, None)
         return item
 
     def patch_metadata(self, config: TrainingConfig, runner: Any = None) -> None:
@@ -107,21 +111,17 @@ class ExcludeObservationTransform(Transform):
         from lerobot.datasets.feature_utils import dataset_to_policy_features
 
         original_func = dataset_to_policy_features
-        excluded = self._full_keys(config)
+        excluded = self._excluded_keys(config)
 
         def filtered_func(features: dict) -> dict:
             filtered = {}
             for key, value in features.items():
                 if key in excluded:
-                    log.info("[exclude_observation] Excluding: %s", key)
+                    log.info("[exclude_observs] Excluding: %s", key)
                     continue
                 filtered[key] = value
             return original_func(filtered)
 
-        # Patch both the definition module and the importer (policies/factory.py).
-        # Use runner._patch so patches are reverted by patched_lerobot(); fall
-        # back to direct assignment for backward compatibility when a transform
-        # is used standalone without a runner.
         if runner is not None:
             runner._patch(lerobot.datasets.feature_utils, "dataset_to_policy_features", filtered_func)
             runner._patch(lerobot.policies.factory, "dataset_to_policy_features", filtered_func)

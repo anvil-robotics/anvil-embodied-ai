@@ -57,7 +57,7 @@ class TrainingConfig:
     Configuration for custom training transformations.
 
     Attributes:
-        exclude_observation: Observation suffixes to DROP (None = keep all).
+        exclude_observs: Observation suffixes to DROP (None = keep all).
             Use the key suffix after "observation." — supports both image and non-image keys:
             e.g. ["images.chest", "images.wrist_l", "velocity", "effort"]
         task_override: Override task string for all samples (for SmolVLA)
@@ -67,7 +67,7 @@ class TrainingConfig:
         note_append: Text to append to the existing note when resuming a run
     """
 
-    exclude_observation: list[str] | None = None
+    exclude_observs: list[str] | None = None
     task_override: str | None = None
     # action_type: "absolute" | "delta_obs_t" | "delta_sequential"
     # delta_obs_t:     delta[k] = action[t+k] - obs[t]  (all k share the same obs reference)
@@ -100,15 +100,16 @@ class TrainingConfig:
         Parse configuration from environment variables and command line args.
 
         Environment variables:
-            LEROBOT_EXCLUDE_OBSERVATION: Comma-separated observation suffixes to exclude
+            LEROBOT_EXCLUDE_OBSERVS: Comma-separated observation suffixes to exclude
             LEROBOT_TASK_OVERRIDE: Task string override
 
         Command line args:
             --action-type=absolute|delta_obs_t|delta_sequential
             --use-delta-actions: Legacy flag, maps to --action-type=delta_obs_t
+            --exclude-observs=SUFFIX1,SUFFIX2: Drop observations by suffix
         """
-        excl_str = _pop_argv("exclude-observation") or os.environ.get("LEROBOT_EXCLUDE_OBSERVATION", "")
-        exclude_observation = [k.strip() for k in excl_str.split(",") if k.strip()] or None
+        excl_str = _pop_argv("exclude-observs") or os.environ.get("LEROBOT_EXCLUDE_OBSERVS", "")
+        exclude_observs = [k.strip() for k in excl_str.split(",") if k.strip()] or None
 
         task_override = _pop_argv("task-description") or os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
 
@@ -330,7 +331,7 @@ class TrainingConfig:
                         sys.argv.append("--policy.use_group_norm=false")
 
         return cls(
-            exclude_observation=exclude_observation,
+            exclude_observs=exclude_observs,
             task_override=task_override,
             action_type=action_type,
             delta_exclude_joints=delta_exclude_joints,
@@ -358,7 +359,7 @@ class TrainingConfig:
         if _action_type == "absolute" and data.get("use_delta_actions", False):
             _action_type = "delta_obs_t"
         return cls(
-            exclude_observation=data.get("exclude_observation"),
+            exclude_observs=data.get("exclude_observs"),
             task_override=data.get("task_override"),
             action_type=_action_type,
             delta_exclude_joints=data.get("delta_exclude_joints"),
@@ -368,23 +369,23 @@ class TrainingConfig:
         )
 
     def warn_unknown_exclude_keys(self) -> None:
-        """Warn about --exclude-observation keys not present in the dataset features."""
-        if not self.exclude_observation or not self.dataset_root:
+        """Warn about --exclude-observs keys not present in the dataset features."""
+        if not self.exclude_observs or not self.dataset_root:
             return
 
         info_path = Path(self.dataset_root) / "meta" / "info.json"
         if not info_path.exists():
-            log.warning("[anvil_trainer] Cannot validate --exclude-observation: %s not found", info_path)
+            log.warning("[anvil_trainer] Cannot validate --exclude-observs: %s not found", info_path)
             return
 
         with open(info_path) as f:
             info = json.load(f)
 
         available = set(info.get("features", {}).keys())
-        for suffix in self.exclude_observation:
+        for suffix in self.exclude_observs:
             full_key = f"observation.{suffix}"
             if full_key not in available:
-                log.warning("[anvil_trainer] --exclude-observation key not in dataset: %s", full_key)
+                log.warning("[anvil_trainer] --exclude-observs key not in dataset: %s", full_key)
 
 
 # =============================================================================

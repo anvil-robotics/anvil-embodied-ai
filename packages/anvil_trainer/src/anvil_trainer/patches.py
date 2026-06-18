@@ -136,7 +136,9 @@ class TransformRunner:
     def _get_transform_details(self, transform: Transform) -> str:
         """Get human-readable details for a transform."""
         if isinstance(transform, ExcludeObservationTransform):
-            return f"excluding: {', '.join(self.config.exclude_observation)}"
+            if self.config.exclude_observs:
+                return f"excluding: {', '.join(self.config.exclude_observs)}"
+            return "enabled"
         elif isinstance(transform, TaskOverrideTransform):
             return f"'{self.config.task_override}'"
         elif isinstance(transform, DeltaActionTransform):
