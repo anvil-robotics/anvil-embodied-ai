@@ -8,8 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Rename `mcap-upload` CLI entry point to `hf-upload` — clarifies the command uploads a converted LeRobot dataset, not raw MCAP files
+- Add `--debug` flag to `run_inference.sh` (exports `DEBUG=true`; enables action smoothness, queue depth stats, Action FPS in inference node)
+- Add `inference_flags_smoke_test.py` covering all `run_inference.sh` flags via docker shim assertions and live Docker startup tests
+- Reorganize README and add per-stage docs: `docs/training.md`, `docs/evaluation.md`, `docs/inference.md`, `docs/data-conversion.md`; fill all previously undocumented CLI flags
+
+### Changed
+- Rename `--monitor` flag to `--monitor-enable` in `run_inference.sh` for clarity
+- Rename `--exclude-observation` / `--exclude-cams` to `--exclude-observs` in `anvil-trainer`; adopt dot-suffix notation (`images.chest`, `state.velocity`) that mirrors feature key namespaces directly
+
 ### Fixed
-- Add context-managed alias for `relative_actions_processor` in pi05 training
+- Fix `--camera-filter` semantics: now discards listed cameras (was incorrectly keeping them)
+- Fix `inference-eval-smoke-test.yaml`: restructure camera config from legacy top-level `camera_mapping:` to `cameras.mapping:` nested format (`inference_node.py` reads `cameras.mapping` since the config refactor)
+- Fix `EVAL_DATASET_FPS` type mismatch: compose default was integer `30`; `eval_recorder_node` declares `dataset_fps` as ROS2 `DOUBLE` and rejected it — changed to `30.0`
+- Fix `run_inference.sh` example command: `--profile` is a docker compose global flag and must precede the subcommand
 
 ---
 
@@ -21,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Add artifact provenance tracking (#28)
 
 ### Fixed
+- Add context-managed alias for `relative_actions_processor` in Pi0.5 training (#30)
 - Show per-episode scrolling summary in `mcap-convert` progress (#26)
 - Fix inference node FPS regression (#25)
 - Add PIL fallback and skip corrupt-JPEG episodes in `mcap_converter` (#22)
