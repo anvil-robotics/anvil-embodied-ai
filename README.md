@@ -22,9 +22,6 @@
 
 ## 📢 News
 
-- **2026-06-15** — Pi0.5 training now supports `relative_actions_processor` context-managed alias.
-- **2026-06-12** — `mcap-convert` adds `--output-path` flag for custom output paths. (#29)
-- **2026-06-11** — Artifact provenance tracking added to dataset conversion. (#28)
 - **2026-05-08** — Upgraded to LeRobot v0.5.1.
 
 _See full history in [CHANGELOG.md](CHANGELOG.md)._
