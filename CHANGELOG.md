@@ -8,10 +8,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
----
-
-## [2026-06]
-
 ### Added
 - Rename `mcap-upload` CLI entry point to `hf-upload` — clarifies the command uploads a converted LeRobot dataset, not raw MCAP files
 - Add `--debug` flag to `run_inference.sh` (exports `DEBUG=true`; enables action smoothness, queue depth stats, Action FPS in inference node)
@@ -40,8 +36,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [2026-05]
 
-### Changed
+### Added
 - Use ROS header timestamp for time syncing (#19)
+
+### Changed
 - Upgrade to lerobot v0.5.1 (#17)
 
 ---
