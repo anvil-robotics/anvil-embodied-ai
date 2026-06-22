@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Rename `--exclude-observation` / `--exclude-cams` to `--exclude-observs` in `anvil-trainer`; adopt dot-suffix notation (`images.chest`, `state.velocity`) that mirrors feature key namespaces directly
 
 ### Fixed
+- Fix `mcap-to-video` failing silently on legacy MCAP files — schema names without the `/msg/` infix (`sensor_msgs/Image`, `sensor_msgs/CompressedImage`) are now recognised in both topic detection and frame decoding
 - Fix `--camera-filter` semantics: now discards listed cameras (was incorrectly keeping them)
 - Fix `inference-eval-smoke-test.yaml`: restructure camera config from legacy top-level `camera_mapping:` to `cameras.mapping:` nested format (`inference_node.py` reads `cameras.mapping` since the config refactor)
 - Fix `EVAL_DATASET_FPS` type mismatch: compose default was integer `30`; `eval_recorder_node` declares `dataset_fps` as ROS2 `DOUBLE` and rejected it — changed to `30.0`
