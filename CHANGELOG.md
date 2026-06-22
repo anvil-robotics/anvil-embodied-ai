@@ -8,11 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [2026-06]
+
 ### Added
 - Rename `mcap-upload` CLI entry point to `hf-upload` — clarifies the command uploads a converted LeRobot dataset, not raw MCAP files
 - Add `--debug` flag to `run_inference.sh` (exports `DEBUG=true`; enables action smoothness, queue depth stats, Action FPS in inference node)
 - Add `inference_flags_smoke_test.py` covering all `run_inference.sh` flags via docker shim assertions and live Docker startup tests
 - Reorganize README and add per-stage docs: `docs/training.md`, `docs/evaluation.md`, `docs/inference.md`, `docs/data-conversion.md`; fill all previously undocumented CLI flags
+- Add `--output-path` flag to `mcap-convert` and improve data conversion description in README (#29)
+- Add `merge-datasets` CLI to `mcap_converter` (#24)
+- Add artifact provenance tracking (#28)
 
 ### Changed
 - Rename `--monitor` flag to `--monitor-enable` in `run_inference.sh` for clarity
@@ -23,17 +30,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Fix `inference-eval-smoke-test.yaml`: restructure camera config from legacy top-level `camera_mapping:` to `cameras.mapping:` nested format (`inference_node.py` reads `cameras.mapping` since the config refactor)
 - Fix `EVAL_DATASET_FPS` type mismatch: compose default was integer `30`; `eval_recorder_node` declares `dataset_fps` as ROS2 `DOUBLE` and rejected it — changed to `30.0`
 - Fix `run_inference.sh` example command: `--profile` is a docker compose global flag and must precede the subcommand
-
----
-
-## [2026-06]
-
-### Added
-- Add `--output-path` flag to `mcap-convert` and improve data conversion description in README (#29)
-- Add `merge-datasets` CLI to `mcap_converter` (#24)
-- Add artifact provenance tracking (#28)
-
-### Fixed
 - Add context-managed alias for `relative_actions_processor` in Pi0.5 training (#30)
 - Show per-episode scrolling summary in `mcap-convert` progress (#26)
 - Fix inference node FPS regression (#25)
