@@ -298,10 +298,6 @@ class TrainingConfig:
             if not any(arg.startswith("--save_freq") for arg in sys.argv):
                 sys.argv.append("--save_freq=10000")
 
-            # Disable wandb artifact upload by default (metrics still logged)
-            if not any(arg.startswith("--wandb.disable_artifact") for arg in sys.argv):
-                sys.argv.append("--wandb.disable_artifact=true")
-
             # If --policy.path is given (loading from checkpoint), lerobot rejects --policy.type.
             # Strip --policy.type from sys.argv; we've already captured the value for naming purposes.
             # Also skip backbone injection — the checkpoint already contains backbone config.
@@ -333,6 +329,10 @@ class TrainingConfig:
                 if policy_type == "diffusion":
                     if not any(a.startswith("--policy.use_group_norm=") for a in sys.argv):
                         sys.argv.append("--policy.use_group_norm=false")
+
+        # Disable wandb artifact upload by default for all runs (new + resume)
+        if not any(arg.startswith("--wandb.disable_artifact") for arg in sys.argv):
+            sys.argv.append("--wandb.disable_artifact=true")
 
         return cls(
             exclude_observs=exclude_observs,
