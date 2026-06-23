@@ -124,3 +124,72 @@ class TestTransformPatchMetadataUsesRunner:
         runner.restore_all_patches()
         assert feature_utils.dataset_to_policy_features is orig_fu
         assert policies_factory.dataset_to_policy_features is orig_pf
+
+
+# =============================================================================
+# apply_processor_compat_aliases / unregister on restore
+# =============================================================================
+
+
+class TestProcessorCompatAliases:
+    """Tests for the relative_actions_processor → delta_actions_processor alias."""
+
+    def _make_runner(self) -> TransformRunner:
+        return TransformRunner(TrainingConfig())
+
+    def test_alias_registered_after_apply(self):
+        """relative_actions_processor should resolve after apply_processor_compat_aliases."""
+        from lerobot.processor.pipeline import ProcessorStepRegistry
+        from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
+
+        runner = self._make_runner()
+        # Ensure clean state — unregister if a previous test left it behind.
+        ProcessorStepRegistry.unregister("relative_actions_processor")
+
+        runner.apply_processor_compat_aliases()
+        try:
+            assert ProcessorStepRegistry.get("relative_actions_processor") is RelativeActionsProcessorStep
+        finally:
+            runner.restore_all_patches()
+
+    def test_canonical_registry_name_preserved(self):
+        """_registry_name must stay 'delta_actions_processor' so checkpoints use the new name."""
+        from lerobot.processor.pipeline import ProcessorStepRegistry
+        from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
+
+        runner = self._make_runner()
+        ProcessorStepRegistry.unregister("relative_actions_processor")
+
+        runner.apply_processor_compat_aliases()
+        try:
+            assert RelativeActionsProcessorStep._registry_name == "delta_actions_processor"
+        finally:
+            runner.restore_all_patches()
+
+    def test_alias_unregistered_after_restore(self):
+        """restore_all_patches must remove the alias and leave delta_actions_processor intact."""
+        from lerobot.processor.pipeline import ProcessorStepRegistry
+
+        runner = self._make_runner()
+        ProcessorStepRegistry.unregister("relative_actions_processor")
+
+        runner.apply_processor_compat_aliases()
+        runner.restore_all_patches()
+
+        assert "relative_actions_processor" not in ProcessorStepRegistry.list()
+        assert "delta_actions_processor" in ProcessorStepRegistry.list()
+
+    def test_noop_when_already_registered(self):
+        """Calling apply_processor_compat_aliases twice must not raise ValueError."""
+        from lerobot.processor.pipeline import ProcessorStepRegistry
+
+        runner = self._make_runner()
+        ProcessorStepRegistry.unregister("relative_actions_processor")
+
+        runner.apply_processor_compat_aliases()
+        try:
+            # Second call — alias already present, must be a no-op.
+            runner.apply_processor_compat_aliases()
+            assert len(runner._registered_aliases) == 1  # registered only once
+        finally:
+            runner.restore_all_patches()

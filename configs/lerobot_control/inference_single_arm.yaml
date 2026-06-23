@@ -13,7 +13,7 @@
 model:
   # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion
   # Set to the task the model was trained/finetuned for.
-  task_description: null
+  task_description: "Pick up the block and place it on the target location"
 
 # -----------------------------------------------------------------------------
 # Inference Tuning (per model type)
@@ -108,14 +108,24 @@ arms:
     action_end: 8
 
 # -----------------------------------------------------------------------------
-# Camera Mapping
+# Camera Configuration
 # -----------------------------------------------------------------------------
-# ROS topic -> ML model camera name (must match training config)
 
-camera_mapping:
-  "/cam_waist/image_raw/compressed": "waist"
-  "/cam_wrist_r/image_raw/compressed": "wrist_r"
-  "/cam_chest/image_raw/compressed": "chest"
+cameras:
+  # fps: expected publish rate; warning fires when any camera drops below fps * 2/3.
+  #   Independent of control_frequency.
+  fps: 30.0
+
+  # mapping: ROS topic -> ML model camera name (must match training config)
+  mapping:
+    "/cam_waist/image_raw/compressed": "waist"
+    "/cam_wrist_r/image_raw/compressed": "wrist_r"
+    "/cam_chest/image_raw/compressed": "chest"
+
+  # fps_overrides: per-topic overrides for cameras running at a different rate.
+  #   Omit topics that match the global fps above.
+  # fps_overrides:
+  #   "/cam_wrist_r/image_raw/compressed": 60.0
 
 # -----------------------------------------------------------------------------
 # Safety Parameters

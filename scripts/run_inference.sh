@@ -7,10 +7,11 @@
 #
 # Options:
 #   --fake-hardware    Use docker-compose.fake-hardware.yml (DDS bridge test, no real robot)
-#   --monitor          Enable monitor profile; for production also sets MONITOR_ENABLE=true,
+#   --monitor-enable          Enable monitor profile; for production also sets MONITOR_ENABLE=true,
 #                      pre-creates MONITOR_OUTPUT_DIR as current user, and plots CSV on exit
 #   --echo-topic-only  Subscribe + log FPS without loading a model (sets ECHO_TOPIC_ONLY=true);
 #                      useful to verify DDS connectivity on the GPU PC without a checkpoint
+#   --debug            Enable debug metrics: action smoothness, queue depth, Action FPS (sets DEBUG=true)
 #   -h, --help         Show this message
 #
 # All other arguments (e.g. up --build, down, logs) are passed directly to docker compose.
@@ -28,16 +29,17 @@
 #   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh up --build
 #
 #   # Production inference with real-time monitor + auto-plot
-#   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh --monitor up --build
+#   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh --monitor-enable up --build
 #
 #   # Fake-hardware DDS test (FPS monitor only, no GPU)
-#   ./scripts/run_inference.sh --fake-hardware --monitor up --build
+#   ./scripts/run_inference.sh --fake-hardware --monitor-enable up --build
 #
 #   # Verify DDS connectivity without a model (no MODEL_PATH needed)
 #   ./scripts/run_inference.sh --echo-topic-only up --build
 #
 #   # Fake-hardware full inference pipeline
-#   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh --fake-hardware up --build --profile inference
+#   # NOTE: --profile is a docker compose global flag and must come BEFORE the subcommand.
+#   MODEL_PATH=/path/to/checkpoint ./scripts/run_inference.sh --fake-hardware --profile inference up --build
 
 set -euo pipefail
 
@@ -49,6 +51,7 @@ COMPOSE_FILE="${REPO_ROOT}/docker-compose.yml"
 FAKE_HARDWARE=false
 MONITOR_REQUESTED=false
 ECHO_TOPIC_ONLY_REQUESTED=false
+DEBUG_REQUESTED=false
 PASSTHROUGH=()
 
 usage() {
@@ -63,12 +66,16 @@ while [[ $# -gt 0 ]]; do
             COMPOSE_FILE="${REPO_ROOT}/docker-compose.fake-hardware.yml"
             shift
             ;;
-        --monitor)
+        --monitor-enable)
             MONITOR_REQUESTED=true
             shift
             ;;
         --echo-topic-only)
             ECHO_TOPIC_ONLY_REQUESTED=true
+            shift
+            ;;
+        --debug)
+            DEBUG_REQUESTED=true
             shift
             ;;
         -h|--help)
@@ -95,6 +102,11 @@ fi
 # ECHO_TOPIC_ONLY: subscribe + log FPS without loading a model (DDS connectivity check)
 if [[ "$ECHO_TOPIC_ONLY_REQUESTED" == true ]]; then
     export ECHO_TOPIC_ONLY=true
+fi
+
+# DEBUG: enable extra metrics inside the container
+if [[ "$DEBUG_REQUESTED" == true ]]; then
+    export DEBUG=true
 fi
 
 # Auto-detect ACTION_TYPE from model checkpoint's anvil_config.json.

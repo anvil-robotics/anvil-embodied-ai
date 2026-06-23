@@ -29,6 +29,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from anvil_shared.provenance import git_provenance
 from mcap_converter import (
     ConfigLoader,
     DataConfig,
@@ -313,6 +314,15 @@ def convert_session(
             )
         log(f"Saved conversion config: [dim]{conversion_config_dest}[/dim]")
 
+    # Append git provenance to conversion_config.yaml (skip when resuming — already present)
+    if resume_from == 0:
+        provenance = git_provenance()
+        if provenance:
+            import yaml
+            with open(conversion_config_dest, "a") as _f:
+                _f.write("\n# --- provenance ---\n")
+                yaml.dump(provenance, _f, default_flow_style=False)
+
     # Process each MCAP file as one episode
     total_frames = 0
     episode_times = []
@@ -337,6 +347,7 @@ def convert_session(
             if episode_idx < resume_from:
                 progress.advance(overall_task)
                 progress.update(overall_task, status=f"{episode_idx + 1}/{len(mcap_files)} episodes [dim](skipped)[/dim]")
+                console.print(f"  [dim]↷ [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}  skipped (already converted)[/dim]")
                 continue
 
             episode_start_time = time.time()
@@ -391,6 +402,11 @@ def convert_session(
                     overall_task,
                     status=f"{episode_idx + 1}/{len(mcap_files)} episodes",
                 )
+                progress.remove_task(episode_task)
+                console.print(
+                    f"  [yellow]⚠[/yellow] [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
+                    f"  [yellow]skipped (corrupt frame)[/yellow]"
+                )
                 episode_frame_counts.append(0)
                 episode_times.append(time.time() - episode_start_time)
                 log(
@@ -411,6 +427,11 @@ def convert_session(
                 progress.update(
                     overall_task,
                     status=f"{episode_idx + 1}/{len(mcap_files)} episodes",
+                )
+                progress.remove_task(episode_task)
+                console.print(
+                    f"  [yellow]⚠[/yellow] [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
+                    f"  [yellow]skipped (0 frames)[/yellow]"
                 )
                 episode_frame_counts.append(0)
                 episode_times.append(time.time() - episode_start_time)
@@ -440,6 +461,14 @@ def convert_session(
             progress.update(
                 overall_task,
                 status=f"{episode_idx + 1}/{len(mcap_files)} episodes",
+            )
+            progress.remove_task(episode_task)
+            ep_fps = frame_count / episode_time if episode_time > 0 else 0
+            console.print(
+                f"  [green]✓[/green] [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
+                f"  [green]{frame_count} frames[/green]"
+                f"  {format_duration(episode_time)}"
+                f"  {ep_fps:.0f} f/s"
             )
 
     # Check for all-empty conversion
@@ -548,6 +577,10 @@ examples:
         help="output base directory — dataset is saved to <output-dir>/<input-dir-name>/ (default: data/datasets)",
     )
     parser.add_argument(
+        "--output-path", type=str, default=None,
+        help="full output path override — use this exact directory instead of <output-dir>/<input-dir-name>/",
+    )
+    parser.add_argument(
         "--config", type=str,
         help="path to YAML config file",
     )
@@ -610,9 +643,12 @@ examples:
     )
     args = parser.parse_args(args)
 
-    # Resolve output path: <output-dir>/<input-dir-name>/
+    # Resolve output path: --output-path wins; otherwise <output-dir>/<input-dir-name>/
     input_name = Path(args.input_dir.rstrip("/")).name
-    args.output_dir = str(Path(args.output_dir.rstrip("/")) / input_name)
+    if args.output_path:
+        args.output_dir = args.output_path.rstrip("/")
+    else:
+        args.output_dir = str(Path(args.output_dir.rstrip("/")) / input_name)
 
     # Handle HuggingFace username
     if args.hf_user:

@@ -67,7 +67,11 @@ arms:
     action_end: 8
 
 # Fixture MCAPs have 3 cameras only (no wrist_l)
-camera_mapping:
-  "/cam_waist/image_raw/compressed": "waist"
-  "/cam_wrist_r/image_raw/compressed": "wrist_r"
-  "/cam_chest/image_raw/compressed": "chest"
+# NOTE: must use cameras.mapping (nested) format — inference_node.py reads cameras.mapping,
+# not the legacy top-level camera_mapping key.
+cameras:
+  fps: 30.0
+  mapping:
+    "/cam_waist/image_raw/compressed": "waist"
+    "/cam_wrist_r/image_raw/compressed": "wrist_r"
+    "/cam_chest/image_raw/compressed": "chest"

@@ -13,15 +13,15 @@ one place:
 
 Usage:
     # CLI
-    anvil-trainer [lerobot args] [--use-delta-actions] [--task-description="..."] [--exclude-observation=images.chest,velocity]
+    anvil-trainer [lerobot args] [--use-delta-actions] [--task-description="..."] [--exclude-observs=images.chest,velocity]
 
     # Python
     from anvil_trainer import train, TrainingConfig
-    config = TrainingConfig(exclude_observation=["images.chest"])
+    config = TrainingConfig(exclude_observs=["images.chest"])
     train(config)
 
 Environment variables:
-    LEROBOT_EXCLUDE_OBSERVATION: Comma-separated observation suffixes to drop
+    LEROBOT_EXCLUDE_OBSERVS: Comma-separated observation suffixes to drop
     LEROBOT_TASK_OVERRIDE: Override task string for all samples
 """
 from __future__ import annotations
@@ -74,7 +74,7 @@ def train(config: TrainingConfig | None = None) -> None:
     if config is None:
         config = TrainingConfig.from_env_and_args()
 
-    # Warn about unknown --exclude-observation keys
+    # Warn about unknown --exclude-observs keys
     config.warn_unknown_exclude_keys()
 
     # Resolve final note (auto-preserve / replace / append during resume)
@@ -152,7 +152,7 @@ Examples:
   # Train with delta actions and camera subset
   anvil-trainer --dataset.root=data/datasets/my-dataset \\
     --policy.type=act --job_name=grabbing-w1 \\
-    --camera-filter=chest,waist --use-delta-actions
+    --exclude-observs=images.chest,images.waist --use-delta-actions
 
   # Resume a stopped run (from latest checkpoint)
   anvil-trainer --resume=model_zoo/my-dataset/grabbing-w1
@@ -181,9 +181,10 @@ Anvil-specific flags (stripped before passing to LeRobot):
       Task prompt for SmolVLA. Overrides LEROBOT_TASK_OVERRIDE env var.
       Example: --task-description="Grab the gray doll and put it in the bucket"
 
-  --camera-filter=CAM1,CAM2,...
-      Train using only the specified cameras. Overrides LEROBOT_CAMERA_FILTER.
-      Example: --camera-filter=chest,waist
+  --exclude-observs=SUFFIX1,SUFFIX2,...
+      Drop observation keys by suffix after "observation.". Supports image and non-image keys.
+      Overrides LEROBOT_EXCLUDE_OBSERVS.
+      Example: --exclude-observs=images.wrist_r,velocity,effort
 
   --note=TEXT
       Free-text note attached to this run.

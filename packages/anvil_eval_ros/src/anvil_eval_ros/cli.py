@@ -706,8 +706,10 @@ def main() -> None:
         "EVAL_USE_DELTA_ACTIONS": "true" if use_delta_actions else "false",
         "EVAL_ACTION_TYPE": action_type,
         "EVAL_DELTA_EXCLUDE_JOINTS": _ros2_list(delta_exclude_joints) if delta_exclude_joints else "[]",
-        # dataset fps for GT downsampling (from meta/info.json)
-        "EVAL_DATASET_FPS": str(dataset_fps),
+        # dataset fps for GT downsampling (from meta/info.json).
+        # Must be a float string (e.g. "30.0") because eval_recorder_node declares
+        # dataset_fps as DOUBLE — passing an INTEGER literal causes a type mismatch.
+        "EVAL_DATASET_FPS": str(float(dataset_fps)),
         # Inference monitor
         "MONITOR_ENABLE": "true" if args.monitor else "false",
         "MONITOR_OUTPUT_DIR": str(output_dir / "monitor"),

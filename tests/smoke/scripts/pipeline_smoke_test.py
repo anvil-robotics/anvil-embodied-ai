@@ -161,7 +161,14 @@ def _rmtree(path: Path) -> None:
     try:
         shutil.rmtree(path)
     except PermissionError:
-        subprocess.run(["sudo", "rm", "-rf", str(path)], check=True)
+        # Docker containers write as root; use an alpine container to remove
+        # instead of sudo (which requires a terminal / password in CI).
+        subprocess.run(
+            ["docker", "run", "--rm",
+             "-v", f"{path.parent}:/data",
+             "alpine", "rm", "-rf", f"/data/{path.name}"],
+            check=True,
+        )
 
 
 def _missing(path: Path) -> StepResult:
@@ -200,7 +207,8 @@ def run_step_convert(sc: Scenario, force: bool) -> StepResult:
 
 # ── Step 2: anvil-trainer ────────────────────────────────────────────────────
 
-def run_step_train(sc: Scenario, force: bool, steps_override: int) -> StepResult:
+def run_step_train(sc: Scenario, force: bool, steps_override: int,
+                   exclude_observs: str = "") -> StepResult:
     if not (sc.dataset_dir / "meta" / "info.json").exists():
         return _missing(sc.dataset_dir / "meta" / "info.json")
 
@@ -211,6 +219,11 @@ def run_step_train(sc: Scenario, force: bool, steps_override: int) -> StepResult
         shutil.rmtree(sc.train_out)
     if expected.exists() and not force:
         return StepResult(ok=True, duration_s=0.0, artifact=ckpt_dir, notes="cached")
+
+    # job_name incorporates the exclude tag so WandB / logging rows stay distinct
+    excl_tag = ("_excl_" + exclude_observs.replace(",", "_").replace(".", "_")
+                if exclude_observs else "")
+    job_name = f"smoke{excl_tag}"
 
     t0 = time.monotonic()
     train_cmd = [
@@ -227,10 +240,12 @@ def run_step_train(sc: Scenario, force: bool, steps_override: int) -> StepResult
         "--num_workers=0",
         "--eval_freq=0",
         f"--output_dir={sc.train_out}",
-        "--job_name=smoke",
+        f"--job_name={job_name}",
     ]
     if sc.action_type != "absolute":
         train_cmd.append(f"--action-type={sc.action_type}")
+    if exclude_observs:
+        train_cmd.append(f"--exclude-observs={exclude_observs}")
     rc = _run(train_cmd, env_extra={"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
     dt = time.monotonic() - t0
 
@@ -365,11 +380,11 @@ STEP_NAMES: dict[int, str] = {
 
 
 def run_step(step_no: int, sc: Scenario, force: bool, steps_override: int,
-             with_docker: bool) -> StepResult:
+             with_docker: bool, exclude_observs: str = "") -> StepResult:
     if step_no == 1:
         return run_step_convert(sc, force)
     elif step_no == 2:
-        return run_step_train(sc, force, steps_override)
+        return run_step_train(sc, force, steps_override, exclude_observs)
     elif step_no == 3:
         return run_step_eval(sc, force, steps_override)
     elif step_no == 4:
@@ -421,6 +436,15 @@ def main() -> int:
                    help="training --steps value (default: 10)")
     p.add_argument("--no-docker", action="store_true",
                    help="step 4 skips the Docker stack and only generates eval_plan.json")
+    p.add_argument("--exclude-observs", default="",
+                   metavar="SUFFIXES",
+                   help=(
+                       "comma-separated observation suffixes to DROP during training "
+                       "(e.g. images.chest  or  images.wrist_r,velocity). "
+                       "Only affects step 2.  An isolated output dir is used to avoid "
+                       "cache collision with the baseline run.  "
+                       "Validates docs/training.md Data Filter section."
+                   ))
     args = p.parse_args()
 
     selected_steps = parse_select(args.select)
@@ -432,6 +456,27 @@ def main() -> int:
         if unknown:
             raise SystemExit(f"unknown scenario(s): {unknown}; valid: {list(SCENARIOS)}")
         scenarios = [SCENARIOS[k] for k in keys]
+
+    exclude_observs = (args.exclude_observs or "").strip()
+
+    # When --exclude-observs is set, use isolated output dirs so artifacts from
+    # "drop images.chest" and "keep everything" never collide in the cache.
+    if exclude_observs:
+        excl_tag = "excl_" + exclude_observs.replace(",", "_").replace(".", "_")
+        new_scenarios = []
+        for sc in scenarios:
+            new_scenarios.append(Scenario(
+                key=sc.key,
+                label=f"{sc.label} [{excl_tag}]",
+                mcap_root=sc.mcap_root,
+                dataset_dir=sc.dataset_dir,       # dataset is unchanged (step 1 not modified)
+                train_out=sc.train_out.parent / (sc.train_out.name + "_" + excl_tag),
+                eval_out=sc.eval_out.parent / (sc.eval_out.name + "_" + excl_tag),
+                eval_ros_out=sc.eval_ros_out.parent / (sc.eval_ros_out.name + "_" + excl_tag),
+                convert_config=sc.convert_config,
+                action_type=sc.action_type,
+            ))
+        scenarios = new_scenarios
 
     all_results: list[tuple[str, int, str, StepResult]] = []
     overall_t0 = time.monotonic()
@@ -446,7 +491,8 @@ def main() -> int:
             name = STEP_NAMES[step_no]
             print(f"\n  ─── Step {step_no}: {name} ───", flush=True)
             res = run_step(step_no, sc, args.force, args.steps_override,
-                           with_docker=not args.no_docker)
+                           with_docker=not args.no_docker,
+                           exclude_observs=exclude_observs)
             row = format_row(sc.key, pos, len(selected_steps), name, res)
             print(row, flush=True)
             all_results.append((sc.key, step_no, name, res))
