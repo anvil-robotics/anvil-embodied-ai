@@ -146,8 +146,6 @@ anvil-embodied-ai/
 │   └── inference/                 # Dockerfile + entrypoint
 ├── scripts/
 │   ├── run_inference.sh           # Entry point for all inference scenarios
-│   ├── sync_model_zoo.sh          # rsync a model_zoo subfolder from a remote machine
-│   ├── training_metrics.sh        # Parse and display training metrics from W&B/logs
 │   └── plot_monitor_csv.py        # Plot obs.state / raw_output / control_cmd from CSV
 ├── tests/
 │   ├── smoke/                     # End-to-end smoke tests

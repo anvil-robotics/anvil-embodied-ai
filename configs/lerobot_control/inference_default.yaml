@@ -34,7 +34,7 @@ inference_tuning:
 
   # Diffusion — iterative denoising (UNet)
   diffusion:
-    n_action_steps: 10
+    n_action_steps: null
     # num_inference_steps: denoising steps at inference time.
     #   Default (null) = num_train_timesteps (100). Set 10 for real-time (78ms vs 711ms).
     num_inference_steps: 10

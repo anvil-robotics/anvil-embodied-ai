@@ -19,7 +19,7 @@ cp .env.example .env
 |----------|----------|-------------|
 | `MODEL_PATH` | Yes (inference) | Host path to checkpoint dir. Must be absolute or start with `./` — bare relative paths are treated as Docker named volumes. |
 | `ROS_DOMAIN_ID` | Yes | ROS2 domain ID — must match the Anvil Devbox. Leave empty for localhost-only. |
-| `CYCLONEDDS_URI` | Yes | Path to CycloneDDS XML config (e.g. `configs/cyclonedds/gpu_pc.xml`). |
+| `CYCLONEDDS_URI` | Yes | Path to CycloneDDS XML config (e.g. `configs/cyclonedds/two_pc_gpu.xml`). |
 | `LEROBOT_EXTRAS` | VLA only | Comma-separated policy extras built into the Docker image — e.g. `smolvla`, `pi,smolvla`. **Rebuild the image after changing:** `docker compose build`. ACT and Diffusion leave this empty. |
 | `HF_CACHE` | VLA only | Host path to HuggingFace model cache (default: `~/.cache/huggingface`). Required for Pi0, Pi0.5, SmolVLA — they load the PaliGemma tokenizer at runtime. |
 | `CONFIG_FILE` | Yes | Path to inference config YAML (default: `configs/lerobot_control/inference_default.yaml`). |
@@ -150,7 +150,7 @@ Both Fast DDS and CycloneDDS are supported. **CycloneDDS is the default** (faste
 |-----------|----------------------|------------------|---------------------------|
 | **Single-PC · CycloneDDS** *(default)* | `rmw_cyclonedds_cpp` | `file://.../single_pc.xml` | `ENABLE_CYCLONEDDS=true`<br>`CYCLONEDDS_PEER_IP=127.0.0.1` |
 | Single-PC · Fast DDS | `rmw_fastrtps_cpp` | *(ignored)* | `ENABLE_CYCLONEDDS=false` |
-| Two-PC · CycloneDDS | `rmw_cyclonedds_cpp` | `file://.../gpu_pc.xml` | `ENABLE_CYCLONEDDS=true`<br>`CYCLONEDDS_PEER_IP=<gpu_pc_ip>` |
+| Two-PC · CycloneDDS | `rmw_cyclonedds_cpp` | `file://.../two_pc_gpu.xml` | `ENABLE_CYCLONEDDS=true`<br>`CYCLONEDDS_PEER_IP=<gpu_pc_ip>` |
 
 All CycloneDDS configs live in `configs/cyclonedds/`. The defaults in `docker-compose.yml` and `.env.example` target single-PC CycloneDDS — override in `.env` to switch modes.
 
@@ -185,7 +185,7 @@ CYCLONEDDS_PEER_IP=127.0.0.1
 └─────────────────────────────┘    └────────────────────┘    └─────────────────────────────┘
 ```
 
-Set `CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/gpu_pc.xml` and configure peer IPs in both `gpu_pc.xml` and anvil-loader's `.env.config`. See the [full documentation](https://docs.anvil.bot/) for network setup.
+Set `CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/two_pc_gpu.xml` and configure peer IPs in both `two_pc_gpu.xml` and anvil-loader's `.env.config`. See the [full documentation](https://docs.anvil.bot/) for network setup.
 
 ---
 
