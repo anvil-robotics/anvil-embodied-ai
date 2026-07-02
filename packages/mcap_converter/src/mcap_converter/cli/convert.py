@@ -91,6 +91,28 @@ def collect_mcap_files(input_dir: str) -> List[Path]:
     return sorted(mcap_paths)
 
 
+def resolve_quality_skip_paths(quality_report_path: str | None, skip_flagged: str | None) -> dict:
+    """
+    Read a mcap-valid JSON report and return {resolved_path: severity} for the
+    episodes that should be skipped, based on the --skip-flagged threshold.
+
+    Returns {} if quality_report_path is None or skip_flagged is None — the
+    report is purely informational unless --skip-flagged is explicitly given.
+    """
+    if quality_report_path is None or skip_flagged is None:
+        return {}
+
+    with open(quality_report_path) as f:
+        payload = json.load(f)
+
+    skip_severities = {"critical"} if skip_flagged == "critical" else {"critical", "warning"}
+    return {
+        ep["path"]: ep["severity"]
+        for ep in payload.get("episodes", [])
+        if ep["severity"] in skip_severities
+    }
+
+
 def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
     """
     Quick scan to extract joint names from first JointState message.
@@ -198,6 +220,7 @@ def convert_session(
     max_episodes: int = None,
     mcap_files: List[Path] = None,
     debug_plot_episodes: int = 5,
+    quality_skip_paths: dict | None = None,
 ):
     """
     Convert MCAP session to LeRobot dataset
@@ -327,6 +350,7 @@ def convert_session(
     total_frames = 0
     episode_times = []
     episode_frame_counts = []
+    episode_original_indices = []
 
     with Progress(
         SpinnerColumn(),
@@ -343,11 +367,23 @@ def convert_session(
             status=f"{resume_from}/{len(mcap_files)} episodes",
         )
 
+        skip_paths = quality_skip_paths or {}
         for episode_idx, mcap_path in enumerate(mcap_files):
             if episode_idx < resume_from:
                 progress.advance(overall_task)
                 progress.update(overall_task, status=f"{episode_idx + 1}/{len(mcap_files)} episodes [dim](skipped)[/dim]")
                 console.print(f"  [dim]↷ [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}  skipped (already converted)[/dim]")
+                continue
+
+            quality_severity = skip_paths.get(str(mcap_path.resolve()))
+            if quality_severity is not None:
+                color = "red" if quality_severity == "critical" else "yellow"
+                progress.advance(overall_task)
+                progress.update(overall_task, status=f"{episode_idx + 1}/{len(mcap_files)} episodes [dim](skipped)[/dim]")
+                console.print(
+                    f"  [{color}]↷ [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
+                    f"  skipped (quality: {quality_severity})[/{color}]"
+                )
                 continue
 
             episode_start_time = time.time()
@@ -409,6 +445,7 @@ def convert_session(
                 )
                 episode_frame_counts.append(0)
                 episode_times.append(time.time() - episode_start_time)
+                episode_original_indices.append(episode_idx)
                 log(
                     f"[yellow]⚠ Skipped episode {mcap_path.name} — corrupt frame: "
                     f"{corrupt_frame_error}[/yellow]"
@@ -435,6 +472,7 @@ def convert_session(
                 )
                 episode_frame_counts.append(0)
                 episode_times.append(time.time() - episode_start_time)
+                episode_original_indices.append(episode_idx)
                 continue
 
             for robot, counts in stream_extractor.get_action_fill_stats().items():
@@ -462,6 +500,7 @@ def convert_session(
             episode_time = time.time() - episode_start_time
             episode_times.append(episode_time)
             episode_frame_counts.append(frame_count)
+            episode_original_indices.append(episode_idx)
             total_frames += frame_count
 
             # Mark episode done with green bar
@@ -536,8 +575,8 @@ def convert_session(
     ep_table.add_column("Frames", justify="right")
     ep_table.add_column("Duration", justify="right")
     ep_table.add_column("Speed", justify="right")
-    for i, mcap_path in enumerate(mcap_files[resume_from:], start=resume_from):
-        j = i - resume_from
+    for j, i in enumerate(episode_original_indices):
+        mcap_path = mcap_files[i]
         ep_fps = episode_frame_counts[j] / episode_times[j] if episode_times[j] > 0 else 0
         ep_table.add_row(
             str(i + 1),
@@ -654,6 +693,18 @@ examples:
         "--debug-plot-episodes", type=int, default=5,
         metavar="N",
         help="number of episodes to include in debug plots (default: 5)",
+    )
+    parser.add_argument(
+        "--quality-report", type=str, default=None,
+        help="path to a mcap-valid JSON report (from `mcap-valid --format json --output PATH`)",
+    )
+    parser.add_argument(
+        "--skip-flagged", nargs="?", choices=["critical", "warning"], const="critical", default=None,
+        help=(
+            "skip episodes flagged in --quality-report. Bare flag skips only critical "
+            "episodes (default); pass 'warning' to also skip warning-level episodes. "
+            "Requires --quality-report."
+        ),
     )
     args = parser.parse_args(args)
 
@@ -778,6 +829,10 @@ examples:
 
         # Convert session
         log("[bold]Starting conversion...[/bold]")
+        quality_skip_paths = resolve_quality_skip_paths(args.quality_report, args.skip_flagged)
+        if args.skip_flagged and not args.quality_report:
+            log("[yellow]⚠ --skip-flagged given without --quality-report — nothing will be skipped[/yellow]")
+
         dataset = convert_session(
             input_dir=args.input_dir,
             output_dir=args.output_dir,
@@ -794,6 +849,7 @@ examples:
             max_episodes=args.max_episodes,
             mcap_files=all_mcap_files,
             debug_plot_episodes=args.debug_plot_episodes,
+            quality_skip_paths=quality_skip_paths,
         )
 
         # Upload to Hub if requested
