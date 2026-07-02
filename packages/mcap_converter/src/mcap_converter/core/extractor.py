@@ -1062,6 +1062,59 @@ class BufferedStreamExtractor:
 
         return nearest_idx
 
+    def _resolve_action_position(
+        self,
+        robot: str,
+        buffer: deque,
+        target_ts: float,
+        obs_data: Dict[str, Dict[str, Any]],
+    ) -> Tuple[Optional[np.ndarray], str]:
+        """
+        Resolve the action position for one robot at target_ts, forward-filling
+        when the arm is disengaged (no live command in the sliding buffer).
+
+        Fallback order:
+        1. Nearest command in the live buffer ("exact").
+        2. Last command ever published for this robot, regardless of how long
+           ago ("hold_last") — the arm physically holds its last commanded
+           position when idle, so this reflects reality.
+        3. The robot's current measured joint position from obs_data
+           ("fallback_to_observation") — used when the robot has never
+           published a command yet in this episode (e.g. an idle arm at the
+           very start of a recording).
+        4. None ("dropped") — should not happen in practice since
+           observation data is dense, but kept as a safety net.
+
+        Returns:
+            (position, fill_kind) where position is a copy of the resolved
+            array, or None if fill_kind == "dropped".
+        """
+        if len(buffer) > 0:
+            nearest_idx = self._find_nearest_in_buffer(buffer, target_ts)
+            if nearest_idx is not None:
+                _, pos, _, _ = buffer[nearest_idx]
+                return pos.copy(), "exact"
+
+        last_known = self._last_known_action.get(robot)
+        if last_known is not None:
+            return last_known.copy(), "hold_last"
+
+        if robot in obs_data:
+            return obs_data[robot]["pos"].copy(), "fallback_to_observation"
+
+        return None, "dropped"
+
+    def _record_action_fill(self, robot: str, fill_kind: str) -> None:
+        """Increment the per-robot, per-episode gap-fill counter."""
+        stats = self._action_fill_stats.setdefault(
+            robot, {"exact": 0, "hold_last": 0, "fallback_to_observation": 0, "dropped": 0}
+        )
+        stats[fill_kind] += 1
+
+    def get_action_fill_stats(self) -> Dict[str, Dict[str, int]]:
+        """Return per-robot action gap-fill counters accumulated this episode."""
+        return self._action_fill_stats
+
     def _parse_joint_name(self, joint_name: str) -> Optional[Tuple[str, str, str]]:
         """Parse joint name using shared utility."""
         return parse_joint_name(joint_name, self._joint_pattern)
