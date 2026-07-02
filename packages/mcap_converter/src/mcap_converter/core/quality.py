@@ -12,9 +12,15 @@ in extractor.py:
 
 import statistics
 from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from mcap.exceptions import McapError
+from mcap.reader import make_reader as make_mcap_reader
+
 from ..config.schema import DataConfig
+from .extractor import message_timestamp
+from .reader import McapReader
 
 SEVERITY_OK = "ok"
 SEVERITY_WARNING = "warning"
@@ -296,3 +302,76 @@ def apply_batch_fps_check(
             replace(ep, severity=new_severity, passed=(new_severity != SEVERITY_CRITICAL), topics=new_topics)
         )
     return updated_reports
+
+
+def _summary_message_counts(mcap_path: str) -> Dict[str, int]:
+    """O(1) per-topic message counts from the MCAP footer summary (no full scan)."""
+    try:
+        with open(mcap_path, "rb") as f:
+            reader = make_mcap_reader(f)
+            summary = reader.get_summary()
+    except McapError:
+        return {}
+
+    if summary is None or summary.statistics is None:
+        return {}
+
+    id_to_topic = {cid: ch.topic for cid, ch in summary.channels.items()}
+    counts: Dict[str, int] = {}
+    for cid, count in summary.statistics.channel_message_counts.items():
+        topic = id_to_topic.get(cid)
+        if topic is not None:
+            counts[topic] = counts.get(topic, 0) + count
+    return counts
+
+
+def _collect_timestamps(mcap_path: str, topics: List[str]) -> Dict[str, List[float]]:
+    """Single-pass scan collecting message_timestamp() for each requested topic."""
+    reader = McapReader(mcap_path)
+    out: Dict[str, List[float]] = {t: [] for t in topics}
+    for msg in reader.read_messages(topics=topics):
+        out[msg.channel.topic].append(message_timestamp(msg))
+    return out
+
+
+def scan_episode(
+    mcap_path: str,
+    config: DataConfig,
+    thresholds: QualityThresholds,
+) -> EpisodeQualityReport:
+    """
+    Scan one MCAP episode file and produce a full quality report.
+
+    Session start/end are computed from the actual collected message
+    timestamps across all monitored topics — never from MCAP summary
+    file-level fields (those reflect the whole file, not any single topic,
+    and would misclassify legitimate action-topic idle gaps as dropframes).
+    """
+    counts = _summary_message_counts(mcap_path)
+    available = set(counts)
+    monitored = resolve_monitored_topics(config, available)
+
+    scan_topics = [m.topic for m in monitored if counts.get(m.topic, 0) > 0]
+    ts_map = _collect_timestamps(mcap_path, scan_topics) if scan_topics else {}
+
+    all_ts = [t for lst in ts_map.values() for t in lst]
+    session_start = min(all_ts) if all_ts else 0.0
+    session_end = max(all_ts) if all_ts else 0.0
+
+    topic_reports = [
+        analyze_topic_coverage(
+            ts_map.get(m.topic, []), session_start, session_end,
+            topic=m.topic, label=m.label, role=m.role,
+            thresholds=thresholds, action_from_observation=config.action_from_observation,
+        )
+        for m in monitored
+    ]
+
+    severity = worst_severity(r.severity for r in topic_reports)
+    return EpisodeQualityReport(
+        path=str(Path(mcap_path).resolve()),
+        duration_s=session_end - session_start,
+        severity=severity,
+        passed=(severity != SEVERITY_CRITICAL),
+        topics=topic_reports,
+    )

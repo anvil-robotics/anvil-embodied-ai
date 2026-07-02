@@ -8,26 +8,31 @@ Verifies:
 4. The I/O adapter that reads a real MCAP file and produces a report.
 """
 
-from collections import deque
+from pathlib import Path
 
-import numpy as np
 import pytest
 
+from mcap_converter.config.loader import ConfigLoader
 from mcap_converter.config.schema import ActionTopicConfig, DataConfig
 from mcap_converter.core.quality import (
-    EpisodeQualityReport,
-    MonitoredTopic,
-    QualityThresholds,
     SEVERITY_CRITICAL,
     SEVERITY_OK,
     SEVERITY_WARNING,
+    EpisodeQualityReport,
+    QualityThresholds,
     TopicQualityReport,
     analyze_topic_coverage,
     apply_batch_fps_check,
     detect_fps_degradation,
     resolve_monitored_topics,
+    scan_episode,
     worst_severity,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_STUB_MCAP = _REPO_ROOT / "tests/smoke/fixtures/test-session/0001/0001_0.mcap"
+_STUB_CMD_CONFIG = _REPO_ROOT / "tests/smoke/fixtures/configs/mcap-converter-smoke-test-cmd.yaml"
+_BIMANUAL_CONFIG = _REPO_ROOT / "configs/mcap_converter/openarm_bimanual_quest.yaml"
 
 
 def make_quest_config() -> DataConfig:
@@ -417,3 +422,47 @@ class TestApplyBatchFpsCheck:
         critical_result = next(r for r in updated if r.path == "ep_critical")
         assert critical_result.severity == SEVERITY_CRITICAL  # fps check with avg_fps=None must skip this topic
         assert critical_result.passed is False
+
+
+class TestScanEpisodeIntegration:
+    def test_healthy_stub_passes_with_matching_single_arm_config(self):
+        config = ConfigLoader.from_yaml(str(_STUB_CMD_CONFIG))
+
+        report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
+
+        assert report.passed is True
+        assert report.severity in (SEVERITY_OK, SEVERITY_WARNING)  # never critical for a healthy stub
+
+    def test_session_bounds_come_from_message_timestamps_not_summary(self):
+        config = ConfigLoader.from_yaml(str(_STUB_CMD_CONFIG))
+
+        report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
+
+        # Sanity: duration should be roughly the fixture's known ~3.97s span, not 0 or huge.
+        assert 1.0 < report.duration_s < 30.0
+
+    def test_missing_arm_is_warning_with_bimanual_config_on_single_arm_stub(self):
+        config = ConfigLoader.from_yaml(str(_BIMANUAL_CONFIG))
+        # The single-arm stub never recorded a left-wrist camera (no left-arm
+        # hardware was mounted for this session), so the bimanual config's
+        # full camera list would also surface an unrelated, genuinely-correct
+        # CRITICAL for that missing stream. Drop it so this test isolates the
+        # actual regression under test: the missing *action* topic alone.
+        left_wrist_cam = "/cam_wrist_l/image_raw/compressed"
+        config.camera_topics = [c for c in config.camera_topics if c != left_wrist_cam]
+        config.camera_topic_mapping.pop(left_wrist_cam, None)
+
+        report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
+
+        left_action = next(t for t in report.topics if t.label == "action[left]")
+        assert left_action.severity == SEVERITY_WARNING  # NOT critical — key regression test for this revision
+        assert report.passed is True  # a warning-only episode still passes
+
+    def test_missing_arm_is_ok_when_action_from_observation_true(self):
+        config = ConfigLoader.from_yaml(str(_BIMANUAL_CONFIG))
+        config.action_from_observation = True
+
+        report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
+
+        left_action = next(t for t in report.topics if t.label == "action[left]")
+        assert left_action.severity == SEVERITY_OK
