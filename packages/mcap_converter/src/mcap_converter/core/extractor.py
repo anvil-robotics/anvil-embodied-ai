@@ -1216,6 +1216,8 @@ class BufferedStreamExtractor:
         vel = np.array([], dtype=np.float32)
         eff = np.array([], dtype=np.float32)
 
+        self._last_known_action[robot] = pos.copy()
+
         # Append as tuple: (timestamp, position, velocity, effort)
         joint_buffers[key]["buffer"].append((timestamp, pos, vel, eff))
 
