@@ -193,10 +193,13 @@ uv run anvil-trainer \
 
 Diffusion's `DiffusionRgbEncoder` applies `RandomCrop` during training and `CenterCrop` during inference — the switch is automatic, no inference-time config needed.
 
+> **`--policy.resize_shape` is required to activate crop.** LeRobot only derives `crop_shape` from `crop_ratio` when `resize_shape` is also set — `crop_is_random`/`crop_ratio` alone are silently ignored, with no warning or error. `resize_shape` takes `(H, W)`; match it to your dataset's stored resolution (e.g. `[270, 480]` for a 480×270 16:9 dataset).
+
 ```bash
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
+  --policy.resize_shape='[270,480]' \
   --policy.crop_is_random=true \
   --policy.crop_ratio=0.9
 ```
@@ -209,6 +212,7 @@ uv run anvil-trainer \
   --policy.type=diffusion \
   --dataset.image_transforms.enable=true \
   --dataset.image_transforms.max_num_transforms=3 \
+  --policy.resize_shape='[270,480]' \
   --policy.crop_is_random=true \
   --policy.crop_ratio=0.9
 ```
@@ -309,9 +313,59 @@ uv run anvil-trainer \
 | `--policy.down_dims` | `[512,1024,2048]` | `[256,512,1024]` | Smaller UNet reduces overfitting on small datasets |
 | `--backbone` | `resnet18` | `resnet18` | Auto-disables GroupNorm for pretrained ImageNet weights |
 
+**Image resolution — avoid letterbox waste**
+
+If your cameras natively output 1920×1080 (16:9) but the dataset was converted with the default `image_resolution: [640, 480]` (4:3), the converter's aspect-preserving resize pads roughly 25% of every frame with black bars — wasted activation memory and diluted visual signal, for zero information gained.
+
+Use the matching `_16x9` converter config instead — e.g. `configs/mcap_converter/openarm_ee_bimanual_16x9.yaml` or `configs/mcap_converter/openarm_bimanual_quest_16x9.yaml` — which sets `image_resolution: [480, 270]`, an exact ÷4 downscale of 1920×1080 with zero padding:
+
+```bash
+uv run mcap-convert -i data/raw_sessions/my-session \
+  --config configs/mcap_converter/openarm_ee_bimanual_16x9.yaml \
+  -o data/datasets
+```
+
+This requires reconverting the dataset — the black bars are baked into the stored video pixels, so `--policy.resize_shape` at train time can only shrink them further, it can't recover the wasted 25%.
+
 **Steps and batch size**
 
-100k steps / batch 64 is a solid default. Diffusion benefits more from larger batch sizes than ACT — this reduces score-matching variance and stabilizes training. On a 24 GB GPU with 3–4 cameras, batch 16–32 is the practical ceiling. Use `--policy.resize_shape="[256,320]"` to shrink images if you need headroom for a larger batch.
+100k steps is a solid default. Diffusion benefits more from larger batch sizes than ACT — this reduces score-matching variance and stabilizes training.
+
+Two levers raise the practical batch-size ceiling on a 24 GB GPU well past the old 16–32 rule of thumb:
+
+| Lever | How | Effect |
+|---|---|---|
+| 16:9 dataset conversion | Use a `_16x9` converter config (above) | Removes ~25% letterbox waste, smaller per-image tensor |
+| bf16 mixed precision | `export ACCELERATE_MIXED_PRECISION=bf16` before training | Roughly halves activation memory. Zero code change: `anvil-trainer` calls LeRobot's `lerobot_train()` directly, and `Accelerate()` reads this env var automatically |
+
+```bash
+export ACCELERATE_MIXED_PRECISION=bf16
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-16x9-dataset \
+  --policy.type=diffusion \
+  --policy.resize_shape='[270,480]' \
+  --policy.crop_is_random=true --policy.crop_ratio=0.9 \
+  --batch_size=48 \
+  --steps=100000
+```
+
+Combining both, batch 48 (4 cameras, 2 obs steps, `resnet18`, `down_dims=[512,1024,2048]`, `horizon=16`) ran stably at ~1.5s/step on a single RTX 4090 (24 GB) — 6× the old default of 8. Batch 64 fit in VRAM without OOM but slowed to ~5s/step once the CUDA allocator started thrashing near the memory ceiling — worse throughput despite more headroom on paper. Treat that as a signal to back off, not a target: find your ceiling empirically with a short `--steps=200` dry run before committing to a long run, and watch step time, not just `nvidia-smi`, to catch allocator thrashing.
+
+**Reference: official `diffusion_policy` benchmark settings**
+
+For context on how these batch sizes compare to the published research, here are [Chi et al., 2023](https://arxiv.org/abs/2303.04137)'s own training settings for image-based tasks (PH = "proficient-human" demonstrations, the robomimic standard-quality demo set):
+
+| Task | Demonstrations | Batch Size | Epochs | Source |
+|---|---|---|---|---|
+| Lift (PH) | 200 | 64 | 3050 | paper Table III; `diffusion_policy/config/train_diffusion_unet_hybrid_workspace.yaml` |
+| Can (PH) | 200 | 64 | 3050 | same |
+| Square (PH) | 200 | 64 | 3050 | same |
+| Transport (PH) | 200 | 64 | 3050 | same |
+| Tool Hang (PH) | 200 | 64 | 3050 | same |
+| PushT (sim) | 200 per paper Table III; the shipped `diffusion_policy/config/task/pusht_image.yaml` caps training at `max_train_episodes: 90` — both numbers kept rather than merged, since the repo and paper disagree | 64 | 3050 | paper Table III; `config/task/pusht_image.yaml` |
+| Real PushT (real robot) | 136 | 64 | 600 | paper text; `diffusion_policy/config/train_diffusion_unet_real_image_workspace.yaml` |
+
+`batch_size=64` is the standard across nearly every published image task — our own batch 48 on a single 4090 is in the same range, not an outlier. Note the official repo trains by **epoch** (full passes over the dataset) rather than by step count like `lerobot`/`anvil-trainer`; converting these to an equivalent step count would require each task's per-episode frame count, which isn't published in the repo or paper, so it's deliberately omitted here rather than estimated.
 
 ---
 
