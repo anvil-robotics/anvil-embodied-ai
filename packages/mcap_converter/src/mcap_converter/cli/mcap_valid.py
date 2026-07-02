@@ -34,6 +34,18 @@ _status_console = Console(stderr=True)
 _SEVERITY_COLOR = {SEVERITY_OK: "green", SEVERITY_WARNING: "yellow", SEVERITY_CRITICAL: "red"}
 
 
+def _summary_line(reports) -> str:
+    """Build the one-line episode-count summary shared by the table and Markdown report."""
+    n_error = sum(1 for r in reports if r.read_error)
+    n_ok = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_OK)
+    n_warn = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_WARNING)
+    n_crit = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_CRITICAL)
+    return (
+        f"{len(reports)} episodes: {n_ok} ok, {n_warn} warning, {n_crit} critical"
+        + (f", {n_error} unreadable" if n_error else "")
+    )
+
+
 def _render_table(reports, *, verbose: bool) -> None:
     table = Table(title="mcap-valid report")
     table.add_column("Episode")
@@ -64,14 +76,7 @@ def _render_table(reports, *, verbose: bool) -> None:
         lines = [f"[{_SEVERITY_COLOR[t.severity]}]{t.label}[/{_SEVERITY_COLOR[t.severity]}]: {t.reason}" for t in flagged]
         console.print(Panel("\n".join(lines), title=Path(r.path).name, border_style=_SEVERITY_COLOR[r.severity]))
 
-    n_error = sum(1 for r in reports if r.read_error)
-    n_ok = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_OK)
-    n_warn = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_WARNING)
-    n_crit = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_CRITICAL)
-    console.print(
-        f"\n{len(reports)} episodes: {n_ok} ok, {n_warn} warning, {n_crit} critical"
-        + (f", {n_error} unreadable" if n_error else "")
-    )
+    console.print(f"\n{_summary_line(reports)}")
 
 
 def default_report_paths(input_path: Path) -> tuple[Path, Path]:
@@ -94,14 +99,7 @@ def render_markdown_report(reports, *, input_path: str, config_path: str | None)
     Unlike the terminal table (which hides healthy detail by default), this
     always lists every episode and every topic, regardless of severity.
     """
-    n_error = sum(1 for r in reports if r.read_error)
-    n_ok = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_OK)
-    n_warn = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_WARNING)
-    n_crit = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_CRITICAL)
-    summary = (
-        f"{len(reports)} episodes: {n_ok} ok, {n_warn} warning, {n_crit} critical"
-        + (f", {n_error} unreadable" if n_error else "")
-    )
+    summary = _summary_line(reports)
 
     lines = [
         "# mcap-valid Report",
@@ -186,6 +184,10 @@ examples:
     )
 
     input_path = Path(parsed.input)
+    if not input_path.exists():
+        _status_console.print(f"[red]✗ input path does not exist: {input_path}[/red]")
+        return 1
+
     mcap_files = [input_path] if input_path.is_file() else sorted(input_path.glob("**/*.mcap"))
 
     reports = [scan_episode(str(p), config, thresholds) for p in mcap_files]

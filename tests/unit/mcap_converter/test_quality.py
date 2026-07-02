@@ -683,6 +683,19 @@ class TestMcapValidCli:
         assert (tmp_path / "mcap_valid_reports" / "test-session.md").exists()
         assert custom_output.exists()
 
+    def test_nonexistent_input_path_errors_without_writing_reports(self, tmp_path, monkeypatch):
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+
+        exit_code = main([
+            "-i", str(tmp_path / "does-not-exist"),
+            "--config", str(_STUB_CMD_CONFIG),
+        ])
+
+        assert exit_code != 0
+        assert not (tmp_path / "mcap_valid_reports").exists()
+
 
 class TestDefaultReportPaths:
     def test_directory_input_uses_directory_name(self, tmp_path):
@@ -851,3 +864,27 @@ class TestRenderMarkdownReport:
 
         for tag in ("[green]", "[/green]", "[yellow]", "[/yellow]", "[red]", "[/red]"):
             assert tag not in output
+
+    def test_empty_reports_list_produces_valid_document_without_crashing(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        output = render_markdown_report([], input_path="some/input", config_path=None)
+
+        assert isinstance(output, str)
+        assert "# mcap-valid Report" in output
+        assert "0 episodes: 0 ok, 0 warning, 0 critical" in output
+        assert "### " not in output
+
+    def test_summary_line_is_byte_for_byte_identical_to_render_table(self, capsys):
+        from mcap_converter.cli.mcap_valid import _render_table, render_markdown_report
+
+        reports = self._make_reports()
+
+        _render_table(reports, verbose=False)
+        table_output = capsys.readouterr().out
+        table_summary = [line for line in table_output.splitlines() if line.strip()][-1]
+
+        md_output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+        md_summary = next(line for line in md_output.splitlines() if line.startswith(f"{len(reports)} episodes:"))
+
+        assert table_summary == md_summary
