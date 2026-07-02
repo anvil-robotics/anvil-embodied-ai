@@ -317,11 +317,11 @@ uv run anvil-trainer \
 
 If your cameras natively output 1920×1080 (16:9) but the dataset was converted with the default `image_resolution: [640, 480]` (4:3), the converter's aspect-preserving resize pads roughly 25% of every frame with black bars — wasted activation memory and diluted visual signal, for zero information gained.
 
-Use the matching `_16x9` converter config instead — e.g. `configs/mcap_converter/openarm_ee_bimanual_16x9.yaml` or `configs/mcap_converter/openarm_bimanual_quest_16x9.yaml` — which sets `image_resolution: [480, 270]`, an exact ÷4 downscale of 1920×1080 with zero padding:
+Use the matching `_16x9` converter config instead — e.g. `configs/mcap_converter/openarm_bimanual_quest_16x9.yaml` — which sets `image_resolution: [480, 270]`, an exact ÷4 downscale of 1920×1080 with zero padding:
 
 ```bash
 uv run mcap-convert -i data/raw_sessions/my-session \
-  --config configs/mcap_converter/openarm_ee_bimanual_16x9.yaml \
+  --config configs/mcap_converter/openarm_bimanual_quest_16x9.yaml \
   -o data/datasets
 ```
 

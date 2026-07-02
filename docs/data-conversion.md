@@ -10,12 +10,15 @@ Convert MCAP recordings into LeRobot v3.0 datasets.
 
 Pick the config that matches your recording setup:
 
-| Config | Teleop mode | Arms | Action source |
-|--------|-------------|------|---------------|
-| `openarm_bimanual.yaml` | Leader-follower | Bimanual | Leader joint positions |
-| `openarm_bimanual_quest.yaml` | Quest VR | Bimanual | Command topics |
-| `openarm_single_quest.yaml` | Quest VR | Single (right) | Command topics |
-| `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | Observation lookahead |
+| Config | Teleop mode | Arms | Action source | Camera aspect |
+|--------|-------------|------|---------------|---------------|
+| `openarm_bimanual.yaml` | Leader-follower | Bimanual | Leader joint positions | 4:3 (640×480) |
+| `openarm_bimanual_quest.yaml` | Quest VR | Bimanual | Command topics | 4:3 (640×480) |
+| `openarm_bimanual_quest_16x9.yaml` | Quest VR | Bimanual | Command topics | 16:9 (480×270) |
+| `openarm_single_quest.yaml` | Quest VR | Single (right) | Command topics | 4:3 (640×480) |
+| `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | Observation lookahead | 4:3 (640×480) |
+
+`_16x9` variants set `image_resolution: [480, 270]`, an exact ÷4 downscale of 1920×1080 source cameras with zero letterbox padding. Use the matching `_16x9` config instead of the 4:3 default if your cameras natively output 1920×1080 — see [docs/training.md](training.md#diffusion) for details.
 
 **action_from_observation** — used by `openarm_single_quest_afo.yaml` when `/follower_*/commands` was not recorded. Instead of reading from command topics, the converter derives actions from the follower's own joint positions shifted N frames forward in time. Enable in your conversion config YAML:
 
