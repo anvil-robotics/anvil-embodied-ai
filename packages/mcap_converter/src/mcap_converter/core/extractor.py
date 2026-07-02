@@ -588,6 +588,19 @@ class BufferedStreamExtractor:
         # Cache for action topic reorder permutations: {topic: np.ndarray}
         self._action_reorder_cache: Dict[str, np.ndarray] = {}
 
+        # Last known action position per robot ("" for single-arm, "left"/"right"
+        # for bimanual) — used to forward-fill action frames when an arm is
+        # disengaged (no new command published). Updated in
+        # _buffer_action_command() and is NOT evicted by the sliding buffer
+        # window, so a command published long ago can still be reused.
+        self._last_known_action: Dict[str, np.ndarray] = {}
+
+        # Per-robot, per-episode gap-fill counters, keyed by robot then by
+        # one of "exact" | "hold_last" | "fallback_to_observation" | "dropped".
+        # Reset implicitly per episode because BufferedStreamExtractor is
+        # constructed fresh for each MCAP file (see convert.py).
+        self._action_fill_stats: Dict[str, Dict[str, int]] = {}
+
     @staticmethod
     def _check_action_topics_present(mcap_path: str, action_topic_set: set) -> None:
         """Raise DataExtractionError when none of the configured action topics are in the MCAP.
