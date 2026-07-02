@@ -179,3 +179,41 @@ def test_align_joint_states_still_requires_observation_data():
     result = extractor._align_joint_states(joint_buffers, target_ts=1.0)
 
     assert result is None
+
+
+def test_init_joint_buffers_preseeds_action_key_for_every_configured_robot():
+    """Reproduces the real key-lifecycle bug: before this fix, an
+    ("action", robot) key didn't exist in joint_buffers until that robot's
+    first command message arrived, so _align_joint_states's action pass
+    would never visit it and the fallback-to-observation tier was
+    unreachable in production."""
+    extractor = make_extractor()
+
+    joint_buffers = extractor._init_joint_buffers()
+
+    assert ("action", "left") in joint_buffers
+    assert ("action", "right") in joint_buffers
+    assert joint_buffers[("action", "left")]["buffer"] == deque()
+    assert joint_buffers[("action", "right")]["buffer"] == deque()
+
+
+def test_align_joint_states_falls_back_to_observation_when_action_key_never_created():
+    """End-to-end reproduction using the REAL initializer (not a hand-built
+    dict), proving the fallback actually fires when a robot's action key
+    only exists because of pre-seeding, not because of a prior message."""
+    extractor = make_extractor()
+    joint_buffers = extractor._init_joint_buffers()
+    # Simulate: left has already published a command; right never has.
+    joint_buffers[("action", "left")]["buffer"].append(
+        (0.5, np.array([1.5, 1.5], dtype=np.float32), np.array([]), np.array([]))
+    )
+    joint_buffers[("observation", "left")] = {"buffer": _obs_buffer([(0.5, [1.0, 1.0])])}
+    joint_buffers[("observation", "right")] = {"buffer": _obs_buffer([(0.5, [0.0, 0.0])])}
+
+    result = extractor._align_joint_states(joint_buffers, target_ts=0.5)
+
+    assert result is not None
+    np.testing.assert_array_equal(
+        result["action"], np.array([1.5, 1.5, 0.0, 0.0], dtype=np.float32)
+    )
+    assert extractor.get_action_fill_stats()["right"]["fallback_to_observation"] == 1

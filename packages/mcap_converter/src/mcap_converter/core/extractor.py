@@ -679,7 +679,7 @@ class BufferedStreamExtractor:
         }
 
         # Joint state buffers: {(role, robot): {'buffer': deque, 'joint_names': list}}
-        joint_buffers: Dict[Tuple[str, str], Dict] = {}
+        joint_buffers = self._init_joint_buffers()
 
         # Build topic list for reading (cameras + joint states + action commands)
         all_topics = list(all_camera_topics)
@@ -1131,6 +1131,30 @@ class BufferedStreamExtractor:
     def _parse_joint_name(self, joint_name: str) -> Optional[Tuple[str, str, str]]:
         """Parse joint name using shared utility."""
         return parse_joint_name(joint_name, self._joint_pattern)
+
+    def _init_joint_buffers(self) -> Dict[Tuple[str, str], Dict]:
+        """
+        Create the initial joint_buffers dict for a new extraction run.
+
+        Pre-seeds an empty ("action", robot) entry for every robot configured
+        in action_topics, so _align_joint_states's action pass always visits
+        every configured robot from the first frame onward — even before that
+        robot has published its first command. Without this, a robot with no
+        live command yet would have no key in joint_buffers at all, and
+        _resolve_action_position's "fallback_to_observation" tier would never
+        be reached: the frame would instead be silently dropped by the
+        multi-robot consistency check further down in _align_joint_states.
+
+        Observation keys are NOT pre-seeded here — they're always created
+        densely and immediately by _buffer_joint_state from the continuous
+        /joint_states stream, so there's no equivalent gap for them.
+        """
+        joint_buffers: Dict[Tuple[str, str], Dict] = {}
+        for topic_cfg in self.config.action_topics.values():
+            key = ("action", topic_cfg.arm)
+            joint_names = sorted(topic_cfg.joint_order) if topic_cfg.joint_order else []
+            joint_buffers[key] = {"buffer": deque(), "joint_names": joint_names}
+        return joint_buffers
 
     def _buffer_joint_state(
         self,
