@@ -433,13 +433,40 @@ class TestScanEpisodeIntegration:
         assert report.passed is True
         assert report.severity in (SEVERITY_OK, SEVERITY_WARNING)  # never critical for a healthy stub
 
-    def test_session_bounds_come_from_message_timestamps_not_summary(self):
+    def test_duration_is_a_plausible_positive_value(self):
+        # NOTE: this used to be named
+        # test_session_bounds_come_from_message_timestamps_not_summary, but a
+        # loose `1.0 < duration_s < 30.0` range check can't actually tell
+        # timestamps-of-monitored-topics apart from file-wide-summary bounds.
+        # Investigated: in this fixture every channel (joint_states, all
+        # cameras, the action-command topic) spans the exact same range,
+        # 0.0 -> 3.966666627s, which is also exactly what the MCAP summary's
+        # file-level message_start_time/message_end_time report. So no
+        # config subset of this fixture can discriminate the two approaches.
+        # This test is renamed to describe what it actually checks; see
+        # test_duration_matches_manually_verified_monitored_topic_timestamps
+        # below for a test that pins the exact computation.
         config = ConfigLoader.from_yaml(str(_STUB_CMD_CONFIG))
 
         report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
 
-        # Sanity: duration should be roughly the fixture's known ~3.97s span, not 0 or huge.
         assert 1.0 < report.duration_s < 30.0
+
+    def test_duration_matches_manually_verified_monitored_topic_timestamps(self):
+        # Pins scan_episode's duration computation to a manually-verified
+        # exact value: `_collect_timestamps` on this fixture's
+        # /joint_states topic returns messages spanning exactly
+        # 0.0 -> 3.966666627 seconds (verified directly against the file).
+        # This doesn't discriminate "from timestamps" vs. "from file-wide
+        # summary" (they coincide in this fixture — see the note on
+        # test_duration_is_a_plausible_positive_value above), but it does
+        # pin the exact computed value to high precision, which the old
+        # loose range check did not.
+        config = ConfigLoader.from_yaml(str(_STUB_CMD_CONFIG))
+
+        report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
+
+        assert report.duration_s == pytest.approx(3.966666627, abs=1e-6)
 
     def test_missing_arm_is_warning_with_bimanual_config_on_single_arm_stub(self):
         config = ConfigLoader.from_yaml(str(_BIMANUAL_CONFIG))
@@ -466,3 +493,20 @@ class TestScanEpisodeIntegration:
 
         left_action = next(t for t in report.topics if t.label == "action[left]")
         assert left_action.severity == SEVERITY_OK
+
+    def test_nonexistent_file_produces_read_error_not_a_crash(self):
+        report = scan_episode("/no/such/file.mcap", ConfigLoader.get_default(), QualityThresholds())
+
+        assert report.passed is False
+        assert report.severity == SEVERITY_CRITICAL
+        assert report.read_error is not None
+        assert report.topics == []
+
+    def test_corrupt_file_produces_read_error_not_a_misleading_report(self, tmp_path):
+        garbage_file = tmp_path / "corrupt.mcap"
+        garbage_file.write_bytes(b"this is not a valid mcap file at all, just garbage bytes")
+
+        report = scan_episode(str(garbage_file), ConfigLoader.get_default(), QualityThresholds())
+
+        assert report.passed is False
+        assert report.read_error is not None

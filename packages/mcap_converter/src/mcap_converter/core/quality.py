@@ -76,6 +76,7 @@ class EpisodeQualityReport:
     severity: str
     passed: bool
     topics: List[TopicQualityReport] = field(default_factory=list)
+    read_error: Optional[str] = None  # set when the file itself couldn't be read/parsed
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -305,13 +306,17 @@ def apply_batch_fps_check(
 
 
 def _summary_message_counts(mcap_path: str) -> Dict[str, int]:
-    """O(1) per-topic message counts from the MCAP footer summary (no full scan)."""
-    try:
-        with open(mcap_path, "rb") as f:
-            reader = make_mcap_reader(f)
-            summary = reader.get_summary()
-    except McapError:
-        return {}
+    """
+    O(1) per-topic message counts from the MCAP footer summary (no full scan).
+
+    Raises OSError (including FileNotFoundError) or McapError if the file
+    cannot be opened or parsed — callers (scan_episode) must catch these to
+    produce a clear "file unreadable" result rather than letting a bad file
+    look like a real recording with zero messages.
+    """
+    with open(mcap_path, "rb") as f:
+        reader = make_mcap_reader(f)
+        summary = reader.get_summary()
 
     if summary is None or summary.statistics is None:
         return {}
@@ -346,8 +351,24 @@ def scan_episode(
     timestamps across all monitored topics — never from MCAP summary
     file-level fields (those reflect the whole file, not any single topic,
     and would misclassify legitimate action-topic idle gaps as dropframes).
+
+    If the file itself cannot be opened or parsed, this returns a report
+    with severity=CRITICAL, passed=False, no topics, and read_error set to
+    a human-readable message — distinct from a genuinely-recorded-but-empty
+    file, so a caller (e.g. a CLI) can tell "bad file" from "bad recording."
     """
-    counts = _summary_message_counts(mcap_path)
+    try:
+        counts = _summary_message_counts(mcap_path)
+    except (OSError, McapError) as exc:
+        return EpisodeQualityReport(
+            path=str(Path(mcap_path).resolve()),
+            duration_s=0.0,
+            severity=SEVERITY_CRITICAL,
+            passed=False,
+            topics=[],
+            read_error=f"{type(exc).__name__}: {exc}",
+        )
+
     available = set(counts)
     monitored = resolve_monitored_topics(config, available)
 
