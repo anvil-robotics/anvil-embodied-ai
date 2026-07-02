@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 FIXTURES_ROOT = Path(__file__).resolve().parents[2] / "smoke" / "fixtures" / "test-session"
 
 
@@ -153,3 +155,59 @@ class TestQualitySkipMiddleEpisode:
             f"got {third_row_index} — this indicates the misattribution bug "
             "episode_original_indices was introduced to fix"
         )
+
+
+class TestParseEpisodeIndexSpec:
+    def test_single_list(self):
+        from mcap_converter.cli.convert import parse_episode_index_spec
+
+        assert parse_episode_index_spec("1,2,5,6", total_episodes=10) == {1, 2, 5, 6}
+
+    def test_range_end_is_exclusive(self):
+        from mcap_converter.cli.convert import parse_episode_index_spec
+
+        assert parse_episode_index_spec("1:4", total_episodes=10) == {1, 2, 3}
+
+    def test_open_ended_range_to_end(self):
+        from mcap_converter.cli.convert import parse_episode_index_spec
+
+        assert parse_episode_index_spec("2:", total_episodes=6) == {2, 3, 4, 5, 6}
+
+    def test_open_ended_range_from_start(self):
+        from mcap_converter.cli.convert import parse_episode_index_spec
+
+        assert parse_episode_index_spec(":4", total_episodes=10) == {1, 2, 3}
+
+    def test_mixed_list_and_ranges(self):
+        from mcap_converter.cli.convert import parse_episode_index_spec
+
+        assert parse_episode_index_spec("1,3:5,8", total_episodes=10) == {1, 3, 4, 8}
+
+    def test_whitespace_tolerated(self):
+        from mcap_converter.cli.convert import parse_episode_index_spec
+
+        assert parse_episode_index_spec("1, 3:5, 8", total_episodes=10) == {1, 3, 4, 8}
+
+    def test_out_of_range_raises(self):
+        from mcap_converter.cli.convert import parse_episode_index_spec
+
+        with pytest.raises(ValueError):
+            parse_episode_index_spec("11", total_episodes=10)
+
+    def test_start_equal_to_end_raises(self):
+        from mcap_converter.cli.convert import parse_episode_index_spec
+
+        with pytest.raises(ValueError):
+            parse_episode_index_spec("3:3", total_episodes=10)
+
+    def test_start_greater_than_end_raises(self):
+        from mcap_converter.cli.convert import parse_episode_index_spec
+
+        with pytest.raises(ValueError):
+            parse_episode_index_spec("5:2", total_episodes=10)
+
+    def test_non_integer_raises(self):
+        from mcap_converter.cli.convert import parse_episode_index_spec
+
+        with pytest.raises(ValueError):
+            parse_episode_index_spec("abc", total_episodes=10)

@@ -113,6 +113,44 @@ def resolve_quality_skip_paths(quality_report_path: str | None, skip_flagged: st
     }
 
 
+def parse_episode_index_spec(spec: str, total_episodes: int) -> set:
+    """
+    Parse a 1-based episode index spec into a concrete set of indices.
+
+    Colon ranges follow Python slice convention: the end is EXCLUSIVE, e.g.
+    "1:4" selects episodes 1, 2, 3 (not 4) — same as Python's range(1, 4).
+    An omitted start defaults to 1; an omitted end reaches the actual last
+    episode inclusively (there's nothing to exclude when no end is given).
+    """
+    result: set = set()
+    for raw_token in spec.split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+        if ":" in token:
+            start_str, end_str = token.split(":", 1)
+            start_str, end_str = start_str.strip(), end_str.strip()
+            try:
+                start = int(start_str) if start_str else 1
+                end = int(end_str) if end_str else total_episodes + 1
+            except ValueError:
+                raise ValueError(f"invalid episode range token: '{token}'")
+            if start >= end:
+                raise ValueError(f"invalid range '{token}': start must be less than end (end is exclusive)")
+            if start < 1 or end > total_episodes + 1:
+                raise ValueError(f"range '{token}' out of bounds — episodes are numbered 1 to {total_episodes}")
+            result.update(range(start, end))
+        else:
+            try:
+                idx = int(token)
+            except ValueError:
+                raise ValueError(f"invalid episode index token: '{token}'")
+            if not (1 <= idx <= total_episodes):
+                raise ValueError(f"episode index {idx} out of range (1-{total_episodes})")
+            result.add(idx)
+    return result
+
+
 def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
     """
     Quick scan to extract joint names from first JointState message.
@@ -221,6 +259,7 @@ def convert_session(
     mcap_files: List[Path] = None,
     debug_plot_episodes: int = 5,
     quality_skip_paths: dict | None = None,
+    skip_episode_indices: set | None = None,
 ):
     """
     Convert MCAP session to LeRobot dataset
@@ -383,6 +422,15 @@ def convert_session(
                 console.print(
                     f"  [{color}]↷ [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
                     f"  skipped (quality: {quality_severity})[/{color}]"
+                )
+                continue
+
+            if skip_episode_indices and (episode_idx + 1) in skip_episode_indices:
+                progress.advance(overall_task)
+                progress.update(overall_task, status=f"{episode_idx + 1}/{len(mcap_files)} episodes [dim](skipped)[/dim]")
+                console.print(
+                    f"  [cyan]↷ [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
+                    f"  skipped (manual index)[/cyan]"
                 )
                 continue
 
@@ -706,6 +754,16 @@ examples:
             "Requires --quality-report."
         ),
     )
+    parser.add_argument(
+        "--skip-episode-idx", type=str, default=None,
+        help=(
+            "manually skip specific episodes by 1-based index, independent of "
+            "--quality-report. Accepts a comma-separated list (1,2,5,6), a "
+            "colon range with an EXCLUSIVE end matching Python slice convention "
+            "(1:4 selects episodes 1,2,3 — NOT 4), an open-ended range (2: or :4), "
+            "or a mix (1,3:5,8). Whitespace is tolerated."
+        ),
+    )
     args = parser.parse_args(args)
 
     # Resolve output path: --output-path wins; otherwise <output-dir>/<input-dir-name>/
@@ -749,6 +807,16 @@ examples:
 
     # Collect MCAP files once (reused for fps detection and conversion)
     all_mcap_files = collect_mcap_files(args.input_dir)
+
+    # Validate --skip-episode-idx early (before any output-dir mutation below)
+    skip_episode_indices = None
+    if args.skip_episode_idx:
+        try:
+            skip_episode_indices = parse_episode_index_spec(args.skip_episode_idx, len(all_mcap_files))
+        except ValueError as exc:
+            console.print(f"[red]✗ --skip-episode-idx error: {exc}[/red]")
+            exit(1)
+        log(f"Manually skipping {len(skip_episode_indices)} episode(s) by index: {sorted(skip_episode_indices)}")
 
     # Always auto-detect input fps from all episodes (fast — reads MCAP summary only)
     ref_topic = list(config.camera_topic_mapping.keys())[0] if config.camera_topic_mapping else None
@@ -852,6 +920,7 @@ examples:
             mcap_files=all_mcap_files,
             debug_plot_episodes=args.debug_plot_episodes,
             quality_skip_paths=quality_skip_paths,
+            skip_episode_indices=skip_episode_indices,
         )
 
         # Upload to Hub if requested
