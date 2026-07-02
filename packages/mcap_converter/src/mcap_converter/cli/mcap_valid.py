@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -73,7 +74,10 @@ def _render_table(reports, *, verbose: bool) -> None:
         flagged = [t for t in r.topics if t.severity != SEVERITY_OK] if not verbose else r.topics
         if not flagged:
             continue
-        lines = [f"[{_SEVERITY_COLOR[t.severity]}]{t.label}[/{_SEVERITY_COLOR[t.severity]}]: {t.reason}" for t in flagged]
+        lines = [
+            f"[{_SEVERITY_COLOR[t.severity]}]{escape(t.label)}[/{_SEVERITY_COLOR[t.severity]}]: {escape(t.reason)}"
+            for t in flagged
+        ]
         console.print(Panel("\n".join(lines), title=Path(r.path).name, border_style=_SEVERITY_COLOR[r.severity]))
 
     console.print(f"\n{_summary_line(reports)}")

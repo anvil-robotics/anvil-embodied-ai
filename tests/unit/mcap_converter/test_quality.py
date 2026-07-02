@@ -322,6 +322,18 @@ class TestAnalyzeTopicCoverageAction:
 
         assert not any(g.kind in ("leading", "trailing") for g in report.gaps)
 
+    def test_idle_gap_reason_includes_time_range(self):
+        # timestamps with a single arm-idle gap from 3.0s to 10.0s within a 15s session
+        timestamps = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 10.0, 10.5, 11.0, 11.5, 12.0]
+        report = analyze_topic_coverage(
+            timestamps, session_start=0.0, session_end=15.0,
+            topic="/some/action/topic", label="action[left]", role="action",
+            thresholds=_thresholds(action_warn_gap_s=1.0),
+        )
+        assert report.severity == SEVERITY_WARNING
+        assert "3.0s~10.0s" in report.reason
+        assert "7.00s" in report.reason  # duration of the gap (10.0 - 3.0)
+
 
 class TestAnalyzeTopicCoverageMetrics:
     def test_coverage_and_gap_metrics_are_computed(self):
@@ -695,6 +707,28 @@ class TestMcapValidCli:
 
         assert exit_code != 0
         assert not (tmp_path / "mcap_valid_reports").exists()
+
+    def test_verbose_table_shows_full_action_label_not_swallowed_by_rich_markup(self, tmp_path, monkeypatch, capsys):
+        # Regression test for Rich markup swallowing "[left]"/"[right]" out of
+        # "action[left]"/"action[right]" labels when embedded unescaped in a
+        # markup f-string. The bimanual config against the single-arm stub
+        # produces both an action[left] (zero-message, warning) and an
+        # action[right] (present) topic — exactly the scenario that triggered
+        # the original bug. --verbose forces the panel to render even for
+        # topics/episodes that would otherwise be hidden.
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        exit_code = main([
+            "-i", str(_STUB_MCAP),
+            "--config", str(_BIMANUAL_CONFIG),
+            "--verbose",
+        ])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "action[left]" in captured.out
+        assert "action[right]" in captured.out
 
 
 class TestDefaultReportPaths:
