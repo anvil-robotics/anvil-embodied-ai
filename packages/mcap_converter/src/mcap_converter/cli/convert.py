@@ -387,6 +387,20 @@ def convert_session(
             except ValueError as exc:
                 corrupt_frame_error = exc
 
+            for robot, counts in stream_extractor.get_action_fill_stats().items():
+                filled = counts["hold_last"] + counts["fallback_to_observation"]
+                if filled == 0 and counts["dropped"] == 0:
+                    continue
+                robot_label = robot or "action"
+                dropped_suffix = (
+                    f", [red]{counts['dropped']} dropped[/red]" if counts["dropped"] else ""
+                )
+                console.print(
+                    f"    [yellow]↺[/yellow] {robot_label}: {counts['exact']} exact, "
+                    f"{counts['hold_last']} hold-last, "
+                    f"{counts['fallback_to_observation']} fallback-to-obs{dropped_suffix}"
+                )
+
             if corrupt_frame_error is not None:
                 # Discard any partially-buffered frames for this episode
                 if dataset.has_pending_frames():
