@@ -74,6 +74,8 @@ def _render_table(reports, *, verbose: bool) -> None:
         flagged = [t for t in r.topics if t.severity != SEVERITY_OK] if not verbose else r.topics
         if not flagged:
             continue
+        # escape(): labels like "action[left]" would otherwise be parsed as Rich
+        # markup tags, silently dropping the bracketed arm suffix from the output.
         lines = [
             f"[{_SEVERITY_COLOR[t.severity]}]{escape(t.label)}[/{_SEVERITY_COLOR[t.severity]}]: {escape(t.reason)}"
             for t in flagged

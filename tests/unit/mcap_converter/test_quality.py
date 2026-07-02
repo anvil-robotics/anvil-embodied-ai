@@ -331,8 +331,27 @@ class TestAnalyzeTopicCoverageAction:
             thresholds=_thresholds(action_warn_gap_s=1.0),
         )
         assert report.severity == SEVERITY_WARNING
-        assert "3.0s~10.0s" in report.reason
+        assert "3.00s~10.00s" in report.reason
         assert "7.00s" in report.reason  # duration of the gap (10.0 - 3.0)
+
+    def test_idle_gap_reason_picks_earliest_gap_when_durations_tie(self):
+        # dense messages (0.5s apart, below the 1.0s threshold) except for two
+        # idle gaps of exactly equal duration (2.0s each): 3.0s-5.0s and 8.0s-10.0s.
+        # max(..., key=...) must deterministically pick the first-encountered (earliest) one.
+        timestamps = (
+            [round(i * 0.5, 1) for i in range(7)]  # 0.0..3.0
+            + [round(5.0 + i * 0.5, 1) for i in range(7)]  # 5.0..8.0
+            + [round(10.0 + i * 0.5, 1) for i in range(5)]  # 10.0..12.0
+        )
+        report = analyze_topic_coverage(
+            timestamps, session_start=0.0, session_end=15.0,
+            topic="/some/action/topic", label="action[left]", role="action",
+            thresholds=_thresholds(action_warn_gap_s=1.0),
+        )
+        assert report.severity == SEVERITY_WARNING
+        assert sum(1 for g in report.gaps if g.kind == "idle") == 2
+        assert "3.00s~5.00s" in report.reason
+        assert "8.00s~10.00s" not in report.reason
 
 
 class TestAnalyzeTopicCoverageMetrics:

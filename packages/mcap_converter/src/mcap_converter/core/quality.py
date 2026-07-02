@@ -214,7 +214,7 @@ def analyze_topic_coverage(
             severity = SEVERITY_WARNING
             longest = max(gaps, key=lambda g: g.duration_s)
             reason = (
-                f"{len(gaps)} 個 idle gap，範圍 {longest.start_s:.1f}s~{longest.end_s:.1f}s"
+                f"{len(gaps)} 個 idle gap，範圍 {longest.start_s:.2f}s~{longest.end_s:.2f}s"
                 f"（持續 {longest.duration_s:.2f}s，正常，手臂未操作）"
             )
         else:
