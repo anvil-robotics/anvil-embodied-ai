@@ -591,3 +591,38 @@ class TestMcapValidCli:
         # The read_error message itself must appear, not just the word "error" —
         # this is the regression the plan revision was written to catch.
         assert "InvalidMagic" in captured.out or "not a valid" in captured.out.lower() or "Errno" in captured.out
+
+    def test_directory_scan_covers_all_episodes_and_runs_batch_fps_check(self, capsys):
+        from mcap_converter.cli.mcap_valid import main
+
+        # tests/smoke/fixtures/test-session/ contains 5 numbered episode
+        # subdirectories (0001-0005), each with one .mcap file.
+        stub_session_dir = _STUB_MCAP.parent.parent
+
+        exit_code = main([
+            "-i", str(stub_session_dir),
+            "--config", str(_STUB_CMD_CONFIG),
+            "--format", "json",
+        ])
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert len(payload["episodes"]) == 5  # all 5 stub episodes discovered
+        assert exit_code == 0
+
+    def test_table_format_with_output_still_writes_json_file(self, tmp_path, capsys):
+        from mcap_converter.cli.mcap_valid import main
+
+        out_file = tmp_path / "report.json"
+        main([
+            "-i", str(_STUB_MCAP), "--config", str(_STUB_CMD_CONFIG),
+            "--output", str(out_file),  # no --format flag -> defaults to table
+        ])
+
+        captured = capsys.readouterr()
+        # Table was printed to stdout...
+        assert "mcap-valid report" in captured.out
+        # ...AND the JSON file was also written correctly.
+        payload = json.loads(out_file.read_text())
+        assert "episodes" in payload
+        assert len(payload["episodes"]) == 1
