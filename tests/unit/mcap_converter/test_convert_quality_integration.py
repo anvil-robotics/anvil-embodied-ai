@@ -1,8 +1,9 @@
 """Tests for mcap-convert's --quality-report / --skip-flagged integration."""
 
 import json
+from pathlib import Path
 
-import pytest
+FIXTURES_ROOT = Path(__file__).resolve().parents[2] / "smoke" / "fixtures" / "test-session"
 
 
 def _write_report(tmp_path, episodes):
@@ -46,3 +47,109 @@ class TestResolveQualitySkipSet:
         skip_set = resolve_quality_skip_paths(str(report), skip_flagged="warning")
 
         assert set(skip_set.keys()) == {"/a.mcap", "/b.mcap"}
+
+
+def _single_camera_config():
+    """A minimal DataConfig with exactly one camera.
+
+    Using a single camera avoids LeRobotDataset's multi-camera parallel video
+    encoding path (ProcessPoolExecutor), keeping this test fast and
+    deterministic while still exercising a real conversion end-to-end.
+    """
+    from mcap_converter.config.schema import (
+        ActionTopicConfig,
+        DataConfig,
+        FeatureMapping,
+        JointNamePattern,
+    )
+
+    return DataConfig(
+        robot_state_topic="/joint_states",
+        joint_name_pattern=JointNamePattern(separator="_", source={"follower": "observation"}, arms={"r": "right"}),
+        action_topics={
+            "/follower_r_forward_position_controller/commands": ActionTopicConfig(
+                arm="right",
+                joint_order=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"],
+            )
+        },
+        action_from_observation=False,
+        camera_topics=["/cam_waist/image_raw/compressed"],
+        camera_topic_mapping={"/cam_waist/image_raw/compressed": "waist"},
+        image_resolution=[640, 480],
+        observation_feature_mapping=FeatureMapping(state="position", others=[]),
+        action_feature_mapping=FeatureMapping(state="position", others=[]),
+    )
+
+
+def _episode_row_index(output: str, mcap_filename: str) -> str:
+    """Extract the '#' column value of the per-episode table row for a given MCAP filename.
+
+    The Rich table renders rows as cells separated by box-drawing "│"
+    characters (and the whole table is itself nested inside an outer panel
+    border), e.g.: "│    │ 3 │ 0003_0.mcap │    119 │ ...". Splitting on "│"
+    and taking the cell immediately before the filename cell gives the row's
+    "#" column value.
+    """
+    for line in output.splitlines():
+        if mcap_filename not in line:
+            continue
+        cells = [cell.strip() for cell in line.split("│")]
+        for i, cell in enumerate(cells):
+            if cell == mcap_filename and i > 0:
+                return cells[i - 1]
+    raise AssertionError(f"No table row found for {mcap_filename!r} in captured output:\n{output}")
+
+
+class TestQualitySkipMiddleEpisode:
+    """Regression test for episode_original_indices: quality-skip on a
+    non-prefix, non-trailing episode must not misattribute frame counts /
+    table rows to the wrong original episode index (see commit that
+    introduced episode_original_indices)."""
+
+    def test_skip_middle_episode_preserves_original_indices(self, capsys):
+        from mcap_converter.cli.convert import collect_mcap_files, convert_session
+
+        mcap_files = collect_mcap_files(str(FIXTURES_ROOT))[:3]
+        assert len(mcap_files) == 3, "expected at least 3 fixture episodes under tests/smoke/fixtures/test-session"
+
+        middle_episode = mcap_files[1]
+        quality_skip_paths = {str(middle_episode.resolve()): "critical"}
+
+        def run(tmp_path):
+            return convert_session(
+                input_dir=str(FIXTURES_ROOT),
+                output_dir=str(tmp_path / "out"),
+                repo_id="testuser/quality-skip-middle",
+                robot_type="anvil_openarm",
+                fps=30,
+                config=_single_camera_config(),
+                mcap_files=mcap_files,
+                quality_skip_paths=quality_skip_paths,
+                debug_plot_episodes=0,
+            )
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = run(Path(tmp))
+
+        captured = capsys.readouterr()
+
+        # (a) no crash — the skip of a non-prefix episode must not raise IndexError
+        # when zipping episode_frame_counts/episode_times against mcap_files.
+        assert dataset.meta.total_episodes == 2, "middle episode should be skipped, leaving 2 converted episodes"
+
+        # (b) the per-episode table must attribute frames to the TRUE original
+        # index (1-based), not a positionally-shifted index from the filtered
+        # (post-skip) sequence.
+        first_row_index = _episode_row_index(captured.out, mcap_files[0].name)
+        third_row_index = _episode_row_index(captured.out, mcap_files[2].name)
+
+        assert first_row_index == "1", (
+            f"expected {mcap_files[0].name} to be labeled episode 1, got {first_row_index}"
+        )
+        assert third_row_index == "3", (
+            f"expected {mcap_files[2].name} to be labeled episode 3 (its true original index), "
+            f"got {third_row_index} — this indicates the misattribution bug "
+            "episode_original_indices was introduced to fix"
+        )

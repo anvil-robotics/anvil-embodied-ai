@@ -738,6 +738,11 @@ examples:
         config = ConfigLoader.get_default()
         log("Using default configuration")
 
+    # Validate --quality-report early (before any output-dir mutation below)
+    quality_skip_paths = resolve_quality_skip_paths(args.quality_report, args.skip_flagged)
+    if args.skip_flagged and not args.quality_report:
+        log("[yellow]⚠ --skip-flagged given without --quality-report — nothing will be skipped[/yellow]")
+
     if args.act_from_obs_n_step is not None:
         config.action_from_observation_n = args.act_from_obs_n_step
         log(f"action_from_observation_n overridden to [bold]{args.act_from_obs_n_step}[/bold] via --act-from-obs-n-step")
@@ -829,9 +834,6 @@ examples:
 
         # Convert session
         log("[bold]Starting conversion...[/bold]")
-        quality_skip_paths = resolve_quality_skip_paths(args.quality_report, args.skip_flagged)
-        if args.skip_flagged and not args.quality_report:
-            log("[yellow]⚠ --skip-flagged given without --quality-report — nothing will be skipped[/yellow]")
 
         dataset = convert_session(
             input_dir=args.input_dir,
