@@ -114,3 +114,195 @@ class TestResolveMonitoredTopics:
         joint_states = next(m for m in monitored if m.label == "joint_states")
         assert joint_states.topic == "/joint_states"
         assert joint_states.role == "stream"
+
+
+from mcap_converter.core.quality import analyze_topic_coverage
+
+
+def _thresholds(**overrides) -> QualityThresholds:
+    return QualityThresholds(**overrides)
+
+
+class TestAnalyzeTopicCoverageStream:
+    def test_dense_stream_no_gaps_is_ok(self):
+        # 30fps for 1 second: 30 evenly spaced timestamps
+        timestamps = [i / 30.0 for i in range(30)]
+
+        report = analyze_topic_coverage(
+            timestamps, session_start=0.0, session_end=timestamps[-1],
+            topic="/joint_states", label="joint_states", role="stream",
+            thresholds=_thresholds(),
+        )
+
+        assert report.severity == SEVERITY_OK
+        assert report.gaps == []
+        assert report.message_count == 30
+        assert report.avg_fps == pytest.approx(30.0, rel=0.05)
+
+    def test_mid_stream_dropframe_is_critical(self):
+        # dense up to t=1.0, then a 2s gap, then dense again
+        timestamps = [i / 30.0 for i in range(30)] + [3.0 + i / 30.0 for i in range(30)]
+
+        report = analyze_topic_coverage(
+            timestamps, session_start=0.0, session_end=timestamps[-1],
+            topic="/joint_states", label="joint_states", role="stream",
+            thresholds=_thresholds(),
+        )
+
+        assert report.severity == SEVERITY_CRITICAL
+        assert any(g.kind == "dropframe" for g in report.gaps)
+
+    def test_leading_gap_is_critical(self):
+        timestamps = [i / 30.0 for i in range(30)]
+        session_start = timestamps[0] - 5.0  # session began 5s before first message
+
+        report = analyze_topic_coverage(
+            timestamps, session_start=session_start, session_end=timestamps[-1],
+            topic="/joint_states", label="joint_states", role="stream",
+            thresholds=_thresholds(),
+        )
+
+        assert report.severity == SEVERITY_CRITICAL
+        assert any(g.kind == "leading" for g in report.gaps)
+
+    def test_trailing_gap_is_critical(self):
+        timestamps = [i / 30.0 for i in range(30)]
+        session_end = timestamps[-1] + 5.0  # session continued 5s after last message
+
+        report = analyze_topic_coverage(
+            timestamps, session_start=timestamps[0], session_end=session_end,
+            topic="/joint_states", label="joint_states", role="stream",
+            thresholds=_thresholds(),
+        )
+
+        assert report.severity == SEVERITY_CRITICAL
+        assert any(g.kind == "trailing" for g in report.gaps)
+
+    def test_zero_messages_is_critical(self):
+        report = analyze_topic_coverage(
+            [], session_start=0.0, session_end=10.0,
+            topic="/joint_states", label="joint_states", role="stream",
+            thresholds=_thresholds(),
+        )
+
+        assert report.severity == SEVERITY_CRITICAL
+        assert report.message_count == 0
+        assert report.avg_fps is None
+
+    def test_single_message_is_critical(self):
+        report = analyze_topic_coverage(
+            [5.0], session_start=0.0, session_end=10.0,
+            topic="/joint_states", label="joint_states", role="stream",
+            thresholds=_thresholds(),
+        )
+
+        assert report.severity == SEVERITY_CRITICAL
+
+    def test_high_fps_jitter_is_not_falsely_flagged(self):
+        # 60fps with occasional jitter up to 0.2s — below the 0.5s floor, should not flag
+        timestamps = [0.0]
+        for _ in range(59):
+            timestamps.append(timestamps[-1] + 1 / 60.0)
+        timestamps[30] = timestamps[29] + 0.2  # one jittery interval, still < floor
+
+        report = analyze_topic_coverage(
+            sorted(timestamps), session_start=timestamps[0], session_end=max(timestamps),
+            topic="/joint_states", label="joint_states", role="stream",
+            thresholds=_thresholds(stream_min_gap_s=0.5),
+        )
+
+        assert report.severity == SEVERITY_OK
+
+    def test_unsorted_timestamps_are_sorted_before_analysis(self):
+        timestamps = [i / 30.0 for i in range(30)]
+        shuffled = list(reversed(timestamps))
+
+        report = analyze_topic_coverage(
+            shuffled, session_start=0.0, session_end=timestamps[-1],
+            topic="/joint_states", label="joint_states", role="stream",
+            thresholds=_thresholds(),
+        )
+
+        assert report.severity == SEVERITY_OK  # would be nonsense/negative intervals if not sorted
+
+    def test_avg_fps_is_none_when_all_timestamps_identical(self):
+        report = analyze_topic_coverage(
+            [1.0, 1.0, 1.0], session_start=0.0, session_end=2.0,
+            topic="/joint_states", label="joint_states", role="stream",
+            thresholds=_thresholds(),
+        )
+
+        assert report.avg_fps is None  # ts[-1] == ts[0] would otherwise divide by zero
+
+
+class TestAnalyzeTopicCoverageAction:
+    def test_zero_messages_without_afo_is_warning_not_critical(self):
+        report = analyze_topic_coverage(
+            [], session_start=0.0, session_end=10.0,
+            topic="/follower_r_.../commands", label="action[right]", role="action",
+            thresholds=_thresholds(), action_from_observation=False,
+        )
+
+        assert report.severity == SEVERITY_WARNING  # NOT critical — could be a single-arm task
+
+    def test_zero_messages_with_afo_is_ok(self):
+        report = analyze_topic_coverage(
+            [], session_start=0.0, session_end=10.0,
+            topic="/follower_r_.../commands", label="action[right]", role="action",
+            thresholds=_thresholds(), action_from_observation=True,
+        )
+
+        assert report.severity == SEVERITY_OK
+
+    def test_long_idle_gap_is_warning_not_critical(self):
+        # published at t=1.0, then idle for 5s, then again at t=6.0
+        timestamps = [1.0, 6.0]
+
+        report = analyze_topic_coverage(
+            timestamps, session_start=0.0, session_end=7.0,
+            topic="/follower_r_.../commands", label="action[right]", role="action",
+            thresholds=_thresholds(action_warn_gap_s=1.0),
+        )
+
+        assert report.severity == SEVERITY_WARNING
+        assert any(g.kind == "idle" for g in report.gaps)
+
+    def test_dense_action_is_ok(self):
+        timestamps = [i * 0.1 for i in range(20)]  # 10Hz, no idle gaps
+
+        report = analyze_topic_coverage(
+            timestamps, session_start=0.0, session_end=timestamps[-1],
+            topic="/follower_r_.../commands", label="action[right]", role="action",
+            thresholds=_thresholds(action_warn_gap_s=1.0),
+        )
+
+        assert report.severity == SEVERITY_OK
+        assert report.avg_fps is None  # action topics don't get a fixed-rate fps figure
+
+    def test_action_leading_and_trailing_gaps_are_not_flagged(self):
+        # action starts late and ends early relative to session — this is normal idle,
+        # not a leading/trailing dropframe like a stream would have.
+        timestamps = [3.0, 3.1, 3.2]
+
+        report = analyze_topic_coverage(
+            timestamps, session_start=0.0, session_end=10.0,
+            topic="/follower_r_.../commands", label="action[right]", role="action",
+            thresholds=_thresholds(action_warn_gap_s=1.0),
+        )
+
+        assert not any(g.kind in ("leading", "trailing") for g in report.gaps)
+
+
+class TestAnalyzeTopicCoverageMetrics:
+    def test_coverage_and_gap_metrics_are_computed(self):
+        timestamps = [1.0, 6.0]  # one 5s idle gap out of a 10s session
+
+        report = analyze_topic_coverage(
+            timestamps, session_start=0.0, session_end=10.0,
+            topic="t", label="t", role="action",
+            thresholds=_thresholds(action_warn_gap_s=1.0),
+        )
+
+        assert report.total_gap_s == pytest.approx(5.0)
+        assert report.longest_gap_s == pytest.approx(5.0)
+        assert report.coverage_ratio == pytest.approx(0.5)
