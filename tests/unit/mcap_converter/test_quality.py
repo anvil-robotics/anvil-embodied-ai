@@ -510,3 +510,86 @@ class TestScanEpisodeIntegration:
 
         assert report.passed is False
         assert report.read_error is not None
+
+
+import json
+
+
+class TestMcapValidCli:
+    def test_json_output_is_valid_and_exit_code_zero_without_critical(self, capsys):
+        from mcap_converter.cli.mcap_valid import main
+
+        exit_code = main([
+            "-i", str(_STUB_MCAP),
+            "--config", str(_STUB_CMD_CONFIG),
+            "--format", "json",
+            "--fail-on-critical",
+        ])
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert "episodes" in payload
+        assert len(payload["episodes"]) == 1
+        assert exit_code == 0
+
+    def test_fail_on_critical_exits_nonzero_when_critical_present(self, capsys, tmp_path):
+        from mcap_converter.cli.mcap_valid import main
+
+        # Point camera_topics at something that doesn't exist in the stub -> critical.
+        bad_config_path = tmp_path / "bad.yaml"
+        bad_config_path.write_text(
+            "robot_state_topic: \"/joint_states\"\n"
+            "camera_topics:\n  - \"/nonexistent_camera/image_raw\"\n"
+            "camera_topic_mapping:\n  \"/nonexistent_camera/image_raw\": \"missing_cam\"\n"
+        )
+
+        exit_code = main([
+            "-i", str(_STUB_MCAP),
+            "--config", str(bad_config_path),
+            "--format", "json",
+            "--fail-on-critical",
+        ])
+
+        assert exit_code == 1
+
+    def test_output_file_is_written(self, tmp_path):
+        from mcap_converter.cli.mcap_valid import main
+
+        out_file = tmp_path / "report.json"
+        main([
+            "-i", str(_STUB_MCAP), "--config", str(_STUB_CMD_CONFIG),
+            "--format", "json", "--output", str(out_file),
+        ])
+
+        payload = json.loads(out_file.read_text())
+        assert "episodes" in payload
+
+    def test_unreadable_file_is_reported_not_crashed_and_fails_on_critical(self, tmp_path, capsys):
+        from mcap_converter.cli.mcap_valid import main
+
+        garbage_file = tmp_path / "corrupt.mcap"
+        garbage_file.write_bytes(b"not a real mcap file")
+
+        exit_code = main([
+            "-i", str(garbage_file), "--config", str(_STUB_CMD_CONFIG),
+            "--format", "json", "--fail-on-critical",
+        ])
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert payload["episodes"][0]["read_error"] is not None
+        assert exit_code == 1
+
+    def test_unreadable_file_shown_in_table_output(self, tmp_path, capsys):
+        from mcap_converter.cli.mcap_valid import main
+
+        garbage_file = tmp_path / "corrupt.mcap"
+        garbage_file.write_bytes(b"not a real mcap file")
+
+        main(["-i", str(garbage_file), "--config", str(_STUB_CMD_CONFIG)])
+
+        captured = capsys.readouterr()
+        assert "error" in captured.out.lower()
+        # The read_error message itself must appear, not just the word "error" —
+        # this is the regression the plan revision was written to catch.
+        assert "InvalidMagic" in captured.out or "not a valid" in captured.out.lower() or "Errno" in captured.out
