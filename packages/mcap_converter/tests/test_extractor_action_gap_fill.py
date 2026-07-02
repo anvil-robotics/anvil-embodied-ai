@@ -106,3 +106,76 @@ def test_record_action_fill_accumulates_counts_per_robot():
     stats = extractor.get_action_fill_stats()
     assert stats["right"] == {"exact": 1, "hold_last": 2, "fallback_to_observation": 0, "dropped": 0}
     assert stats["left"] == {"exact": 1, "hold_last": 0, "fallback_to_observation": 0, "dropped": 0}
+
+
+def _obs_buffer(ts_pos_pairs):
+    buf = deque()
+    for ts, pos in ts_pos_pairs:
+        buf.append((ts, np.array(pos, dtype=np.float32), np.array([]), np.array([])))
+    return buf
+
+
+def _action_buffer(ts_pos_pairs):
+    return _obs_buffer(ts_pos_pairs)
+
+
+def test_align_joint_states_keeps_episode_going_through_mid_episode_gap():
+    """Reproduces the real bug: right arm goes idle mid-episode, frame must survive."""
+    extractor = make_extractor()
+    # Right arm published once at t=7.0 then went idle (disengaged) — its
+    # buffer has been evicted by the time we're aligning t=12.0.
+    extractor._last_known_action["right"] = np.array([9.0, 9.0], dtype=np.float32)
+
+    joint_buffers = {
+        ("observation", "left"): {"buffer": _obs_buffer([(12.0, [1.0, 1.0])])},
+        ("observation", "right"): {"buffer": _obs_buffer([(12.0, [9.0, 9.0])])},
+        ("action", "left"): {"buffer": _action_buffer([(12.0, [2.0, 2.0])])},
+        ("action", "right"): {"buffer": deque()},  # idle — nothing live
+    }
+
+    result = extractor._align_joint_states(joint_buffers, target_ts=12.0)
+
+    assert result is not None
+    np.testing.assert_array_equal(
+        result["action"], np.array([2.0, 2.0, 9.0, 9.0], dtype=np.float32)
+    )
+    stats = extractor.get_action_fill_stats()
+    assert stats["right"]["hold_last"] == 1
+    assert stats["left"]["exact"] == 1
+
+
+def test_align_joint_states_falls_back_to_observation_at_episode_start():
+    """Reproduces the head-of-episode gap: right arm never engaged yet."""
+    extractor = make_extractor()
+    # No entry in _last_known_action["right"] — it has never published.
+
+    joint_buffers = {
+        ("observation", "left"): {"buffer": _obs_buffer([(0.5, [1.0, 1.0])])},
+        ("observation", "right"): {"buffer": _obs_buffer([(0.5, [0.0, 0.0])])},
+        ("action", "left"): {"buffer": _action_buffer([(0.5, [1.5, 1.5])])},
+        ("action", "right"): {"buffer": deque()},
+    }
+
+    result = extractor._align_joint_states(joint_buffers, target_ts=0.5)
+
+    assert result is not None
+    np.testing.assert_array_equal(
+        result["action"], np.array([1.5, 1.5, 0.0, 0.0], dtype=np.float32)
+    )
+    assert extractor.get_action_fill_stats()["right"]["fallback_to_observation"] == 1
+
+
+def test_align_joint_states_still_requires_observation_data():
+    """Observation-role handling must be unchanged: missing observation still drops the frame."""
+    extractor = make_extractor()
+
+    joint_buffers = {
+        ("observation", "left"): {"buffer": deque()},  # missing observation — must still drop
+        ("observation", "right"): {"buffer": _obs_buffer([(1.0, [0.0, 0.0])])},
+        ("action", "left"): {"buffer": _action_buffer([(1.0, [1.0, 1.0])])},
+        ("action", "right"): {"buffer": _action_buffer([(1.0, [0.0, 0.0])])},
+    }
+
+    result = extractor._align_joint_states(joint_buffers, target_ts=1.0)
+
+    assert result is None

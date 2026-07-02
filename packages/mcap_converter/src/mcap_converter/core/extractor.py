@@ -934,27 +934,41 @@ class BufferedStreamExtractor:
         obs_data = {}  # {robot: {pos, vel, eff}}
         action_data = {}  # {robot: {pos}}
 
+        # Pass 1: observation — required, no fallback (unchanged behavior).
+        # Action fallback (pass 2 below) needs obs_data fully populated first,
+        # which is why this is a separate pass rather than one combined loop.
         for (role, robot), data in joint_buffers.items():
+            if role != "observation":
+                continue
             buffer = data["buffer"]
 
             if len(buffer) == 0:
-                return None  # Required joint data missing
+                return None  # Required observation data missing
 
-            # Find nearest joint state sample for observation
             nearest_idx = self._find_nearest_in_buffer(buffer, target_ts)
             if nearest_idx is None:
                 return None
 
             ts, pos, vel, eff = buffer[nearest_idx]
+            obs_data[robot] = {
+                "pos": pos.copy(),
+                "vel": vel.copy() if vel.size > 0 else None,
+                "eff": eff.copy() if eff.size > 0 else None,
+            }
 
-            if role == "observation":
-                obs_data[robot] = {
-                    "pos": pos.copy(),
-                    "vel": vel.copy() if vel.size > 0 else None,
-                    "eff": eff.copy() if eff.size > 0 else None,
-                }
-            else:  # action
-                action_data[robot] = {"pos": pos.copy()}
+        # Pass 2: action — forward-fill instead of dropping the whole frame
+        # when the arm is disengaged. See _resolve_action_position docstring
+        # for the fallback order.
+        for (role, robot), data in joint_buffers.items():
+            if role != "action":
+                continue
+            pos, fill_kind = self._resolve_action_position(
+                robot, data["buffer"], target_ts, obs_data
+            )
+            self._record_action_fill(robot, fill_kind)
+            if pos is None:
+                return None  # No action and no observation fallback available
+            action_data[robot] = {"pos": pos}
 
         # Fallback: use observation at action_ts (t+1) as action when action_topics
         # are configured but not recorded in this MCAP.
@@ -1089,11 +1103,10 @@ class BufferedStreamExtractor:
             (position, fill_kind) where position is a copy of the resolved
             array, or None if fill_kind == "dropped".
         """
-        if len(buffer) > 0:
+        if buffer:
             nearest_idx = self._find_nearest_in_buffer(buffer, target_ts)
-            if nearest_idx is not None:
-                _, pos, _, _ = buffer[nearest_idx]
-                return pos.copy(), "exact"
+            _, pos, _, _ = buffer[nearest_idx]
+            return pos.copy(), "exact"
 
         last_known = self._last_known_action.get(robot)
         if last_known is not None:
