@@ -12,7 +12,7 @@ in extractor.py:
 
 import statistics
 from dataclasses import asdict, dataclass, field
-from typing import Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from ..config.schema import DataConfig
 
@@ -218,3 +218,84 @@ def analyze_topic_coverage(
         coverage_ratio=coverage, total_gap_s=total_gap, longest_gap_s=longest_gap,
         gaps=gaps, severity=severity, reason=reason,
     )
+
+
+def detect_fps_degradation(
+    episode_fps: Dict[str, float],
+    thresholds: QualityThresholds,
+) -> Dict[str, Tuple[bool, str]]:
+    """
+    Compare each episode's fps for one topic against the median of the
+    OTHER episodes in the batch (leave-one-out).
+
+    Uses the median (not max) as the reference so a single noisy high outlier
+    doesn't set an unreachable bar for the rest of the batch. Leave-one-out
+    (excluding the episode under test from its own reference) matters most
+    for small batches: an inclusive median gets pulled toward the very
+    episode it's supposed to judge, which can mask real degradation.
+    """
+    if not episode_fps:
+        return {}
+    result = {}
+    for path, fps in episode_fps.items():
+        others = [v for p, v in episode_fps.items() if p != path]
+        if not others:
+            result[path] = (False, "")
+            continue
+        reference = statistics.median(others)
+        if fps < reference * (1 - thresholds.fps_degradation_tolerance):
+            reason = f"fps 退化：本集 {fps:.1f}fps vs 同批中位數 {reference:.1f}fps"
+            result[path] = (True, reason)
+        else:
+            result[path] = (False, "")
+    return result
+
+
+def apply_batch_fps_check(
+    reports: List[EpisodeQualityReport],
+    thresholds: QualityThresholds,
+) -> List[EpisodeQualityReport]:
+    """
+    Cross-episode pass: detect stream topics whose fps has degraded relative
+    to the rest of the batch, and upgrade OK -> WARNING for those topics.
+    Never downgrades an existing CRITICAL/WARNING severity.
+    """
+    # Group avg_fps by (topic, label) across all episodes that have it.
+    by_key: Dict[Tuple[str, str], Dict[str, float]] = {}
+    for ep in reports:
+        for t in ep.topics:
+            if t.role == "stream" and t.avg_fps is not None:
+                by_key.setdefault((t.topic, t.label), {})[ep.path] = t.avg_fps
+
+    degraded_by_path_and_key: Dict[Tuple[str, str, str], str] = {}
+    for key, episode_fps in by_key.items():
+        for path, (is_degraded, reason) in detect_fps_degradation(episode_fps, thresholds).items():
+            if is_degraded:
+                degraded_by_path_and_key[(path, *key)] = reason
+
+    updated_reports = []
+    for ep in reports:
+        new_topics = []
+        for t in ep.topics:
+            reason_key = (ep.path, t.topic, t.label)
+            if reason_key in degraded_by_path_and_key and t.severity == SEVERITY_OK:
+                new_topics.append(
+                    TopicQualityReport(
+                        topic=t.topic, label=t.label, role=t.role,
+                        message_count=t.message_count, avg_fps=t.avg_fps,
+                        coverage_ratio=t.coverage_ratio, total_gap_s=t.total_gap_s,
+                        longest_gap_s=t.longest_gap_s, gaps=t.gaps,
+                        severity=SEVERITY_WARNING,
+                        reason=f"{t.reason}; {degraded_by_path_and_key[reason_key]}".strip("; "),
+                    )
+                )
+            else:
+                new_topics.append(t)
+        new_severity = worst_severity(t.severity for t in new_topics)
+        updated_reports.append(
+            EpisodeQualityReport(
+                path=ep.path, duration_s=ep.duration_s, severity=new_severity,
+                passed=(new_severity != SEVERITY_CRITICAL), topics=new_topics,
+            )
+        )
+    return updated_reports

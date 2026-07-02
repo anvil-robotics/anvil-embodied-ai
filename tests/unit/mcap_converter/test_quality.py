@@ -15,12 +15,16 @@ import pytest
 
 from mcap_converter.config.schema import ActionTopicConfig, DataConfig
 from mcap_converter.core.quality import (
+    EpisodeQualityReport,
     MonitoredTopic,
     QualityThresholds,
     SEVERITY_CRITICAL,
     SEVERITY_OK,
     SEVERITY_WARNING,
+    TopicQualityReport,
     analyze_topic_coverage,
+    apply_batch_fps_check,
+    detect_fps_degradation,
     resolve_monitored_topics,
     worst_severity,
 )
@@ -325,3 +329,76 @@ class TestAnalyzeTopicCoverageMetrics:
         assert report.total_gap_s == pytest.approx(5.0)
         assert report.longest_gap_s == pytest.approx(5.0)
         assert report.coverage_ratio == pytest.approx(0.5)
+
+
+class TestDetectFpsDegradation:
+    def test_episode_far_below_median_is_degraded(self):
+        episode_fps = {"ep0": 60.0, "ep1": 60.0, "ep2": 50.0}  # ep2 is ~17% below median 60
+
+        result = detect_fps_degradation(episode_fps, _thresholds(fps_degradation_tolerance=0.15))
+
+        assert result["ep2"][0] is True
+        assert result["ep0"][0] is False
+        assert result["ep1"][0] is False
+
+    def test_all_similar_fps_none_degraded(self):
+        episode_fps = {"ep0": 60.0, "ep1": 59.0, "ep2": 61.0}
+
+        result = detect_fps_degradation(episode_fps, _thresholds(fps_degradation_tolerance=0.15))
+
+        assert all(not degraded for degraded, _ in result.values())
+
+    def test_single_episode_is_its_own_median_never_degraded(self):
+        episode_fps = {"ep0": 60.0}
+
+        result = detect_fps_degradation(episode_fps, _thresholds(fps_degradation_tolerance=0.15))
+
+        assert result["ep0"][0] is False
+
+
+class TestApplyBatchFpsCheck:
+    def test_ok_episode_upgraded_to_warning_on_degradation(self):
+        ok_topic = TopicQualityReport(
+            topic="/cam", label="chest", role="stream", message_count=100, avg_fps=50.0,
+            coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=SEVERITY_OK, reason="OK",
+        )
+        healthy_topic = TopicQualityReport(
+            topic="/cam", label="chest", role="stream", message_count=100, avg_fps=60.0,
+            coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=SEVERITY_OK, reason="OK",
+        )
+        degraded_ep = EpisodeQualityReport(
+            path="ep_degraded", duration_s=10.0, severity=SEVERITY_OK, passed=True, topics=[ok_topic],
+        )
+        healthy_ep = EpisodeQualityReport(
+            path="ep_healthy", duration_s=10.0, severity=SEVERITY_OK, passed=True, topics=[healthy_topic],
+        )
+
+        updated = apply_batch_fps_check([degraded_ep, healthy_ep], _thresholds(fps_degradation_tolerance=0.15))
+
+        degraded_result = next(r for r in updated if r.path == "ep_degraded")
+        assert degraded_result.severity == SEVERITY_WARNING
+        assert degraded_result.passed is True  # warning still passes
+        assert "fps" in degraded_result.topics[0].reason.lower()
+
+    def test_existing_critical_not_downgraded_by_fps_check(self):
+        critical_topic = TopicQualityReport(
+            topic="/cam", label="chest", role="stream", message_count=0, avg_fps=None,
+            coverage_ratio=0.0, total_gap_s=10.0, longest_gap_s=10.0,
+            severity=SEVERITY_CRITICAL, reason="stream topic 零訊息",
+        )
+        healthy_topic = TopicQualityReport(
+            topic="/cam", label="chest", role="stream", message_count=100, avg_fps=60.0,
+            coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=SEVERITY_OK, reason="OK",
+        )
+        critical_ep = EpisodeQualityReport(
+            path="ep_critical", duration_s=10.0, severity=SEVERITY_CRITICAL, passed=False, topics=[critical_topic],
+        )
+        healthy_ep = EpisodeQualityReport(
+            path="ep_healthy", duration_s=10.0, severity=SEVERITY_OK, passed=True, topics=[healthy_topic],
+        )
+
+        updated = apply_batch_fps_check([critical_ep, healthy_ep], _thresholds(fps_degradation_tolerance=0.15))
+
+        critical_result = next(r for r in updated if r.path == "ep_critical")
+        assert critical_result.severity == SEVERITY_CRITICAL  # fps check with avg_fps=None must skip this topic
+        assert critical_result.passed is False
