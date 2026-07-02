@@ -8,6 +8,7 @@ Verifies:
 4. The I/O adapter that reads a real MCAP file and produces a report.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -512,9 +513,6 @@ class TestScanEpisodeIntegration:
         assert report.read_error is not None
 
 
-import json
-
-
 class TestMcapValidCli:
     def test_json_output_is_valid_and_exit_code_zero_without_critical(self, capsys):
         from mcap_converter.cli.mcap_valid import main
@@ -532,7 +530,7 @@ class TestMcapValidCli:
         assert len(payload["episodes"]) == 1
         assert exit_code == 0
 
-    def test_fail_on_critical_exits_nonzero_when_critical_present(self, capsys, tmp_path):
+    def test_fail_on_critical_exits_nonzero_when_critical_present(self, tmp_path):
         from mcap_converter.cli.mcap_valid import main
 
         # Point camera_topics at something that doesn't exist in the stub -> critical.
