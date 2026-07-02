@@ -11,7 +11,7 @@ in extractor.py:
 """
 
 import statistics
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from ..config.schema import DataConfig
@@ -232,7 +232,10 @@ def detect_fps_degradation(
     doesn't set an unreachable bar for the rest of the batch. Leave-one-out
     (excluding the episode under test from its own reference) matters most
     for small batches: an inclusive median gets pulled toward the very
-    episode it's supposed to judge, which can mask real degradation.
+    episode it's supposed to judge, which can mask real degradation. A topic
+    present in only one episode of the batch (no other episode has a
+    measurement to compare against) is treated as not degraded rather than
+    raising an error.
     """
     if not episode_fps:
         return {}
@@ -280,11 +283,8 @@ def apply_batch_fps_check(
             reason_key = (ep.path, t.topic, t.label)
             if reason_key in degraded_by_path_and_key and t.severity == SEVERITY_OK:
                 new_topics.append(
-                    TopicQualityReport(
-                        topic=t.topic, label=t.label, role=t.role,
-                        message_count=t.message_count, avg_fps=t.avg_fps,
-                        coverage_ratio=t.coverage_ratio, total_gap_s=t.total_gap_s,
-                        longest_gap_s=t.longest_gap_s, gaps=t.gaps,
+                    replace(
+                        t,
                         severity=SEVERITY_WARNING,
                         reason=f"{t.reason}; {degraded_by_path_and_key[reason_key]}".strip("; "),
                     )
@@ -293,9 +293,6 @@ def apply_batch_fps_check(
                 new_topics.append(t)
         new_severity = worst_severity(t.severity for t in new_topics)
         updated_reports.append(
-            EpisodeQualityReport(
-                path=ep.path, duration_s=ep.duration_s, severity=new_severity,
-                passed=(new_severity != SEVERITY_CRITICAL), topics=new_topics,
-            )
+            replace(ep, severity=new_severity, passed=(new_severity != SEVERITY_CRITICAL), topics=new_topics)
         )
     return updated_reports

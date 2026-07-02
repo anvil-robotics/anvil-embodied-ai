@@ -355,6 +355,21 @@ class TestDetectFpsDegradation:
 
         assert result["ep0"][0] is False
 
+    def test_leave_one_out_generalizes_to_four_episodes(self):
+        # ep3's leave-one-out reference is median([60.0, 60.0, 60.0]) = 60.0,
+        # threshold 60.0 * 0.85 = 51.0, and 48.0 < 51.0 -> degraded.
+        # ep0's leave-one-out reference is median([60.0, 60.0, 48.0]) = 60.0
+        # (middle of sorted [48.0, 60.0, 60.0]), threshold 51.0, 60.0 is not
+        # below that -> not degraded.
+        episode_fps = {"ep0": 60.0, "ep1": 60.0, "ep2": 60.0, "ep3": 48.0}
+
+        result = detect_fps_degradation(episode_fps, _thresholds(fps_degradation_tolerance=0.15))
+
+        assert result["ep3"][0] is True
+        assert result["ep0"][0] is False
+        assert result["ep1"][0] is False
+        assert result["ep2"][0] is False
+
 
 class TestApplyBatchFpsCheck:
     def test_ok_episode_upgraded_to_warning_on_degradation(self):
