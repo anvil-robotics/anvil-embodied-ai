@@ -193,10 +193,13 @@ uv run anvil-trainer \
 
 Diffusion's `DiffusionRgbEncoder` applies `RandomCrop` during training and `CenterCrop` during inference — the switch is automatic, no inference-time config needed.
 
+> **`--policy.resize_shape` is required to activate crop.** LeRobot only derives `crop_shape` from `crop_ratio` when `resize_shape` is also set — `crop_is_random`/`crop_ratio` alone are silently ignored, with no warning or error. `resize_shape` takes `(H, W)`; match it to your dataset's stored resolution (e.g. `[270, 480]` for a 480×270 16:9 dataset).
+
 ```bash
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
+  --policy.resize_shape='[270,480]' \
   --policy.crop_is_random=true \
   --policy.crop_ratio=0.9
 ```
@@ -209,6 +212,7 @@ uv run anvil-trainer \
   --policy.type=diffusion \
   --dataset.image_transforms.enable=true \
   --dataset.image_transforms.max_num_transforms=3 \
+  --policy.resize_shape='[270,480]' \
   --policy.crop_is_random=true \
   --policy.crop_ratio=0.9
 ```
