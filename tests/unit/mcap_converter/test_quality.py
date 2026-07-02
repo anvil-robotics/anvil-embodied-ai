@@ -20,6 +20,7 @@ from mcap_converter.core.quality import (
     SEVERITY_CRITICAL,
     SEVERITY_OK,
     SEVERITY_WARNING,
+    analyze_topic_coverage,
     resolve_monitored_topics,
     worst_severity,
 )
@@ -114,9 +115,6 @@ class TestResolveMonitoredTopics:
         joint_states = next(m for m in monitored if m.label == "joint_states")
         assert joint_states.topic == "/joint_states"
         assert joint_states.role == "stream"
-
-
-from mcap_converter.core.quality import analyze_topic_coverage
 
 
 def _thresholds(**overrides) -> QualityThresholds:
@@ -233,6 +231,27 @@ class TestAnalyzeTopicCoverageStream:
         )
 
         assert report.avg_fps is None  # ts[-1] == ts[0] would otherwise divide by zero
+
+    def test_median_not_mean_is_used_for_drop_threshold(self):
+        # 4 normal 0.1s intervals plus one 5.0s outlier.
+        # median of [0.1, 0.1, 0.1, 0.1, 5.0] is 0.1 -> drop_threshold =
+        # max(0.5, 5*0.1) = 0.5, so the 5.0s interval (> 0.5) is flagged.
+        # mean of the same intervals is 1.08 -> a mean-based drop_threshold
+        # would be max(0.5, 5*1.08) = 5.4, under which 5.0 would NOT be
+        # flagged, so severity would stay OK. The two implementations
+        # disagree on both severity and whether a dropframe gap is reported.
+        timestamps = [0.0, 0.1, 0.2, 0.3, 0.4, 5.4]
+
+        report = analyze_topic_coverage(
+            timestamps, session_start=timestamps[0], session_end=timestamps[-1],
+            topic="/joint_states", label="joint_states", role="stream",
+            thresholds=_thresholds(),
+        )
+
+        assert report.severity == SEVERITY_CRITICAL
+        dropframe_gaps = [g for g in report.gaps if g.kind == "dropframe"]
+        assert len(dropframe_gaps) == 1
+        assert dropframe_gaps[0].duration_s == pytest.approx(5.0)
 
 
 class TestAnalyzeTopicCoverageAction:

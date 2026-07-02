@@ -143,6 +143,10 @@ def analyze_topic_coverage(
       Leading/trailing gaps are not flagged for action topics at all — an arm
       simply not yet engaged at the start, or already released at the end, is
       exactly the same normal idle behavior as a mid-episode gap.
+
+    Note: `avg_fps` on the returned report is only computed for role="stream"
+    (a fixed publish rate makes an average meaningful); it is always None for
+    role="action", whose event-driven timing has no single "rate" to average.
     """
     span = max(session_end - session_start, 1e-9)
 
