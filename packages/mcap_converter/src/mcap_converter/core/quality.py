@@ -10,17 +10,10 @@ in extractor.py:
     MCAP file and feeds the pure functions.
 """
 
-import statistics
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
-
-from mcap.exceptions import McapError
-from mcap.reader import make_reader as make_mcap_reader
+from dataclasses import asdict, dataclass, field
+from typing import Iterable, List, Optional, Set
 
 from ..config.schema import DataConfig
-from .extractor import message_timestamp
-from .reader import McapReader
 
 SEVERITY_OK = "ok"
 SEVERITY_WARNING = "warning"
@@ -64,9 +57,7 @@ class TopicQualityReport:
     reason: str = ""
 
     def to_dict(self) -> dict:
-        import dataclasses
-
-        return dataclasses.asdict(self)
+        return asdict(self)
 
 
 @dataclass
@@ -80,9 +71,7 @@ class EpisodeQualityReport:
     topics: List[TopicQualityReport] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        import dataclasses
-
-        return dataclasses.asdict(self)
+        return asdict(self)
 
 
 @dataclass
