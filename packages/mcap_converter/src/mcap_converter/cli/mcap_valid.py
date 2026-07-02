@@ -1,4 +1,10 @@
-"""mcap-valid: scan raw MCAP sessions for topic coverage/gap issues before conversion."""
+"""mcap-valid: scan raw MCAP sessions for topic coverage/gap issues before conversion.
+
+By default (no flags needed), a JSON report and a comprehensive Markdown
+report covering every episode and topic are always written to
+./mcap_valid_reports/<name>.{json,md}, in addition to whatever --format /
+--output produce.
+"""
 
 import argparse
 import json
@@ -20,6 +26,10 @@ from mcap_converter.core.quality import (
 )
 
 console = Console()
+# Status/progress notices (e.g. "report written to ...") go to stderr so they
+# never pollute `--format json` stdout, which downstream tooling parses as
+# pure JSON.
+_status_console = Console(stderr=True)
 
 _SEVERITY_COLOR = {SEVERITY_OK: "green", SEVERITY_WARNING: "yellow", SEVERITY_CRITICAL: "red"}
 
@@ -64,6 +74,77 @@ def _render_table(reports, *, verbose: bool) -> None:
     )
 
 
+def default_report_paths(input_path: Path) -> tuple[Path, Path]:
+    """
+    Compute the default (JSON, Markdown) report paths for an input path.
+
+    Reports are always written to ./mcap_valid_reports/<name>.{json,md}
+    (relative to the current working directory), named after the input:
+    a directory's own name, or a single file's stem (extension stripped).
+    """
+    resolved = input_path.resolve()
+    name = resolved.stem if resolved.is_file() else resolved.name
+    report_dir = Path.cwd() / "mcap_valid_reports"
+    return report_dir / f"{name}.json", report_dir / f"{name}.md"
+
+
+def render_markdown_report(reports, *, input_path: str, config_path: str | None) -> str:
+    """Render a comprehensive Markdown report listing every episode and topic.
+
+    Unlike the terminal table (which hides healthy detail by default), this
+    always lists every episode and every topic, regardless of severity.
+    """
+    n_error = sum(1 for r in reports if r.read_error)
+    n_ok = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_OK)
+    n_warn = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_WARNING)
+    n_crit = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_CRITICAL)
+    summary = (
+        f"{len(reports)} episodes: {n_ok} ok, {n_warn} warning, {n_crit} critical"
+        + (f", {n_error} unreadable" if n_error else "")
+    )
+
+    lines = [
+        "# mcap-valid Report",
+        "",
+        f"- Input: `{input_path}`",
+        f"- Config: `{config_path or 'default'}`",
+        "",
+        "## Summary",
+        "",
+        summary,
+        "",
+        "## Episodes",
+        "",
+    ]
+
+    for r in reports:
+        lines.append(f"### `{Path(r.path).name}` — {r.severity} (passed: {r.passed})")
+        lines.append("")
+        if r.read_error:
+            lines.append(f"**Read error:** `{r.read_error}`")
+            lines.append("")
+            continue
+
+        lines.append(f"- Path: `{r.path}`")
+        lines.append(f"- Duration: `{r.duration_s:.1f}s`")
+        lines.append("")
+        lines.append(
+            "| Topic | Label | Role | Messages | Avg FPS | Coverage | Total Gap (s) | Longest Gap (s) | Severity | Reason |"
+        )
+        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        for t in r.topics:
+            avg_fps = f"{t.avg_fps:.2f}" if t.avg_fps is not None else "-"
+            reason = t.reason.replace("|", "\\|")
+            lines.append(
+                f"| {t.topic} | {t.label} | {t.role} | {t.message_count} | {avg_fps} | "
+                f"{t.coverage_ratio:.2f} | {t.total_gap_s:.2f} | {t.longest_gap_s:.2f} | "
+                f"{t.severity} | {reason} |"
+            )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def main(args: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Scan raw MCAP sessions for coverage/gap quality issues before conversion.",
@@ -73,12 +154,21 @@ examples:
   mcap-valid -i data/raw/my-session --config configs/mcap_converter/openarm_bimanual_quest.yaml
   mcap-valid -i recording.mcap --format json --output report.json
   mcap-valid -i data/raw/my-session --fail-on-critical   # CI gate, exit 1 on any critical episode
+
+  (by default, a JSON + Markdown report is always written to ./mcap_valid_reports/<name>.{json,md})
 """,
     )
     parser.add_argument("-i", "--input", required=True, help="MCAP file or directory (recursive **/*.mcap)")
     parser.add_argument("--config", default=None, help="conversion config YAML (same one used by mcap-convert)")
     parser.add_argument("--format", choices=["table", "json"], default="table")
-    parser.add_argument("--output", default=None, help="write the report to this file instead of / in addition to stdout")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "also write the report to this file, IN ADDITION to the default "
+            "./mcap_valid_reports/<name>.{json,md} report files that are always written"
+        ),
+    )
     parser.add_argument("--stream-gap-factor", type=float, default=5.0)
     parser.add_argument("--stream-min-gap", type=float, default=0.5)
     parser.add_argument("--action-warn-gap", type=float, default=1.0)
@@ -102,8 +192,15 @@ examples:
     if len(reports) > 1:
         reports = apply_batch_fps_check(reports, thresholds)
 
+    default_json_path, default_md_path = default_report_paths(input_path)
+    default_json_path.parent.mkdir(parents=True, exist_ok=True)
+    payload_json = json.dumps({"episodes": [r.to_dict() for r in reports]}, indent=2)
+    default_json_path.write_text(payload_json)
+    default_md_path.write_text(render_markdown_report(reports, input_path=str(input_path), config_path=parsed.config))
+    _status_console.print(f"[dim]報告已寫入: {default_json_path}, {default_md_path}[/dim]")
+
     if parsed.format == "json":
-        payload = json.dumps({"episodes": [r.to_dict() for r in reports]}, indent=2)
+        payload = payload_json
         if parsed.output:
             Path(parsed.output).write_text(payload)
         else:
@@ -111,7 +208,7 @@ examples:
     else:
         _render_table(reports, verbose=parsed.verbose)
         if parsed.output:
-            Path(parsed.output).write_text(json.dumps({"episodes": [r.to_dict() for r in reports]}, indent=2))
+            Path(parsed.output).write_text(payload_json)
 
     return 1 if (parsed.fail_on_critical and any(not r.passed for r in reports)) else 0
 

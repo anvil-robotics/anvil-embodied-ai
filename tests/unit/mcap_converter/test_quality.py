@@ -20,6 +20,7 @@ from mcap_converter.core.quality import (
     SEVERITY_OK,
     SEVERITY_WARNING,
     EpisodeQualityReport,
+    GapInterval,
     QualityThresholds,
     TopicQualityReport,
     analyze_topic_coverage,
@@ -514,9 +515,16 @@ class TestScanEpisodeIntegration:
 
 
 class TestMcapValidCli:
-    def test_json_output_is_valid_and_exit_code_zero_without_critical(self, capsys):
+    # NOTE: mcap-valid now *always* writes ./mcap_valid_reports/<name>.{json,md}
+    # relative to the current working directory (see TestDefaultReportPaths /
+    # TestDefaultReportWriting below). Every test in this class chdirs into
+    # tmp_path first so that unconditional default-report writing never lands
+    # inside the real repo working tree while running the test suite.
+
+    def test_json_output_is_valid_and_exit_code_zero_without_critical(self, tmp_path, monkeypatch, capsys):
         from mcap_converter.cli.mcap_valid import main
 
+        monkeypatch.chdir(tmp_path)
         exit_code = main([
             "-i", str(_STUB_MCAP),
             "--config", str(_STUB_CMD_CONFIG),
@@ -530,9 +538,10 @@ class TestMcapValidCli:
         assert len(payload["episodes"]) == 1
         assert exit_code == 0
 
-    def test_fail_on_critical_exits_nonzero_when_critical_present(self, tmp_path):
+    def test_fail_on_critical_exits_nonzero_when_critical_present(self, tmp_path, monkeypatch):
         from mcap_converter.cli.mcap_valid import main
 
+        monkeypatch.chdir(tmp_path)
         # Point camera_topics at something that doesn't exist in the stub -> critical.
         bad_config_path = tmp_path / "bad.yaml"
         bad_config_path.write_text(
@@ -550,9 +559,10 @@ class TestMcapValidCli:
 
         assert exit_code == 1
 
-    def test_output_file_is_written(self, tmp_path):
+    def test_output_file_is_written(self, tmp_path, monkeypatch):
         from mcap_converter.cli.mcap_valid import main
 
+        monkeypatch.chdir(tmp_path)
         out_file = tmp_path / "report.json"
         main([
             "-i", str(_STUB_MCAP), "--config", str(_STUB_CMD_CONFIG),
@@ -562,9 +572,10 @@ class TestMcapValidCli:
         payload = json.loads(out_file.read_text())
         assert "episodes" in payload
 
-    def test_unreadable_file_is_reported_not_crashed_and_fails_on_critical(self, tmp_path, capsys):
+    def test_unreadable_file_is_reported_not_crashed_and_fails_on_critical(self, tmp_path, monkeypatch, capsys):
         from mcap_converter.cli.mcap_valid import main
 
+        monkeypatch.chdir(tmp_path)
         garbage_file = tmp_path / "corrupt.mcap"
         garbage_file.write_bytes(b"not a real mcap file")
 
@@ -578,9 +589,10 @@ class TestMcapValidCli:
         assert payload["episodes"][0]["read_error"] is not None
         assert exit_code == 1
 
-    def test_unreadable_file_shown_in_table_output(self, tmp_path, capsys):
+    def test_unreadable_file_shown_in_table_output(self, tmp_path, monkeypatch, capsys):
         from mcap_converter.cli.mcap_valid import main
 
+        monkeypatch.chdir(tmp_path)
         garbage_file = tmp_path / "corrupt.mcap"
         garbage_file.write_bytes(b"not a real mcap file")
 
@@ -592,9 +604,10 @@ class TestMcapValidCli:
         # this is the regression the plan revision was written to catch.
         assert "InvalidMagic" in captured.out or "not a valid" in captured.out.lower() or "Errno" in captured.out
 
-    def test_directory_scan_covers_all_episodes_and_runs_batch_fps_check(self, capsys):
+    def test_directory_scan_covers_all_episodes_and_runs_batch_fps_check(self, tmp_path, monkeypatch, capsys):
         from mcap_converter.cli.mcap_valid import main
 
+        monkeypatch.chdir(tmp_path)
         # tests/smoke/fixtures/test-session/ contains 5 numbered episode
         # subdirectories (0001-0005), each with one .mcap file.
         stub_session_dir = _STUB_MCAP.parent.parent
@@ -610,9 +623,10 @@ class TestMcapValidCli:
         assert len(payload["episodes"]) == 5  # all 5 stub episodes discovered
         assert exit_code == 0
 
-    def test_table_format_with_output_still_writes_json_file(self, tmp_path, capsys):
+    def test_table_format_with_output_still_writes_json_file(self, tmp_path, monkeypatch, capsys):
         from mcap_converter.cli.mcap_valid import main
 
+        monkeypatch.chdir(tmp_path)
         out_file = tmp_path / "report.json"
         main([
             "-i", str(_STUB_MCAP), "--config", str(_STUB_CMD_CONFIG),
@@ -626,3 +640,214 @@ class TestMcapValidCli:
         payload = json.loads(out_file.read_text())
         assert "episodes" in payload
         assert len(payload["episodes"]) == 1
+
+    def test_default_output_writes_json_and_md_without_any_flags(self, tmp_path, monkeypatch):
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        stub_session_dir = _STUB_MCAP.parent.parent  # tests/smoke/fixtures/test-session (5 episodes)
+
+        exit_code = main([
+            "-i", str(stub_session_dir),
+            "--config", str(_STUB_CMD_CONFIG),
+        ])
+
+        assert exit_code == 0
+        default_json = tmp_path / "mcap_valid_reports" / "test-session.json"
+        default_md = tmp_path / "mcap_valid_reports" / "test-session.md"
+        assert default_json.exists()
+        assert default_md.exists()
+
+        payload = json.loads(default_json.read_text())
+        assert len(payload["episodes"]) == 5
+
+        md_text = default_md.read_text()
+        assert md_text.count("### ") >= 5
+
+    def test_explicit_output_flag_still_works_alongside_default_files(self, tmp_path, monkeypatch):
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        stub_session_dir = _STUB_MCAP.parent.parent
+        custom_output = tmp_path / "custom.json"
+
+        exit_code = main([
+            "-i", str(stub_session_dir),
+            "--config", str(_STUB_CMD_CONFIG),
+            "--format", "json",
+            "--output", str(custom_output),
+        ])
+
+        assert exit_code == 0
+        assert (tmp_path / "mcap_valid_reports" / "test-session.json").exists()
+        assert (tmp_path / "mcap_valid_reports" / "test-session.md").exists()
+        assert custom_output.exists()
+
+
+class TestDefaultReportPaths:
+    def test_directory_input_uses_directory_name(self, tmp_path):
+        from mcap_converter.cli.mcap_valid import default_report_paths
+
+        session_dir = tmp_path / "my-session"
+        session_dir.mkdir()
+
+        json_path, md_path = default_report_paths(session_dir)
+
+        assert json_path.name == "my-session.json"
+        assert md_path.name == "my-session.md"
+        assert json_path.parent.name == "mcap_valid_reports"
+        assert md_path.parent.name == "mcap_valid_reports"
+
+    def test_file_input_uses_stem_without_extension(self, tmp_path):
+        from mcap_converter.cli.mcap_valid import default_report_paths
+
+        mcap_file = tmp_path / "recording.mcap"
+        mcap_file.write_bytes(b"")
+
+        json_path, md_path = default_report_paths(mcap_file)
+
+        assert json_path.name == "recording.json"
+        assert md_path.name == "recording.md"
+
+    def test_uses_cwd_not_input_parent(self, tmp_path, monkeypatch):
+        from mcap_converter.cli.mcap_valid import default_report_paths
+
+        # Input lives under a directory that is NOT the cwd we chdir into.
+        input_parent = tmp_path / "elsewhere"
+        input_parent.mkdir()
+        session_dir = input_parent / "my-session"
+        session_dir.mkdir()
+
+        cwd_dir = tmp_path / "cwd"
+        cwd_dir.mkdir()
+        monkeypatch.chdir(cwd_dir)
+
+        json_path, md_path = default_report_paths(session_dir)
+
+        # mcap_valid_reports/ is created relative to cwd, not relative to
+        # the input path's own parent directory.
+        assert json_path.parent.parent == cwd_dir
+        assert md_path.parent.parent == cwd_dir
+
+
+class TestRenderMarkdownReport:
+    @staticmethod
+    def _make_reports():
+        healthy = EpisodeQualityReport(
+            path="/data/raw/session/0001/0001_0.mcap",
+            duration_s=12.5,
+            severity=SEVERITY_OK,
+            passed=True,
+            topics=[
+                TopicQualityReport(
+                    topic="/joint_states",
+                    label="joint_states",
+                    role="stream",
+                    message_count=9897,
+                    avg_fps=499.9,
+                    coverage_ratio=1.0,
+                    total_gap_s=0.0,
+                    longest_gap_s=0.0,
+                    severity=SEVERITY_OK,
+                    reason="OK",
+                ),
+                TopicQualityReport(
+                    topic="/camera/image_raw",
+                    label="camera",
+                    role="stream",
+                    message_count=300,
+                    avg_fps=30.0,
+                    coverage_ratio=1.0,
+                    total_gap_s=0.0,
+                    longest_gap_s=0.0,
+                    severity=SEVERITY_OK,
+                    reason="OK",
+                ),
+                TopicQualityReport(
+                    topic="/follower_position_controller/commands",
+                    label="action",
+                    role="action",
+                    message_count=300,
+                    avg_fps=None,
+                    coverage_ratio=1.0,
+                    total_gap_s=0.0,
+                    longest_gap_s=0.0,
+                    severity=SEVERITY_OK,
+                    reason="OK",
+                ),
+            ],
+        )
+        warning = EpisodeQualityReport(
+            path="/data/raw/session/0002/0002_0.mcap",
+            duration_s=8.2,
+            severity=SEVERITY_WARNING,
+            passed=True,
+            topics=[
+                TopicQualityReport(
+                    topic="/follower_position_controller/commands",
+                    label="action",
+                    role="action",
+                    message_count=250,
+                    avg_fps=None,
+                    coverage_ratio=0.95,
+                    total_gap_s=5.61,
+                    longest_gap_s=5.61,
+                    gaps=[GapInterval(start_s=1.0, end_s=6.61, duration_s=5.61, kind="idle")],
+                    severity=SEVERITY_WARNING,
+                    reason="1 個 idle gap，最長 5.61s（正常，手臂未操作）",
+                ),
+            ],
+        )
+        corrupt = EpisodeQualityReport(
+            path="/data/raw/session/0003/0003_0.mcap",
+            duration_s=0.0,
+            severity=SEVERITY_CRITICAL,
+            passed=False,
+            topics=[],
+            read_error="InvalidMagic: not a valid mcap file",
+        )
+        return [healthy, warning, corrupt]
+
+    def test_every_episode_gets_a_header(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()
+        output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+
+        assert output.count("### ") == 3
+
+    def test_every_topic_appears_in_a_table_row(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()
+        output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+
+        assert "/joint_states" in output
+        assert "/camera/image_raw" in output
+        assert output.count("/follower_position_controller/commands") == 2  # healthy + warning episodes
+
+    def test_read_error_episode_shows_error_and_no_topics_table(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()
+        output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+
+        assert "**Read error:**" in output
+        assert "InvalidMagic" in output
+
+    def test_summary_line_matches_render_table_wording(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()
+        output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+
+        assert "3 episodes: 1 ok, 1 warning, 0 critical, 1 unreadable" in output
+
+    def test_output_is_plain_markdown_with_no_rich_markup(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()
+        output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+
+        for tag in ("[green]", "[/green]", "[yellow]", "[/yellow]", "[red]", "[/red]"):
+            assert tag not in output

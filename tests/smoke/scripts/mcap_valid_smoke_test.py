@@ -16,6 +16,14 @@ A  `mcap-valid` basic CLI behavior (fast, no mutation)
    A3. --output PATH writes the JSON report to a file (table format too)
    A4. --fail-on-critical exits 0 on the healthy fixture
    A5. --fail-on-critical exits 1 when the input file itself is unreadable
+   A6. default behavior (no flags) always writes a JSON + Markdown report to
+       ./mcap_valid_reports/<name>.{json,md} relative to cwd
+
+Note: every `mcap-valid` subprocess below runs with `cwd` pointed at an
+isolated temp directory (NOT the repo root) — since Task 10, mcap-valid
+unconditionally writes ./mcap_valid_reports/<name>.{json,md} relative to its
+cwd, and running with cwd=REPO would leave that directory behind in the
+actual git working tree as a side effect of this smoke test.
 
 B  `mcap-convert` quality-flag integration (subprocess, real conversion)
    B1. generate a real mcap-valid JSON report, then build a synthetic variant
@@ -75,9 +83,20 @@ def _skip(name: str, reason: str) -> None:
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-    print(f"  $ {' '.join(cmd)}", flush=True)
-    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
+def _run(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
+    """Run a `uv run <cli>` subprocess with an explicit, isolated `cwd`.
+
+    Since Task 10, `mcap-valid` unconditionally writes
+    ./mcap_valid_reports/<name>.{json,md} relative to its cwd, so every call
+    here must run with cwd pointed at a temp directory rather than REPO — a
+    cwd=REPO invocation would leave that report directory behind in the real
+    git working tree. `--project REPO` is injected so `uv run` still finds
+    the project regardless of cwd.
+    """
+    if cmd[:2] == ["uv", "run"]:
+        cmd = cmd[:2] + ["--project", str(REPO)] + cmd[2:]
+    print(f"  $ (cwd={cwd}) {' '.join(cmd)}", flush=True)
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
 
 def _assert_episode_shape(name: str, payload: dict) -> bool:
@@ -115,33 +134,46 @@ def run_section_a() -> None:
         "--config", str(CONFIG),
     ]
 
-    # A1 — table format runs cleanly
-    print("\n  A1. table format")
-    proc = _run(base_cmd)
-    _assert("A1 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
-    _assert(
-        "A1 summary line reports 5 episodes",
-        "5 episodes:" in proc.stdout,
-        proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "(empty stdout)",
-    )
+    with tempfile.TemporaryDirectory() as base_tmpdir:
+        base_cwd = Path(base_tmpdir)
 
-    # A2 — JSON format has the expected shape
-    print("\n  A2. --format json")
-    proc = _run(base_cmd + ["--format", "json"])
-    _assert("A2 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
-    try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        _assert("A2 stdout parses as JSON", False, str(exc))
-    else:
-        _assert("A2 stdout parses as JSON", True)
-        _assert_episode_shape("A2", payload)
+        # A1 — table format runs cleanly
+        print("\n  A1. table format")
+        proc = _run(base_cmd, cwd=base_cwd)
+        _assert("A1 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
+        _assert(
+            "A1 summary line reports 5 episodes",
+            "5 episodes:" in proc.stdout,
+            proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "(empty stdout)",
+        )
+
+        # A2 — JSON format has the expected shape
+        print("\n  A2. --format json")
+        proc = _run(base_cmd + ["--format", "json"], cwd=base_cwd)
+        _assert("A2 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            _assert("A2 stdout parses as JSON", False, str(exc))
+        else:
+            _assert("A2 stdout parses as JSON", True)
+            _assert_episode_shape("A2", payload)
+
+        # A4 — --fail-on-critical exits 0 on the healthy fixture
+        print("\n  A4. --fail-on-critical on healthy fixture")
+        proc = _run(base_cmd + ["--fail-on-critical"], cwd=base_cwd)
+        _assert(
+            "A4 --fail-on-critical exits 0 (no critical episodes)",
+            proc.returncode == 0,
+            f"exit {proc.returncode}",
+        )
 
     # A3 — --output PATH writes the report to a file (table format too)
     print("\n  A3. --output PATH (table format)")
     with tempfile.TemporaryDirectory() as tmpdir:
-        out_path = Path(tmpdir) / "report.json"
-        proc = _run(base_cmd + ["--output", str(out_path)])
+        tmp = Path(tmpdir)
+        out_path = tmp / "report.json"
+        proc = _run(base_cmd + ["--output", str(out_path)], cwd=tmp)
         _assert("A3 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
         _assert("A3 output file created", out_path.exists(), str(out_path))
         if out_path.exists():
@@ -153,30 +185,57 @@ def run_section_a() -> None:
                 _assert("A3 output file parses as JSON", True)
                 _assert_episode_shape("A3", payload)
 
-    # A4 — --fail-on-critical exits 0 on the healthy fixture
-    print("\n  A4. --fail-on-critical on healthy fixture")
-    proc = _run(base_cmd + ["--fail-on-critical"])
-    _assert(
-        "A4 --fail-on-critical exits 0 (no critical episodes)",
-        proc.returncode == 0,
-        f"exit {proc.returncode}",
-    )
-
     # A5 — --fail-on-critical exits 1 when the file itself is unreadable
     print("\n  A5. --fail-on-critical with an unreadable .mcap file")
     with tempfile.TemporaryDirectory() as tmpdir:
-        bad_mcap = Path(tmpdir) / "garbage.mcap"
+        tmp = Path(tmpdir)
+        bad_mcap = tmp / "garbage.mcap"
         bad_mcap.write_bytes(b"not a real mcap file")
         proc = _run([
             "uv", "run", "mcap-valid",
-            "-i", str(tmpdir),
+            "-i", str(tmp),
             "--fail-on-critical",
-        ])
+        ], cwd=tmp)
         _assert(
             "A5 --fail-on-critical exits 1 on read_error (critical, not passed)",
             proc.returncode == 1,
             f"exit {proc.returncode}",
         )
+
+    # A6 — default behavior (no flags): JSON + Markdown report always written
+    print("\n  A6. default report files (no flags needed)")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        proc = _run(base_cmd, cwd=tmp)
+        _assert("A6 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
+
+        default_json = tmp / "mcap_valid_reports" / "test-session.json"
+        default_md = tmp / "mcap_valid_reports" / "test-session.md"
+        _assert(
+            "A6 default JSON report written and non-empty",
+            default_json.exists() and default_json.stat().st_size > 0,
+            str(default_json),
+        )
+        _assert(
+            "A6 default Markdown report written and non-empty",
+            default_md.exists() and default_md.stat().st_size > 0,
+            str(default_md),
+        )
+        if default_json.exists():
+            try:
+                payload = json.loads(default_json.read_text())
+            except json.JSONDecodeError as exc:
+                _assert("A6 default JSON report parses as JSON", False, str(exc))
+            else:
+                _assert("A6 default JSON report parses as JSON", True)
+                _assert_episode_shape("A6", payload)
+        if default_md.exists():
+            md_text = default_md.read_text()
+            _assert(
+                "A6 default Markdown report has a header per episode",
+                md_text.count("### ") == _EXPECTED_EPISODES,
+                f"got {md_text.count('### ')} headers",
+            )
 
 
 # ── Section B: mcap-convert quality-flag integration ──────────────────────────
@@ -199,7 +258,7 @@ def run_section_b() -> None:
             "--config", str(CONFIG),
             "--format", "json",
             "--output", str(report_path),
-        ])
+        ], cwd=tmp)
         if not _assert("B1 mcap-valid report generated (exit 0)", proc.returncode == 0,
                        f"exit {proc.returncode}"):
             return
@@ -242,7 +301,7 @@ def run_section_b() -> None:
             "-o", str(out1),
             "--quality-report", str(synthetic_path),
             "--skip-flagged",
-        ])
+        ], cwd=tmp)
         _assert("B2 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
         _assert(
             "B2 stdout reports critical episode skipped",
@@ -268,7 +327,7 @@ def run_section_b() -> None:
             "-o", str(out2),
             "--quality-report", str(synthetic_path),
             "--skip-flagged", "warning",
-        ])
+        ], cwd=tmp)
         _assert("B3 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
         _assert(
             "B3 stdout reports critical episode skipped",
@@ -293,7 +352,7 @@ def run_section_b() -> None:
         proc = _run(base_convert_cmd + [
             "-o", str(out3),
             "--skip-episode-idx", "2:4",
-        ])
+        ], cwd=tmp)
         _assert("B4 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
         manual_skip_count = proc.stdout.count("skipped (manual index)")
         _assert(
@@ -320,7 +379,7 @@ def run_section_b() -> None:
         proc = _run(base_convert_cmd + [
             "-o", str(out4_base),
             "--skip-episode-idx", "99",
-        ])
+        ], cwd=tmp)
         _assert(
             "B5 exit code != 0 (out-of-range index rejected)",
             proc.returncode != 0,
