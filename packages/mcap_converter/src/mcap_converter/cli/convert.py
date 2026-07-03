@@ -182,6 +182,35 @@ def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
     return {}
 
 
+def _ensure_output_readable(output_dir: str) -> None:
+    """
+    Ensure every file/directory in the converted dataset is readable by
+    other users, not just the owner.
+
+    Works around a known issue where lerobot's video encoder (PyAV/
+    libavformat, via encode_video_frames() in lerobot/datasets/
+    video_utils.py) writes video files with 0600 permissions, bypassing the
+    process umask. This breaks any tool that needs to read the dataset as a
+    different user/UID than the one that ran the conversion — e.g. nginx in
+    the dataset-viz feature, which serves the dataset to a browser and gets
+    403 Forbidden on video files without this fix-up.
+    """
+    root = Path(output_dir)
+    for path in root.rglob("*"):
+        try:
+            current_mode = path.stat().st_mode
+            if path.is_dir():
+                # ensure r+w+x for owner, r+x for group/other (on top of whatever's already set)
+                os.chmod(path, current_mode | 0o755)
+            else:
+                # ensure r+w for owner, r for group/other
+                os.chmod(path, current_mode | 0o644)
+        except OSError:
+            # best-effort: don't let a permission fix-up failure crash the
+            # whole conversion; the dataset is still usable by the owner.
+            continue
+
+
 def convert_session(
     input_dir: str,
     output_dir: str,
@@ -502,6 +531,10 @@ def convert_session(
     with console.status("[bold]Finalizing dataset (metadata & cleanup)..."):
         with suppress_fd_output():
             writer.finalize(dataset)
+        # lerobot's video encoder writes .mp4 files as 0600 (bypassing umask),
+        # which blocks any reader running as a different UID (e.g. nginx in
+        # dataset-viz). Fix up permissions across the whole output tree.
+        _ensure_output_readable(output_dir)
 
     # Debug plots: always generated after a successful conversion
     if total_frames > 0:
