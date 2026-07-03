@@ -185,6 +185,13 @@ class TestResolveCacheDir:
         result = resolve_cache_dir()
         assert not result.exists()
 
+    def test_empty_xdg_cache_home_falls_back_to_home_cache(self, monkeypatch):
+        # Per the XDG Base Directory spec, an empty value is equivalent to
+        # unset — must not be treated as a valid (empty-string-rooted) path.
+        monkeypatch.setenv("XDG_CACHE_HOME", "")
+        result = resolve_cache_dir()
+        assert result == Path.home() / ".cache" / "anvil-mcap-viz"
+
 
 class TestDefaultRepoId:
     def test_uses_local_prefix_and_directory_basename(self, tmp_path):
