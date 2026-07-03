@@ -108,8 +108,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  dataset-validate --root /tmp/test-dataset
-  dataset-validate --root /tmp/test-dataset --repo-id anvil_robot/my_dataset
+  dataset-valid --root /tmp/test-dataset
+  dataset-valid --root /tmp/test-dataset --repo-id anvil_robot/my_dataset
 """,
     )
     parser.add_argument(

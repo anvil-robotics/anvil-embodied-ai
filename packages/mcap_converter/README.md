@@ -49,12 +49,12 @@ mcap-to-video -i recording.mcap -o ./videos
 mcap-to-video -i recording.mcap --scan-only
 ```
 
-### dataset-validate
+### dataset-valid
 
 Validate a converted LeRobot dataset by loading and reading frames.
 
 ```bash
-dataset-validate --root /path/to/dataset
+dataset-valid --root /path/to/dataset
 ```
 
 ### mcap-upload
@@ -132,7 +132,7 @@ mcap_converter/
 ├── cli/
 │   ├── convert.py     # mcap-convert
 │   ├── inspect.py     # mcap-inspect
-│   ├── validate.py    # dataset-validate
+│   ├── validate.py    # dataset-valid
 │   ├── upload.py      # mcap-upload
 │   └── video.py       # mcap-to-video
 ├── config/

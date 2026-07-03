@@ -4,6 +4,45 @@
 
 Convert MCAP recordings into LeRobot v3.0 datasets.
 
+**The usual flow:** `mcap-valid` (scan raw recordings for problems) → `mcap-convert` (convert) → `dataset-valid` (sanity-check the result). The other tools below (`mcap-inspect`, `mcap-to-video`, `merge-datasets`, `hf-upload`) are used as needed, not part of every conversion.
+
+---
+
+## mcap-valid
+
+Scan **raw** MCAP recordings for quality issues before conversion — dropped frames, silent topics, cross-episode fps degradation. Run this against `data/raw/...`, not a converted dataset: converted datasets have gap-filled timestamps that hide the original drops.
+
+```bash
+uv run mcap-valid -i data/raw/my-session --config configs/mcap_converter/openarm_bimanual_quest.yaml
+uv run mcap-valid -i data/raw/my-session --config ... --verbose            # show healthy topics too
+uv run mcap-valid -i data/raw/my-session --config ... --fail-on-critical   # CI gate, exit 1 on any critical episode
+```
+
+A JSON report and a comprehensive Markdown report are **always** written to `./mcap_valid_reports/<input-dir-name>.{json,md}`, in addition to the terminal table — no flags required. The JSON report is what `mcap-convert --quality-report` consumes.
+
+Severity model:
+
+| Severity | Meaning |
+|----------|---------|
+| 🔴 `critical` | A camera or `joint_states` stream has zero messages, or an internal/leading/trailing gap — real data loss, no benign explanation |
+| 🟡 `warning` | An action topic has zero messages or an idle gap (e.g. one arm not yet picked up — this is normal teleop behavior, not necessarily a defect), or a stream's average fps dropped noticeably relative to the rest of the batch |
+| 🟢 `ok` | No issues detected |
+
+An episode's overall status is its single worst topic's severity. `--fail-on-critical` only fails on `critical` — `warning` episodes convert normally unless you also pass `mcap-convert --skip-flagged warning`.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-i / --input PATH` | _(required)_ | MCAP file, or a directory scanned recursively for `*.mcap` |
+| `--config PATH` | default config | Conversion config YAML — determines which topics are monitored |
+| `--format` | `table` | `table` · `json` |
+| `--output PATH` | — | Additionally write the report here (independent of the always-on `mcap_valid_reports/` output) |
+| `--fail-on-critical` | — | Exit 1 if any episode has a critical issue — for CI gating |
+| `--verbose` | — | Show per-topic detail even for episodes with no issues |
+| `--stream-gap-factor N` | `5.0` | Stream gap threshold, as a multiple of that topic's own median interval |
+| `--stream-min-gap N` | `0.5` | Absolute floor (seconds) below which a stream gap is never flagged |
+| `--action-warn-gap N` | `1.0` | Minimum idle duration (seconds) before an action-topic gap is reported |
+| `--fps-tolerance N` | `0.15` | Fraction below the batch's median fps before flagging degradation |
+
 ---
 
 ## mcap-convert
@@ -76,82 +115,25 @@ Without `--quality-report`, running `mcap-valid` first isn't required — `--ski
 
 ---
 
-## mcap-valid
-
-Scan **raw** MCAP recordings for quality issues before conversion — dropped frames, silent topics, cross-episode fps degradation. Run this against `data/raw/...`, not a converted dataset: converted datasets have gap-filled timestamps that hide the original drops.
-
-```bash
-uv run mcap-valid -i data/raw/my-session --config configs/mcap_converter/openarm_bimanual_quest.yaml
-uv run mcap-valid -i data/raw/my-session --config ... --verbose            # show healthy topics too
-uv run mcap-valid -i data/raw/my-session --config ... --fail-on-critical   # CI gate, exit 1 on any critical episode
-```
-
-A JSON report and a comprehensive Markdown report are **always** written to `./mcap_valid_reports/<input-dir-name>.{json,md}`, in addition to the terminal table — no flags required. The JSON report is what `mcap-convert --quality-report` consumes.
-
-Severity model:
-
-| Severity | Meaning |
-|----------|---------|
-| 🔴 `critical` | A camera or `joint_states` stream has zero messages, or an internal/leading/trailing gap — real data loss, no benign explanation |
-| 🟡 `warning` | An action topic has zero messages or an idle gap (e.g. one arm not yet picked up — this is normal teleop behavior, not necessarily a defect), or a stream's average fps dropped noticeably relative to the rest of the batch |
-| 🟢 `ok` | No issues detected |
-
-An episode's overall status is its single worst topic's severity. `--fail-on-critical` only fails on `critical` — `warning` episodes convert normally unless you also pass `mcap-convert --skip-flagged warning`.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-i / --input PATH` | _(required)_ | MCAP file, or a directory scanned recursively for `*.mcap` |
-| `--config PATH` | default config | Conversion config YAML — determines which topics are monitored |
-| `--format` | `table` | `table` · `json` |
-| `--output PATH` | — | Additionally write the report here (independent of the always-on `mcap_valid_reports/` output) |
-| `--fail-on-critical` | — | Exit 1 if any episode has a critical issue — for CI gating |
-| `--verbose` | — | Show per-topic detail even for episodes with no issues |
-| `--stream-gap-factor N` | `5.0` | Stream gap threshold, as a multiple of that topic's own median interval |
-| `--stream-min-gap N` | `0.5` | Absolute floor (seconds) below which a stream gap is never flagged |
-| `--action-warn-gap N` | `1.0` | Minimum idle duration (seconds) before an action-topic gap is reported |
-| `--fps-tolerance N` | `0.15` | Fraction below the batch's median fps before flagging degradation |
-
----
-
-## dataset-validate
+## dataset-valid
 
 Validate a converted dataset — runs 5 structural checks.
 
 ```bash
-uv run dataset-validate --root data/datasets/my-sessions
+uv run dataset-valid --root data/datasets/my-sessions
 ```
 
 Expected: 5 checks all showing `[OK]`.
 
 ---
 
-## merge-datasets
+## Additional tools
 
-Merge two or more LeRobot datasets into one. All datasets must share the same feature schema; use `--remove-features` to strip mismatched features before merging.
+Used as needed — not part of every conversion.
 
-```bash
-uv run merge-datasets data/datasets/ds-a data/datasets/ds-b \
-  --output data/datasets/ds-merged
+### mcap-inspect
 
-# Strip extra features from datasets recorded with velocity+effort
-uv run merge-datasets data/datasets/ds-a data/datasets/ds-b \
-  --output data/datasets/ds-merged \
-  --remove-features observation.velocity,observation.effort
-```
-
-| Flag | Description |
-|------|-------------|
-| `PATH [PATH ...]` | Two or more dataset paths to merge (positional) |
-| `--output PATH` | _(required)_ Output path for the merged dataset |
-| `--remove-features F1,F2` | Comma-separated features to strip from any dataset that has them |
-
-> When `--remove-features` is used, a trimmed copy (`<path>-trimmed`) is written alongside the original and reused on subsequent runs.
-
----
-
-## mcap-inspect
-
-Inspect an MCAP file's topics, message types, and message counts.
+Inspect an MCAP file's topics, message types, and message counts. Use this for schema discovery on an unfamiliar recording (e.g. a new robot, or debugging why a topic isn't parsing) — unlike `mcap-valid`, it isn't config-driven and shows raw field structure/values, not quality scoring.
 
 ```bash
 uv run mcap-inspect /path/to/recording.mcap
@@ -167,9 +149,7 @@ uv run mcap-inspect /path/to/recording.mcap --format json --output report.json
 | `--format` | `text` | Output format: `text` · `json` |
 | `--output PATH` | stdout | Write output to file instead of stdout |
 
----
-
-## mcap-to-video
+### mcap-to-video
 
 Extract image topics from an MCAP file to MP4 videos (one file per camera). Memory-efficient — processes one frame at a time.
 
@@ -192,9 +172,29 @@ uv run mcap-to-video -i recording.mcap -o ./videos \
 | `--resize WxH` | — | Resize frames, e.g. `640x480` |
 | `--scan-only` | — | List image topics without converting |
 
----
+### merge-datasets
 
-## hf-upload
+Merge two or more LeRobot datasets into one. All datasets must share the same feature schema; use `--remove-features` to strip mismatched features before merging.
+
+```bash
+uv run merge-datasets data/datasets/ds-a data/datasets/ds-b \
+  --output data/datasets/ds-merged
+
+# Strip extra features from datasets recorded with velocity+effort
+uv run merge-datasets data/datasets/ds-a data/datasets/ds-b \
+  --output data/datasets/ds-merged \
+  --remove-features observation.velocity,observation.effort
+```
+
+| Flag | Description |
+|------|-------------|
+| `PATH [PATH ...]` | Two or more dataset paths to merge (positional) |
+| `--output PATH` | _(required)_ Output path for the merged dataset |
+| `--remove-features F1,F2` | Comma-separated features to strip from any dataset that has them |
+
+> When `--remove-features` is used, a trimmed copy (`<path>-trimmed`) is written alongside the original and reused on subsequent runs.
+
+### hf-upload
 
 Upload a converted LeRobot dataset to HuggingFace Hub.
 
