@@ -164,3 +164,75 @@ class TestPortPreflight:
             assert ensure_calls == []
         finally:
             sock.close()
+
+
+class TestReadinessTimeout:
+    def test_wait_for_ready_timeout_does_not_auto_teardown(self, monkeypatch, tmp_path, capsys):
+        """Deliberate design choice (see the approved design plan): if `docker
+        compose up` succeeds but the readiness poll times out, main() must NOT
+        automatically tear the stack down. It should print the probe URLs and
+        exit 1, leaving the containers running so the user can inspect/debug
+        them (e.g. `docker compose logs`) before running `dataset-viz --stop`
+        themselves. This locks that behavior in so a future "helpful" auto
+        -cleanup edit here gets caught by CI instead of silently reverting it.
+        """
+        monkeypatch.setattr(
+            "mcap_converter.cli.dataset_viz.check_docker_available", lambda: (True, "")
+        )
+        monkeypatch.setattr("mcap_converter.cli.dataset_viz.is_port_available", lambda _port: True)
+
+        dataset_root = _make_dataset(tmp_path)
+        fake_source_dir = tmp_path / "fake-source"
+        fake_source_dir.mkdir()
+        monkeypatch.setattr(
+            "mcap_converter.cli.dataset_viz.ensure_visualizer_source",
+            lambda *_a, **_kw: (True, fake_source_dir, ""),
+        )
+
+        run_calls = []
+
+        class _FakeCompletedProcess:
+            returncode = 0
+
+        def fake_run(argv, *a, **kw):
+            run_calls.append(argv)
+            return _FakeCompletedProcess()
+
+        monkeypatch.setattr("mcap_converter.cli.dataset_viz.subprocess.run", fake_run)
+
+        # `docker compose down` can only ever be invoked via
+        # build_compose_down_argv(...) -> subprocess.run(...). Spying on the
+        # argv-builder is a cleaner, more robust proxy for "was teardown
+        # attempted?" than string-matching subprocess.run's raw calls.
+        down_argv_calls = []
+        monkeypatch.setattr(
+            "mcap_converter.cli.dataset_viz.build_compose_down_argv",
+            lambda *a, **kw: down_argv_calls.append((a, kw)),
+        )
+
+        monkeypatch.setattr(
+            "mcap_converter.cli.dataset_viz.wait_for_ready", lambda *_a, **_kw: False
+        )
+
+        cache_dir = tmp_path / "cache"
+        rc = main([str(dataset_root), "--cache-dir", str(cache_dir)])
+
+        assert rc == 1
+
+        # Key assertion: teardown must never be attempted.
+        assert down_argv_calls == []
+        assert all("down" not in argv for argv in run_calls)
+        # Sanity: `docker compose up` (and nothing else) was the only
+        # subprocess call made.
+        assert len(run_calls) == 1
+        assert "up" in run_calls[0]
+
+        out = capsys.readouterr().out
+        assert "timed out" in out.lower()
+        assert "Check these URLs manually" in out
+        assert "http://localhost:8080/local/my-dataset/resolve/main/meta/info.json" in out
+        assert "http://localhost:7860/" in out
+        assert "not been torn down" in out.lower()
+        # Must have exited before reaching the success path.
+        assert "Ready!" not in out
+        assert "Browse at" not in out
