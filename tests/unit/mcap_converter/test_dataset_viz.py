@@ -1,7 +1,10 @@
 """Tests for the dataset-viz CLI's pure helper functions (Task 1: dataset_check + nginx_config;
-Task 2: config)."""
+Task 2: config; Task 3: orchestrator)."""
 
 import json
+import socket
+import subprocess
+import urllib.error
 from pathlib import Path
 
 from mcap_converter.viz.config import (
@@ -19,6 +22,16 @@ from mcap_converter.viz.config import (
 )
 from mcap_converter.viz.dataset_check import validate_dataset_root
 from mcap_converter.viz.nginx_config import render_nginx_conf
+from mcap_converter.viz.orchestrator import (
+    build_compose_down_argv,
+    build_compose_logs_argv,
+    build_compose_up_argv,
+    check_docker_available,
+    compose_file_path,
+    ensure_visualizer_source,
+    is_port_available,
+    wait_for_ready,
+)
 
 
 def _make_dataset(
@@ -277,3 +290,278 @@ class TestRenderRunEnv:
         lines = [line for line in content.strip().split("\n") if line]
         for line in lines:
             assert "=" in line, f"line {line!r} doesn't look like KEY=VALUE"
+
+
+class TestComposeFilePath:
+    def test_points_at_checked_in_compose_file(self):
+        path = compose_file_path()
+        assert path.name == "docker-compose.yml"
+        assert path.is_file()  # this task creates the real file, so it must exist
+
+
+class TestComposeArgvBuilders:
+    def test_up_argv_without_rebuild(self):
+        argv = build_compose_up_argv(Path("/x/docker-compose.yml"), Path("/x/run.env"))
+        assert argv == [
+            "docker",
+            "compose",
+            "-p",
+            "mcap-viz",
+            "-f",
+            "/x/docker-compose.yml",
+            "--env-file",
+            "/x/run.env",
+            "up",
+            "-d",
+        ]
+
+    def test_up_argv_with_rebuild(self):
+        argv = build_compose_up_argv(
+            Path("/x/docker-compose.yml"), Path("/x/run.env"), rebuild=True
+        )
+        assert argv[-1] == "--build"
+        assert (
+            argv[-2:] == ["-d", "--build"] or "--build" in argv
+        )  # exact position isn't load-bearing, presence is
+
+    def test_down_argv(self):
+        argv = build_compose_down_argv(Path("/x/docker-compose.yml"), Path("/x/run.env"))
+        assert argv == [
+            "docker",
+            "compose",
+            "-p",
+            "mcap-viz",
+            "-f",
+            "/x/docker-compose.yml",
+            "--env-file",
+            "/x/run.env",
+            "down",
+        ]
+
+    def test_logs_argv(self):
+        argv = build_compose_logs_argv(Path("/x/docker-compose.yml"), Path("/x/run.env"))
+        assert argv == [
+            "docker",
+            "compose",
+            "-p",
+            "mcap-viz",
+            "-f",
+            "/x/docker-compose.yml",
+            "--env-file",
+            "/x/run.env",
+            "logs",
+            "--no-color",
+        ]
+
+
+class TestIsPortAvailable:
+    def test_free_port_reports_available(self):
+        # Bind to port 0 to let the OS pick a genuinely free ephemeral port,
+        # close it, then immediately check availability (small TOCTOU risk
+        # is acceptable in a test).
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            free_port = s.getsockname()[1]
+        assert is_port_available(free_port) is True
+
+    def test_bound_port_reports_unavailable(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            bound_port = s.getsockname()[1]
+            assert is_port_available(bound_port) is False
+
+
+class TestCheckDockerAvailable:
+    def test_docker_missing_from_path(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda _name: None)
+        ok, message = check_docker_available()
+        assert ok is False
+        assert "not installed" in message.lower() or "not on path" in message.lower()
+
+    def test_daemon_not_running(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/docker")
+
+        def fake_runner(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, returncode=1, stdout="", stderr="daemon down")
+
+        ok, message = check_docker_available(runner=fake_runner)
+        assert ok is False
+        assert "daemon" in message.lower()
+
+    def test_compose_plugin_missing(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/docker")
+        call_count = {"n": 0}
+
+        def fake_runner(argv, **kwargs):
+            call_count["n"] += 1
+            if "version" in argv and "compose" not in argv:
+                return subprocess.CompletedProcess(argv, returncode=0, stdout="ok", stderr="")
+            return subprocess.CompletedProcess(argv, returncode=1, stdout="", stderr="no compose")
+
+        ok, message = check_docker_available(runner=fake_runner)
+        assert ok is False
+        assert "compose" in message.lower()
+
+    def test_all_available(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/docker")
+
+        def fake_runner(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, returncode=0, stdout="ok", stderr="")
+
+        ok, message = check_docker_available(runner=fake_runner)
+        assert ok is True
+        assert message == ""
+
+
+class TestEnsureVisualizerSource:
+    def test_clones_and_checks_out_when_absent(self, tmp_path):
+        calls = []
+
+        def fake_runner(argv, **kwargs):
+            calls.append(argv)
+            if argv[:2] == ["git", "clone"]:
+                # simulate git actually creating the target directory
+                Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+        ok, source_dir, err = ensure_visualizer_source(tmp_path, runner=fake_runner)
+        assert ok is True
+        assert err == ""
+        assert source_dir == tmp_path / "lerobot-dataset-visualizer"
+        assert any(c[:2] == ["git", "clone"] for c in calls)
+        assert any(c[:3] == ["git", "-C", str(source_dir)] and "checkout" in c for c in calls)
+
+    def test_reuses_existing_checkout_at_correct_sha_without_fetching(self, tmp_path):
+        source_dir = tmp_path / "lerobot-dataset-visualizer"
+        source_dir.mkdir()
+        calls = []
+
+        def fake_runner(argv, **kwargs):
+            calls.append(argv)
+            if "rev-parse" in argv:
+                return subprocess.CompletedProcess(
+                    argv, returncode=0, stdout=VISUALIZER_PINNED_SHA + "\n", stderr=""
+                )
+            return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+        ok, result_dir, err = ensure_visualizer_source(tmp_path, runner=fake_runner)
+        assert ok is True
+        assert result_dir == source_dir
+        assert not any(c[:2] == ["git", "clone"] for c in calls)
+        assert not any("fetch" in c for c in calls)  # correct SHA already -> no network needed
+
+    def test_refetches_when_sha_mismatch(self, tmp_path):
+        source_dir = tmp_path / "lerobot-dataset-visualizer"
+        source_dir.mkdir()
+        calls = []
+
+        def fake_runner(argv, **kwargs):
+            calls.append(argv)
+            if "rev-parse" in argv:
+                return subprocess.CompletedProcess(
+                    argv, returncode=0, stdout="deadbeef" * 5, stderr=""
+                )
+            return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+        ok, result_dir, err = ensure_visualizer_source(tmp_path, runner=fake_runner)
+        assert ok is True
+        assert any("fetch" in c for c in calls)
+        assert any("checkout" in c for c in calls)
+
+    def test_refresh_deletes_existing_before_cloning(self, tmp_path):
+        source_dir = tmp_path / "lerobot-dataset-visualizer"
+        source_dir.mkdir()
+        (source_dir / "marker.txt").write_text("stale")
+        calls = []
+
+        def fake_runner(argv, **kwargs):
+            calls.append(argv)
+            if argv[:2] == ["git", "clone"]:
+                Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+        ok, result_dir, err = ensure_visualizer_source(tmp_path, refresh=True, runner=fake_runner)
+        assert ok is True
+        assert not (source_dir / "marker.txt").exists()  # old checkout was wiped
+        assert any(c[:2] == ["git", "clone"] for c in calls)
+
+    def test_clone_failure_reports_error(self, tmp_path):
+        def fake_runner(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv, returncode=1, stdout="", stderr="network unreachable"
+            )
+
+        ok, source_dir, err = ensure_visualizer_source(tmp_path, runner=fake_runner)
+        assert ok is False
+        assert "clone" in err.lower()
+        assert "network unreachable" in err
+
+
+class TestWaitForReady:
+    def test_returns_true_when_all_urls_ready_immediately(self):
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def getcode(self):
+                return 200
+
+        result = wait_for_ready(
+            ["http://a", "http://b"],
+            opener=lambda _url: FakeResponse(),
+            sleep=lambda _s: None,
+        )
+        assert result is True
+
+    def test_returns_false_on_persistent_failure_within_timeout(self):
+        def always_fails(url):
+            raise urllib.error.URLError("connection refused")
+
+        calls = {"clock": 0}
+
+        def fake_clock():
+            calls["clock"] += 1
+            return calls["clock"] * 10  # advances fast past any timeout
+
+        result = wait_for_ready(
+            ["http://a"],
+            timeout_s=5.0,
+            opener=always_fails,
+            sleep=lambda _s: None,
+            clock=fake_clock,
+        )
+        assert result is False
+
+    def test_succeeds_after_a_few_failed_attempts(self):
+        attempt = {"n": 0}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def getcode(self):
+                return 200
+
+        def flaky_opener(url):
+            attempt["n"] += 1
+            if attempt["n"] < 3:
+                raise urllib.error.URLError("not ready yet")
+            return FakeResponse()
+
+        result = wait_for_ready(
+            ["http://a"],
+            timeout_s=100.0,
+            opener=flaky_opener,
+            sleep=lambda _s: None,
+        )
+        assert result is True
+        assert attempt["n"] >= 3
