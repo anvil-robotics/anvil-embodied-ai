@@ -48,6 +48,68 @@ uv run mcap-convert \
 | `--vcodec` | `h264` | `h264` · `hevc` · `libsvtav1` |
 | `--robot-type` | `anvil_openarm` | `anvil_openarm` · `anvil_yam` |
 | `--act-from-obs-n-step N` | config value | Override `action_from_observation_n` at runtime: `action[t] = observation[t+N]` |
+| `--quality-report PATH` | — | Consume a `mcap-valid --format json` report to skip flagged episodes (see below) |
+| `--skip-flagged [critical\|warning]` | — | Requires `--quality-report`. Bare flag skips `critical`-only episodes; `--skip-flagged warning` also skips `warning` episodes |
+| `--skip-episode-idx SPEC` | — | Manually skip episodes by 1-based index (see below) |
+
+**Skipping flagged or known-bad episodes** — two independent mechanisms, usable together:
+
+```bash
+# Scan first, then convert skipping anything flagged critical
+uv run mcap-valid -i data/raw/my-session --config configs/mcap_converter/openarm_bimanual_quest.yaml \
+  --format json --output /tmp/quality.json
+uv run mcap-convert -i data/raw/my-session --config configs/mcap_converter/openarm_bimanual_quest.yaml \
+  --quality-report /tmp/quality.json --skip-flagged
+
+# Also skip warning-level episodes (only convert fully-clean episodes)
+uv run mcap-convert -i data/raw/my-session --config ... --quality-report /tmp/quality.json --skip-flagged warning
+
+# Manually skip specific episodes by 1-based index — no quality report needed
+uv run mcap-convert -i data/raw/my-session --config ... --skip-episode-idx "3,7"       # episodes 3 and 7
+uv run mcap-convert -i data/raw/my-session --config ... --skip-episode-idx "1:4"       # episodes 1,2,3 (end EXCLUSIVE, like Python's range())
+uv run mcap-convert -i data/raw/my-session --config ... --skip-episode-idx "1,5:8,12"  # mixed: 1, 5, 6, 7, 12
+```
+
+`--skip-episode-idx` ranges follow Python slice convention — the end index is **not included** (`1:4` → episodes 1, 2, 3; matches `range(1, 4)`, not "1 through 4 inclusive"). An omitted start defaults to `1`; an omitted end reaches the last episode (`3:` → episode 3 through the end).
+
+Without `--quality-report`, running `mcap-valid` first isn't required — `--skip-episode-idx` alone is enough if you already know which episodes are bad.
+
+---
+
+## mcap-valid
+
+Scan **raw** MCAP recordings for quality issues before conversion — dropped frames, silent topics, cross-episode fps degradation. Run this against `data/raw/...`, not a converted dataset: converted datasets have gap-filled timestamps that hide the original drops.
+
+```bash
+uv run mcap-valid -i data/raw/my-session --config configs/mcap_converter/openarm_bimanual_quest.yaml
+uv run mcap-valid -i data/raw/my-session --config ... --verbose            # show healthy topics too
+uv run mcap-valid -i data/raw/my-session --config ... --fail-on-critical   # CI gate, exit 1 on any critical episode
+```
+
+A JSON report and a comprehensive Markdown report are **always** written to `./mcap_valid_reports/<input-dir-name>.{json,md}`, in addition to the terminal table — no flags required. The JSON report is what `mcap-convert --quality-report` consumes.
+
+Severity model:
+
+| Severity | Meaning |
+|----------|---------|
+| 🔴 `critical` | A camera or `joint_states` stream has zero messages, or an internal/leading/trailing gap — real data loss, no benign explanation |
+| 🟡 `warning` | An action topic has zero messages or an idle gap (e.g. one arm not yet picked up — this is normal teleop behavior, not necessarily a defect), or a stream's average fps dropped noticeably relative to the rest of the batch |
+| 🟢 `ok` | No issues detected |
+
+An episode's overall status is its single worst topic's severity. `--fail-on-critical` only fails on `critical` — `warning` episodes convert normally unless you also pass `mcap-convert --skip-flagged warning`.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-i / --input PATH` | _(required)_ | MCAP file, or a directory scanned recursively for `*.mcap` |
+| `--config PATH` | default config | Conversion config YAML — determines which topics are monitored |
+| `--format` | `table` | `table` · `json` |
+| `--output PATH` | — | Additionally write the report here (independent of the always-on `mcap_valid_reports/` output) |
+| `--fail-on-critical` | — | Exit 1 if any episode has a critical issue — for CI gating |
+| `--verbose` | — | Show per-topic detail even for episodes with no issues |
+| `--stream-gap-factor N` | `5.0` | Stream gap threshold, as a multiple of that topic's own median interval |
+| `--stream-min-gap N` | `0.5` | Absolute floor (seconds) below which a stream gap is never flagged |
+| `--action-warn-gap N` | `1.0` | Minimum idle duration (seconds) before an action-topic gap is reported |
+| `--fps-tolerance N` | `0.15` | Fraction below the batch's median fps before flagging degradation |
 
 ---
 
