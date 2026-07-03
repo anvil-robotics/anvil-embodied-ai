@@ -9,6 +9,7 @@ import contextlib
 import json
 import os
 import shutil
+import stat
 import sys
 import time
 from datetime import datetime
@@ -198,7 +199,7 @@ def _ensure_output_readable(output_dir: str) -> None:
     root = Path(output_dir)
     for path in root.rglob("*"):
         try:
-            current_mode = path.stat().st_mode
+            current_mode = stat.S_IMODE(path.stat().st_mode)
             if path.is_dir():
                 # ensure r+w+x for owner, r+x for group/other (on top of whatever's already set)
                 os.chmod(path, current_mode | 0o755)
