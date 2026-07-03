@@ -40,6 +40,48 @@ def _patch_resume_video_continuation(dataset: LeRobotDataset) -> None:
 
     No-ops entirely for a fresh (non-resumed) dataset, where `meta.episodes`
     is empty/None and this bug cannot occur.
+
+    WARNING — depends on private lerobot internals, not a stable public API:
+    This function monkeypatches two PRIVATE, underscore-prefixed methods —
+    `dataset.writer._save_episode_video` and `dataset.meta.save_episode`'s
+    internal branching on `meta.latest_episode` — that are internal
+    implementation details of the third-party `lerobot` package, not a
+    contract lerobot guarantees to keep stable across versions. This repo
+    currently pins `lerobot~=0.5.0` (see
+    packages/mcap_converter/pyproject.toml). If that pin is ever bumped
+    (including a patch/minor bump within the `~=0.5.0` range, or a move to
+    0.6.x+), this function MUST be re-verified against the new version's
+    `dataset_writer.py` (`_save_episode_video`) and `dataset_metadata.py`
+    (`save_episode` / `latest_episode` handling) source, since lerobot could
+    silently rename or restructure these internals without any warning from
+    a normal `uv sync` — the failure mode would only surface later, either
+    as a silent behavioral regression (extra video chunk files reappear) or
+    a `KeyError`/`AttributeError` at conversion time.
+
+    `tests/unit/mcap_converter/test_resume_video_continuation.py` is the
+    regression test that would catch a real behavioral break here, and it
+    catches more than it might seem at first:
+    - If lerobot renames or removes `_save_episode_video` entirely, the line
+      `original_save_episode_video = dataset.writer._save_episode_video`
+      above would raise `AttributeError` immediately when this function
+      runs — a loud, immediate failure, not a silent one. The regression
+      test would fail too (as would every `--resume` conversion), so this
+      class of drift is well covered.
+    - The narrower, genuinely NOT-fully-covered case is a subtler internal
+      change: `_save_episode_video`/`save_episode` keep their names and
+      signatures, but lerobot alters what `latest_episode` needs to contain
+      or how it's consumed internally (e.g. adds/renames a required key
+      beyond `chunk_index`/`file_index`/`to_timestamp`, or changes the
+      None-sentinel semantics this patch relies on). That WOULD still be
+      caught by this regression test (it asserts resumed vs. single-pass
+      video file counts match, so wrong/missing keys or broken continuation
+      logic would surface as a count mismatch or an exception) — but only
+      when the test suite is actually run against the new lerobot version.
+      Nothing in `uv sync` or normal CI dependency resolution would trigger
+      that test run automatically on a version bump, so the real risk is
+      process (bumping the pin without re-running/re-verifying this
+      specific test against it), not a fundamental blind spot in the test
+      itself.
     """
     meta = dataset.meta
     if meta.episodes is None or len(meta.episodes) == 0:

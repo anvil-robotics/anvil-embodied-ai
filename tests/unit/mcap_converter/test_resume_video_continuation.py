@@ -2,8 +2,11 @@
 
 from pathlib import Path
 
+import pytest
+
 from mcap_converter.cli.convert import convert_session
 from mcap_converter.config.loader import ConfigLoader
+from mcap_converter.core.writer import _patch_resume_video_continuation
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _FIXTURE_DIR = _REPO_ROOT / "tests" / "smoke" / "fixtures" / "test-session"
@@ -81,3 +84,41 @@ class TestResumeDoesNotFragmentVideo:
             f"files per camera as a single-pass conversion, but got "
             f"single-pass={single_pass_counts} vs resumed={resumed_counts}"
         )
+
+
+class TestPatchIsNoOpForFreshDataset:
+    """`_patch_resume_video_continuation` must early-exit for a fresh (non-resumed)
+    dataset, without touching `dataset.writer._save_episode_video` or
+    `dataset.meta.save_episode` at all. This directly targets the early-exit
+    condition `meta.episodes is None or len(meta.episodes) == 0`.
+    """
+
+    @pytest.mark.parametrize("episodes", [None, []], ids=["episodes=None", "episodes=[]"])
+    def test_does_not_patch_when_no_prior_episodes_exist(self, episodes):
+        class FakeMeta:
+            pass
+
+        class FakeWriter:
+            def _save_episode_video(self, *args, **kwargs):
+                pass
+
+        class FakeDataset:
+            meta = FakeMeta()
+            writer = FakeWriter()
+
+        dataset = FakeDataset()
+        dataset.meta.episodes = episodes
+        # Bound methods compare equal (==) when they wrap the same underlying
+        # function on the same instance, but a fresh bound-method object is
+        # created on every attribute access, so `is` would spuriously fail
+        # even when nothing was patched. `==` is the correct "unchanged" check.
+        original_video_fn = dataset.writer._save_episode_video
+
+        # FakeMeta intentionally defines no `save_episode` attribute: if the
+        # early-exit did not return before reaching the meta-patching code,
+        # accessing `meta.save_episode` would raise AttributeError, failing
+        # this test for exactly the right reason.
+        _patch_resume_video_continuation(dataset)
+
+        assert dataset.writer._save_episode_video == original_video_fn
+        assert not hasattr(dataset.meta, "save_episode")
