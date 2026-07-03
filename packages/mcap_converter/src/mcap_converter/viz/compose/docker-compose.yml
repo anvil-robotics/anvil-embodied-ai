@@ -6,7 +6,7 @@ services:
     volumes:
       - ${MCAP_VIZ_DATASET_ROOT}:/srv/dataset:ro
       - ${MCAP_VIZ_NGINX_CONF}:/etc/nginx/nginx.conf:ro
-    restart: unless-stopped
+    restart: "no"
 
   frontend:
     image: mcap-viz-frontend:local
@@ -18,4 +18,4 @@ services:
       - DATASET_URL=http://localhost:${STATIC_PORT}
     depends_on:
       - static
-    restart: unless-stopped
+    restart: "no"

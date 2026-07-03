@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from mcap_converter.viz.config import VISUALIZER_PINNED_SHA, VISUALIZER_REPO_URL
 
@@ -95,24 +95,68 @@ def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
         return True
 
 
+def _run_or_error(
+    runner: Callable, argv: List[str], failure_prefix: str
+) -> Tuple[Optional[subprocess.CompletedProcess], Optional[str]]:
+    """
+    Run `runner(argv, capture_output=True, text=True)`, converting an OSError
+    raised by the runner itself (e.g. PermissionError because the caller
+    can't access the Docker socket, or FileNotFoundError if the executable
+    disappeared) into a clean error message instead of letting it propagate.
+
+    Returns (completed_process, None) on success, or (None, error_message)
+    if the runner raised.
+    """
+    try:
+        return runner(argv, capture_output=True, text=True), None
+    except OSError as exc:
+        return None, f"{failure_prefix}: {exc}"
+
+
 def check_docker_available(runner: Callable = subprocess.run) -> Tuple[bool, str]:
     """
     Returns (ok, message). message is empty on success, or a clear
     human-readable reason on failure (Docker missing vs. daemon down vs.
-    compose plugin missing).
+    compose plugin missing). Never raises, even if `runner` itself raises
+    an OSError (e.g. PermissionError on the Docker socket).
     """
     if shutil.which("docker") is None:
         return False, "Docker is not installed or not on PATH."
-    result = runner(["docker", "version"], capture_output=True, text=True)
+
+    result, error = _run_or_error(runner, ["docker", "version"], "failed to run 'docker version'")
+    if error is not None:
+        return False, error
     if result.returncode != 0:
         return False, "Docker is installed but the daemon is not running (or not accessible)."
-    compose_result = runner(["docker", "compose", "version"], capture_output=True, text=True)
+
+    compose_result, error = _run_or_error(
+        runner, ["docker", "compose", "version"], "failed to run 'docker compose version'"
+    )
+    if error is not None:
+        return False, error
     if compose_result.returncode != 0:
         return False, "Docker Compose plugin is not available (`docker compose version` failed)."
     return True, ""
 
 
 # ── Pinned-source acquisition ─────────────────────────────────────────────
+
+
+def _checkout_pinned_sha(runner: Callable, source_dir: Path) -> str:
+    """
+    Checkout VISUALIZER_PINNED_SHA in `source_dir`. Returns an empty string
+    on success, or a human-readable error message on failure (whether from a
+    nonzero exit code or an OSError raised by `runner` itself).
+    """
+    failure_prefix = f"git checkout {VISUALIZER_PINNED_SHA} failed"
+    result, error = _run_or_error(
+        runner, ["git", "-C", str(source_dir), "checkout", VISUALIZER_PINNED_SHA], failure_prefix
+    )
+    if error is not None:
+        return error
+    if result.returncode != 0:
+        return f"{failure_prefix}: {result.stderr.strip()}"
+    return ""
 
 
 def ensure_visualizer_source(
@@ -134,7 +178,8 @@ def ensure_visualizer_source(
 
     Returns (ok, source_dir, error_message). error_message is empty on
     success. On failure, source_dir is still returned (best-effort) but
-    should not be used.
+    should not be used. Never raises, even if `runner` itself raises an
+    OSError (e.g. `git` not being executable).
     """
     source_dir = cache_dir / VISUALIZER_SOURCE_DIRNAME
 
@@ -143,49 +188,43 @@ def ensure_visualizer_source(
 
     if not source_dir.exists():
         cache_dir.mkdir(parents=True, exist_ok=True)
-        clone_result = runner(
+        clone_result, error = _run_or_error(
+            runner,
             ["git", "clone", "--filter=blob:none", VISUALIZER_REPO_URL, str(source_dir)],
-            capture_output=True,
-            text=True,
+            "git clone failed",
         )
+        if error is not None:
+            return False, source_dir, error
         if clone_result.returncode != 0:
             return False, source_dir, f"git clone failed: {clone_result.stderr.strip()}"
-        checkout_result = runner(
-            ["git", "-C", str(source_dir), "checkout", VISUALIZER_PINNED_SHA],
-            capture_output=True,
-            text=True,
-        )
-        if checkout_result.returncode != 0:
-            return (
-                False,
-                source_dir,
-                f"git checkout {VISUALIZER_PINNED_SHA} failed: {checkout_result.stderr.strip()}",
-            )
+
+        checkout_error = _checkout_pinned_sha(runner, source_dir)
+        if checkout_error:
+            return False, source_dir, checkout_error
         return True, source_dir, ""
 
-    rev_parse_result = runner(
+    rev_parse_result, error = _run_or_error(
+        runner,
         ["git", "-C", str(source_dir), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
+        "git rev-parse HEAD failed",
     )
+    if error is not None:
+        return False, source_dir, error
     current_sha = rev_parse_result.stdout.strip() if rev_parse_result.returncode == 0 else None
     if current_sha == VISUALIZER_PINNED_SHA:
         return True, source_dir, ""
 
-    fetch_result = runner(["git", "-C", str(source_dir), "fetch"], capture_output=True, text=True)
+    fetch_result, error = _run_or_error(
+        runner, ["git", "-C", str(source_dir), "fetch"], "git fetch failed"
+    )
+    if error is not None:
+        return False, source_dir, error
     if fetch_result.returncode != 0:
         return False, source_dir, f"git fetch failed: {fetch_result.stderr.strip()}"
-    checkout_result = runner(
-        ["git", "-C", str(source_dir), "checkout", VISUALIZER_PINNED_SHA],
-        capture_output=True,
-        text=True,
-    )
-    if checkout_result.returncode != 0:
-        return (
-            False,
-            source_dir,
-            f"git checkout {VISUALIZER_PINNED_SHA} failed: {checkout_result.stderr.strip()}",
-        )
+
+    checkout_error = _checkout_pinned_sha(runner, source_dir)
+    if checkout_error:
+        return False, source_dir, checkout_error
     return True, source_dir, ""
 
 

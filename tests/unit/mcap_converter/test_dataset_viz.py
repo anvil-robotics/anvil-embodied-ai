@@ -413,6 +413,16 @@ class TestCheckDockerAvailable:
         assert ok is True
         assert message == ""
 
+    def test_docker_version_raises_oserror_reports_clean_failure(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/docker")
+
+        def crashing_runner(argv, **kwargs):
+            raise PermissionError("[Errno 13] Permission denied: docker.sock")
+
+        ok, message = check_docker_available(runner=crashing_runner)  # must not raise
+        assert ok is False
+        assert message  # non-empty, human-readable
+
 
 class TestEnsureVisualizerSource:
     def test_clones_and_checks_out_when_absent(self, tmp_path):
@@ -496,6 +506,62 @@ class TestEnsureVisualizerSource:
         assert ok is False
         assert "clone" in err.lower()
         assert "network unreachable" in err
+
+    def test_checkout_failure_after_successful_clone_reports_error(self, tmp_path):
+        def fake_runner(argv, **kwargs):
+            if argv[:2] == ["git", "clone"]:
+                Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+            if "checkout" in argv:
+                return subprocess.CompletedProcess(
+                    argv, returncode=1, stdout="", stderr="pathspec did not match"
+                )
+            return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+        ok, source_dir, err = ensure_visualizer_source(tmp_path, runner=fake_runner)
+        assert ok is False
+        assert "checkout" in err.lower()
+        assert "pathspec did not match" in err
+
+    def test_fetch_failure_reports_error(self, tmp_path):
+        source_dir = tmp_path / "lerobot-dataset-visualizer"
+        source_dir.mkdir()
+
+        def fake_runner(argv, **kwargs):
+            if "rev-parse" in argv:
+                return subprocess.CompletedProcess(
+                    argv, returncode=0, stdout="deadbeef" * 5, stderr=""
+                )
+            if "fetch" in argv:
+                return subprocess.CompletedProcess(
+                    argv, returncode=1, stdout="", stderr="could not resolve host"
+                )
+            return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+        ok, result_dir, err = ensure_visualizer_source(tmp_path, runner=fake_runner)
+        assert ok is False
+        assert "fetch" in err.lower()
+        assert "could not resolve host" in err
+
+    def test_checkout_failure_after_successful_fetch_reports_error(self, tmp_path):
+        source_dir = tmp_path / "lerobot-dataset-visualizer"
+        source_dir.mkdir()
+
+        def fake_runner(argv, **kwargs):
+            if "rev-parse" in argv:
+                return subprocess.CompletedProcess(
+                    argv, returncode=0, stdout="deadbeef" * 5, stderr=""
+                )
+            if "checkout" in argv:
+                return subprocess.CompletedProcess(
+                    argv, returncode=1, stdout="", stderr="pathspec did not match"
+                )
+            return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+        ok, result_dir, err = ensure_visualizer_source(tmp_path, runner=fake_runner)
+        assert ok is False
+        assert "checkout" in err.lower()
+        assert "pathspec did not match" in err
 
 
 class TestWaitForReady:
