@@ -56,6 +56,12 @@ def validate_dataset_root(root: Path) -> DatasetCheck:
         errors.append(f"could not read/parse {info_path}: {exc}")
         return DatasetCheck(ok=False, errors=errors)
 
+    if not isinstance(info, dict):
+        errors.append(
+            f"{info_path} does not contain a JSON object (got {type(info).__name__})"
+        )
+        return DatasetCheck(ok=False, errors=errors)
+
     codebase_version = info.get("codebase_version")
     if codebase_version not in SUPPORTED_CODEBASE_VERSIONS:
         errors.append(

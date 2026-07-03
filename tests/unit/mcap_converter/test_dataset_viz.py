@@ -67,6 +67,14 @@ class TestValidateDatasetRoot:
         result = validate_dataset_root(root)
         assert result.ok is False
 
+    def test_info_json_not_a_dict_fails_gracefully(self, tmp_path):
+        root = tmp_path / "weird-info"
+        (root / "meta").mkdir(parents=True)
+        (root / "meta" / "info.json").write_text(json.dumps(["not", "a", "dict"]))
+        result = validate_dataset_root(root)  # must not raise
+        assert result.ok is False
+        assert any("info.json" in e or "JSON object" in e for e in result.errors)
+
     def test_unsupported_codebase_version_fails(self, tmp_path):
         root = _make_dataset(tmp_path, codebase_version="v1.0")
         result = validate_dataset_root(root)
