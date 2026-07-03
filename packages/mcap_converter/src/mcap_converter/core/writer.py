@@ -9,6 +9,81 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from ..config.schema import DEFAULT_DATA_CONFIG, DataConfig
 
 
+def _patch_resume_video_continuation(dataset: LeRobotDataset) -> None:
+    """
+    Work around a chunk-continuation bug in lerobot 0.5.1: after
+    LeRobotDataset.resume(), LeRobotDatasetMetadata.latest_episode is None
+    (never restored from existing metadata). Two independent pieces of
+    lerobot's own code branch on this same None sentinel, but need OPPOSITE
+    behavior on resume:
+
+    - dataset_metadata.py's _save_episode_metadata() correctly and
+      intentionally treats `latest_episode is None` + existing episodes as
+      "we are resuming — open a new parquet metadata file" (to avoid
+      overwriting the existing one). This is correct and must not be touched.
+    - dataset_writer.py's _save_episode_video() uses the SAME sentinel to
+      decide whether to start a brand-new video chunk file. On resume this
+      needlessly opens a new video file for the very first post-resume
+      episode, even when the existing file is nowhere near the size cap —
+      exactly the same continuation behavior that happens for every OTHER
+      episode once latest_episode is populated for real.
+
+    Fix: for the first save_episode() call after resume only, synthesize a
+    `latest_episode`-shaped dict (sourced from `meta.episodes[-1]`, one
+    entry per camera, added lazily as each camera's video is processed) so
+    the video-continuation check succeeds and appends to the existing file.
+    Immediately before the metadata write for that same episode runs, reset
+    `latest_episode` back to None so the parquet-file-continuation logic is
+    completely unaffected and still correctly opens a new metadata file.
+    After that first episode, `latest_episode` is populated for real by
+    lerobot's own code and both patches become permanent no-ops.
+
+    No-ops entirely for a fresh (non-resumed) dataset, where `meta.episodes`
+    is empty/None and this bug cannot occur.
+    """
+    meta = dataset.meta
+    if meta.episodes is None or len(meta.episodes) == 0:
+        return  # fresh dataset — nothing to patch
+
+    state = {"needs_reset": False}
+
+    original_save_episode_video = dataset.writer._save_episode_video
+
+    def patched_save_episode_video(video_key, episode_index, temp_path=None):
+        chunk_key = f"videos/{video_key}/chunk_index"
+        file_key = f"videos/{video_key}/file_index"
+        # NOTE: to_timestamp is also required here — the continuation branch
+        # of lerobot's _save_episode_video() reads
+        # latest_episode[f"videos/{video_key}/to_timestamp"][0] to compute
+        # the running duration offset for the next episode. This key was
+        # missing from the originally specified fix and was discovered while
+        # testing (KeyError without it); it belongs to the same
+        # meta.episodes[-1] row as chunk_index/file_index, so it is added
+        # here using the same lazy, per-camera, list-wrapped pattern.
+        to_timestamp_key = f"videos/{video_key}/to_timestamp"
+        if meta.latest_episode is None or chunk_key not in meta.latest_episode:
+            last_episode = meta.episodes[-1]
+            if meta.latest_episode is None:
+                meta.latest_episode = {}
+                state["needs_reset"] = True
+            meta.latest_episode[chunk_key] = [last_episode[chunk_key]]
+            meta.latest_episode[file_key] = [last_episode[file_key]]
+            meta.latest_episode[to_timestamp_key] = [last_episode[to_timestamp_key]]
+        return original_save_episode_video(video_key, episode_index, temp_path=temp_path)
+
+    dataset.writer._save_episode_video = patched_save_episode_video
+
+    original_meta_save_episode = meta.save_episode
+
+    def patched_meta_save_episode(*args, **kwargs):
+        if state["needs_reset"]:
+            meta.latest_episode = None
+            state["needs_reset"] = False
+        return original_meta_save_episode(*args, **kwargs)
+
+    meta.save_episode = patched_meta_save_episode
+
+
 class LeRobotWriter:
     """
     Write data to LeRobot v3.0 format dataset
@@ -299,11 +374,13 @@ class LeRobotWriter:
         Returns:
             LeRobotDataset instance ready to accept add_frame / save_episode calls
         """
-        return LeRobotDataset.resume(
+        dataset = LeRobotDataset.resume(
             repo_id=self.repo_id,
             root=str(self.output_dir),
             vcodec=self.vcodec,
         )
+        _patch_resume_video_continuation(dataset)
+        return dataset
 
     def __repr__(self) -> str:
         return f"LeRobotWriter(output_dir='{self.output_dir}', repo_id='{self.repo_id}')"
