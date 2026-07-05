@@ -95,6 +95,10 @@ fi
 # ECHO_TOPIC_ONLY: subscribe + log FPS without loading a model (DDS connectivity check)
 if [[ "$ECHO_TOPIC_ONLY_REQUESTED" == true ]]; then
     export ECHO_TOPIC_ONLY=true
+    if [[ -z "${MODEL_PATH:-}" || ! -e "${MODEL_PATH}" ]]; then
+        export MODEL_PATH="/dev/null"
+        echo "[run_inference] ECHO_TOPIC_ONLY=true; using MODEL_PATH=/dev/null"
+    fi
 fi
 
 # Auto-detect ACTION_TYPE from model checkpoint's anvil_config.json.

@@ -92,6 +92,10 @@ uv sync --all-packages --extra all                  # all policies
 
 Record teleoperation demonstrations as ROS2 MCAP files through an [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). See the [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
 
+For a first-day real robot checklist, including repo preflight, raw MCAP inspection,
+timing reports, conversion, validation, and first live inference checks, see
+[`docs/real-robot-calibration.md`](docs/real-robot-calibration.md).
+
 ---
 
 ## 1. Data Conversion
