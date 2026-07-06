@@ -596,7 +596,145 @@ class TestScanEpisodeIntegration:
         assert rosout.severity == SEVERITY_OK
         assert rosout.message_count == 5
         assert rosout.message_type == "rcl_interfaces/Log"
+        # /rosout has no real channel in the fixture file, so there are no
+        # actual messages to compute an fps from despite the fake count=5.
+        assert rosout.avg_fps is None
         assert report.severity == baseline.severity
+
+    def test_unclassified_topic_with_real_messages_gets_computed_avg_fps(self, monkeypatch):
+        # Relabel an existing, genuinely-recorded topic's schema as unclassified
+        # (the underlying MCAP channel is untouched, so decoding its real
+        # messages still works) to verify avg_fps is now computed from real
+        # timestamps for unclassified topics, using the same
+        # (n-1)/(span) formula already used for role="stream".
+        from mcap_converter.core import quality as quality_module
+
+        real_info = quality_module._summary_topic_info(str(_STUB_MCAP))
+
+        def fake_summary_topic_info(mcap_path):
+            info = dict(real_info)
+            joint = info["/joint_states"]
+            info["/joint_states"] = _TopicSummary(count=joint.count, schema_name="custom_msgs/Unknown")
+            return info
+
+        monkeypatch.setattr(quality_module, "_summary_topic_info", fake_summary_topic_info)
+
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
+
+        joint = next(t for t in report.topics if t.topic == "/joint_states")
+        assert joint.role == ROLE_UNCLASSIFIED
+        assert joint.severity == SEVERITY_OK
+        assert joint.message_count == 120
+        # Pinned to the same manually-verified span used by
+        # test_duration_matches_manually_verified_monitored_topic_timestamps:
+        # 120 messages spanning 0.0 -> 3.966666627s.
+        assert joint.avg_fps == pytest.approx(119 / 3.966666627, rel=1e-6)
+
+    def test_unclassified_topic_with_single_message_has_no_avg_fps(self, monkeypatch):
+        # A single timestamp can't produce a meaningful average — same rule
+        # already applied to role="stream" topics.
+        from mcap_converter.core import quality as quality_module
+
+        real_info = quality_module._summary_topic_info(str(_STUB_MCAP))
+        real_collect_timestamps = quality_module._collect_timestamps
+
+        def fake_summary_topic_info(mcap_path):
+            info = dict(real_info)
+            info["/rosout"] = _TopicSummary(count=1, schema_name="rcl_interfaces/Log")
+            return info
+
+        def fake_collect_timestamps(mcap_path, topics):
+            if topics == ["/rosout"]:
+                return {"/rosout": [1.23]}
+            return real_collect_timestamps(mcap_path, topics)
+
+        monkeypatch.setattr(quality_module, "_summary_topic_info", fake_summary_topic_info)
+        monkeypatch.setattr(quality_module, "_collect_timestamps", fake_collect_timestamps)
+
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
+
+        rosout = next(t for t in report.topics if t.topic == "/rosout")
+        assert rosout.role == ROLE_UNCLASSIFIED
+        assert rosout.message_count == 1
+        assert rosout.avg_fps is None
+        assert rosout.severity == SEVERITY_OK
+
+    def test_unclassified_topic_never_perturbs_session_bounds_or_monitored_severity(self, monkeypatch):
+        # A fast, wildly-out-of-session-range unclassified topic (like a real
+        # high-rate /tf) must never shift session_start/session_end, since
+        # that would risk mis-flagging gaps/severity on the real monitored
+        # stream/action topics. Its own fps is still computed and shown.
+        from mcap_converter.core import quality as quality_module
+
+        baseline = scan_episode(str(_STUB_MCAP), QualityThresholds())
+        real_info = quality_module._summary_topic_info(str(_STUB_MCAP))
+        real_collect_timestamps = quality_module._collect_timestamps
+
+        def fake_summary_topic_info(mcap_path):
+            info = dict(real_info)
+            info["/tf"] = _TopicSummary(count=3, schema_name="tf2_msgs/TFMessage")
+            return info
+
+        def fake_collect_timestamps(mcap_path, topics):
+            if topics == ["/tf"]:
+                return {"/tf": [-100.0, 0.0, 100.0]}
+            return real_collect_timestamps(mcap_path, topics)
+
+        monkeypatch.setattr(quality_module, "_summary_topic_info", fake_summary_topic_info)
+        monkeypatch.setattr(quality_module, "_collect_timestamps", fake_collect_timestamps)
+
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
+
+        assert report.duration_s == baseline.duration_s
+        assert report.severity == baseline.severity
+
+        tf = next(t for t in report.topics if t.topic == "/tf")
+        assert tf.role == ROLE_UNCLASSIFIED
+        assert tf.severity == SEVERITY_OK
+        assert tf.avg_fps == pytest.approx(2 / 200.0)
+
+        baseline_by_topic = {t.topic: t for t in baseline.topics}
+        for t in report.topics:
+            if t.topic == "/tf":
+                continue
+            assert t.severity == baseline_by_topic[t.topic].severity
+            assert t.avg_fps == baseline_by_topic[t.topic].avg_fps
+
+    def test_unclassified_timestamp_decode_failure_degrades_without_crashing(self, monkeypatch):
+        # An unclassified topic can in principle be any ROS2 message type (or
+        # even a non-ROS2-encoded channel) — unlike the 3 well-tested
+        # monitored types. A decode failure while collecting its timestamps
+        # must degrade to avg_fps=None, not crash the whole scan, since
+        # unclassified topics are informational-only by design.
+        from mcap.exceptions import McapError
+
+        from mcap_converter.core import quality as quality_module
+
+        real_info = quality_module._summary_topic_info(str(_STUB_MCAP))
+        real_collect_timestamps = quality_module._collect_timestamps
+
+        def fake_summary_topic_info(mcap_path):
+            info = dict(real_info)
+            info["/rosout"] = _TopicSummary(count=5, schema_name="rcl_interfaces/Log")
+            return info
+
+        def fake_collect_timestamps(mcap_path, topics):
+            if topics == ["/rosout"]:
+                raise McapError("simulated decode failure for an exotic message type")
+            return real_collect_timestamps(mcap_path, topics)
+
+        monkeypatch.setattr(quality_module, "_summary_topic_info", fake_summary_topic_info)
+        monkeypatch.setattr(quality_module, "_collect_timestamps", fake_collect_timestamps)
+
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
+
+        rosout = next(t for t in report.topics if t.topic == "/rosout")
+        assert rosout.role == ROLE_UNCLASSIFIED
+        assert rosout.message_count == 5
+        assert rosout.avg_fps is None
+        assert rosout.severity == SEVERITY_OK
+        # The monitored stream/action topics' own scan must be unaffected.
+        assert report.severity in (SEVERITY_OK, SEVERITY_WARNING)
 
     def test_nonexistent_file_produces_read_error_not_a_crash(self):
         report = scan_episode("/no/such/file.mcap", QualityThresholds())

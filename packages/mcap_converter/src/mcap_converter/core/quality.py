@@ -541,7 +541,10 @@ def scan_episode(
     from each topic's ROS2 message type (see classify_topic) — no config is
     consulted. Topics whose message type isn't one of the known robot-
     pipeline types are still surfaced in the report (role="unclassified",
-    severity always OK) rather than silently dropped.
+    severity always OK) rather than silently dropped. Their avg_fps IS
+    computed from their own real message timestamps (via a best-effort,
+    separate scan — see below), but everything else about them stays purely
+    informational: coverage/gaps/severity are never derived from it.
 
     Session start/end are computed from the actual collected message
     timestamps across all analyzable (stream/action) topics — never from
@@ -568,6 +571,7 @@ def scan_episode(
 
     monitored = classify_topics({t: ti.schema_name for t, ti in topic_info.items()})
     analyzable = [m for m in monitored if m.role in (ROLE_STREAM, ROLE_ACTION)]
+    unclassified = [m for m in monitored if m.role == ROLE_UNCLASSIFIED]
 
     scan_topics = [m.topic for m in analyzable if topic_info[m.topic].count > 0]
     ts_map = _collect_timestamps(mcap_path, scan_topics) if scan_topics else {}
@@ -576,17 +580,38 @@ def scan_episode(
     session_start = min(all_ts) if all_ts else 0.0
     session_end = max(all_ts) if all_ts else 0.0
 
+    # Unclassified topics are informational-only and must never affect session
+    # bounds or stream/action severity — but a real fps is still useful to show
+    # (this is the whole point of this block). Collected into a SEPARATE map so
+    # it can never be mixed into all_ts/session_start/session_end above. Unlike
+    # the 3 well-tested monitored message types, an unclassified topic can in
+    # principle be any ROS2 message type (or even a non-ROS2-encoded channel),
+    # so a decode failure here must degrade to "no fps" rather than fail the
+    # whole scan — these topics are informational-only by design and must
+    # never be able to break anything.
+    unclassified_scan_topics = [m.topic for m in unclassified if topic_info[m.topic].count > 0]
+    try:
+        unclassified_ts_map = (
+            _collect_timestamps(mcap_path, unclassified_scan_topics)
+            if unclassified_scan_topics
+            else {}
+        )
+    except (OSError, McapError):
+        unclassified_ts_map = {}
+
     topic_reports = []
     for m in monitored:
         if m.role == ROLE_UNCLASSIFIED:
             ti = topic_info[m.topic]
+            ts = sorted(unclassified_ts_map.get(m.topic, []))
+            avg_fps = (len(ts) - 1) / (ts[-1] - ts[0]) if len(ts) >= 2 and ts[-1] > ts[0] else None
             topic_reports.append(
                 TopicQualityReport(
                     topic=m.topic,
                     label=m.label,
                     role=ROLE_UNCLASSIFIED,
                     message_count=ti.count,
-                    avg_fps=None,
+                    avg_fps=avg_fps,
                     coverage_ratio=1.0,
                     total_gap_s=0.0,
                     longest_gap_s=0.0,
