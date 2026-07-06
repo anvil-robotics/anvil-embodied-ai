@@ -30,7 +30,7 @@ from mcap_converter.core.quality import (
     ROLE_STREAM,
     ROLE_UNCLASSIFIED,
     SEVERITY_CRITICAL,
-    SEVERITY_OK,
+    SEVERITY_PASS,
     SEVERITY_WARNING,
     QualityThresholds,
     apply_batch_fps_check,
@@ -45,8 +45,8 @@ console = Console()
 # pure JSON.
 _status_console = Console(stderr=True)
 
-_SEVERITY_COLOR = {SEVERITY_OK: "green", SEVERITY_WARNING: "yellow", SEVERITY_CRITICAL: "red"}
-_SEVERITY_ICON = {SEVERITY_OK: "🟢", SEVERITY_WARNING: "🟡", SEVERITY_CRITICAL: "🔴"}
+_SEVERITY_COLOR = {SEVERITY_PASS: "green", SEVERITY_WARNING: "yellow", SEVERITY_CRITICAL: "red"}
+_SEVERITY_ICON = {SEVERITY_PASS: "🟢", SEVERITY_WARNING: "🟡", SEVERITY_CRITICAL: "🔴"}
 # Row-grouping order for the Topic Health Overview table: stream topics first,
 # then action, then unclassified — reads more naturally than the flat
 # alphabetical-by-topic-path order the per-episode tables use.
@@ -71,19 +71,19 @@ def _truncate_names(names: List[str], limit: int = _MAX_NAMES_SHOWN) -> str:
 
 
 def _flagged_topics(r) -> List:
-    """This episode's non-OK topics — the shared "what's actually flagged" predicate
+    """This episode's non-pass topics — the shared "what's actually flagged" predicate
     used to build the Reason cell/column in both the terminal table and the
     Markdown per-episode overview table, so the two never drift apart."""
-    return [t for t in r.topics if t.severity != SEVERITY_OK]
+    return [t for t in r.topics if t.severity != SEVERITY_PASS]
 
 
 def _summary_line(reports) -> str:
     """Build the one-line episode-count summary shared by the table and Markdown report."""
     n_error = sum(1 for r in reports if r.read_error)
-    n_ok = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_OK)
+    n_pass = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_PASS)
     n_warn = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_WARNING)
     n_crit = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_CRITICAL)
-    return f"{len(reports)} episodes: {n_ok} ok, {n_warn} warning, {n_crit} critical" + (
+    return f"{len(reports)} episodes: {n_pass} pass, {n_warn} warning, {n_crit} critical" + (
         f", {n_error} unreadable" if n_error else ""
     )
 
@@ -201,7 +201,7 @@ def _episode_overview_table_lines(reports) -> List[str]:
     Markdown report: instead of a separate per-episode-column matrix (which
     broke down at high episode counts, since columns don't scroll) or a
     scattered Batch-Overview/Conclusion split, every episode gets exactly one
-    row here, with its non-OK topics folded into a single Reason cell. Rows
+    row here, with its non-pass topics folded into a single Reason cell. Rows
     scale fine no matter how many episodes there are, so this is never
     truncated the way _truncate_names's comma-lists are.
     """
@@ -244,7 +244,7 @@ def _topic_health_table_lines(readable) -> List[str]:
             # representative" convention _flagged_topic_groups uses for reasons.
             type_by_label.setdefault(t.label, t.message_type)
             counts = severity_counts_by_label.setdefault(
-                t.label, {SEVERITY_OK: 0, SEVERITY_WARNING: 0, SEVERITY_CRITICAL: 0}
+                t.label, {SEVERITY_PASS: 0, SEVERITY_WARNING: 0, SEVERITY_CRITICAL: 0}
             )
             # Direct indexing (not .get(..., 0)): counts is pre-seeded with
             # all 3 valid severities, so an unexpected severity value should
@@ -256,7 +256,7 @@ def _topic_health_table_lines(readable) -> List[str]:
     lines = [
         "### Topic Health Overview",
         "",
-        "| Topic | Type | OK | Warning | Critical | Min FPS | Median FPS | Max FPS |",
+        "| Topic | Type | Pass | Warning | Critical | Min FPS | Median FPS | Max FPS |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for label in labels:
@@ -269,7 +269,7 @@ def _topic_health_table_lines(readable) -> List[str]:
         else:
             min_fps = median_fps = max_fps = "-"
         lines.append(
-            f"| {label} | {type_by_label.get(label) or '-'} | {counts.get(SEVERITY_OK, 0)} | "
+            f"| {label} | {type_by_label.get(label) or '-'} | {counts.get(SEVERITY_PASS, 0)} | "
             f"{counts.get(SEVERITY_WARNING, 0)} | {counts.get(SEVERITY_CRITICAL, 0)} | "
             f"{min_fps} | {median_fps} | {max_fps} |"
         )
@@ -280,7 +280,7 @@ def _topic_health_table_lines(readable) -> List[str]:
 def _flagged_topic_groups(
     readable,
 ) -> List[Tuple[Tuple[str, str], Tuple[List[str], str]]]:
-    """Group non-OK (label, severity) pairs across readable episodes' topics.
+    """Group non-pass (label, severity) pairs across readable episodes' topics.
 
     Rule-based only (no LLM / free-text generation): each group carries the
     count + list of episodes it occurs in, plus ONE verbatim representative
@@ -294,7 +294,7 @@ def _flagged_topic_groups(
         name = Path(r.path).name
         seen_in_episode = set()
         for t in r.topics:
-            if t.severity == SEVERITY_OK:
+            if t.severity == SEVERITY_PASS:
                 continue
             key = (t.label, t.severity)
             if key in seen_in_episode:
@@ -364,7 +364,7 @@ def render_markdown_report(reports, *, input_path: str) -> str:
 
     Everything comprehensive lives up front under `## Summary`: the stats
     line, a per-episode overview table (Episode/Duration/Status/Reason — one
-    row per episode, including unreadable ones, with non-OK topics folded
+    row per episode, including unreadable ones, with non-pass topics folded
     into the Reason cell), the rule-based readiness verdict, `### Flagged
     Topics` (recurring cross-episode issues), and `### Topic Health Overview`
     (a single fixed-column table, batch-only, omitted with fewer than 2

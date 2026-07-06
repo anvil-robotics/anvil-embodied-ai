@@ -19,7 +19,7 @@ from mcap_converter.core.quality import (
     ROLE_STREAM,
     ROLE_UNCLASSIFIED,
     SEVERITY_CRITICAL,
-    SEVERITY_OK,
+    SEVERITY_PASS,
     SEVERITY_WARNING,
     EpisodeQualityReport,
     GapInterval,
@@ -41,17 +41,17 @@ _STUB_MCAP = _REPO_ROOT / "tests/smoke/fixtures/test-session/0001/0001_0.mcap"
 
 
 class TestWorstSeverity:
-    def test_critical_beats_warning_and_ok(self):
-        assert worst_severity([SEVERITY_OK, SEVERITY_WARNING, SEVERITY_CRITICAL]) == SEVERITY_CRITICAL
+    def test_critical_beats_warning_and_pass(self):
+        assert worst_severity([SEVERITY_PASS, SEVERITY_WARNING, SEVERITY_CRITICAL]) == SEVERITY_CRITICAL
 
-    def test_warning_beats_ok(self):
-        assert worst_severity([SEVERITY_OK, SEVERITY_WARNING]) == SEVERITY_WARNING
+    def test_warning_beats_pass(self):
+        assert worst_severity([SEVERITY_PASS, SEVERITY_WARNING]) == SEVERITY_WARNING
 
-    def test_all_ok_is_ok(self):
-        assert worst_severity([SEVERITY_OK, SEVERITY_OK]) == SEVERITY_OK
+    def test_all_pass_is_pass(self):
+        assert worst_severity([SEVERITY_PASS, SEVERITY_PASS]) == SEVERITY_PASS
 
-    def test_empty_defaults_to_ok(self):
-        assert worst_severity([]) == SEVERITY_OK
+    def test_empty_defaults_to_pass(self):
+        assert worst_severity([]) == SEVERITY_PASS
 
 
 class TestClassifyTopic:
@@ -139,7 +139,7 @@ def _thresholds(**overrides) -> QualityThresholds:
 
 
 class TestAnalyzeTopicCoverageStream:
-    def test_dense_stream_no_gaps_is_ok(self):
+    def test_dense_stream_no_gaps_is_pass(self):
         # 30fps for 1 second: 30 evenly spaced timestamps
         timestamps = [i / 30.0 for i in range(30)]
 
@@ -149,7 +149,7 @@ class TestAnalyzeTopicCoverageStream:
             thresholds=_thresholds(),
         )
 
-        assert report.severity == SEVERITY_OK
+        assert report.severity == SEVERITY_PASS
         assert report.gaps == []
         assert report.message_count == 30
         assert report.avg_fps == pytest.approx(30.0, rel=0.05)
@@ -226,7 +226,7 @@ class TestAnalyzeTopicCoverageStream:
             thresholds=_thresholds(stream_min_gap_s=0.5),
         )
 
-        assert report.severity == SEVERITY_OK
+        assert report.severity == SEVERITY_PASS
 
     def test_unsorted_timestamps_are_sorted_before_analysis(self):
         timestamps = [i / 30.0 for i in range(30)]
@@ -238,7 +238,7 @@ class TestAnalyzeTopicCoverageStream:
             thresholds=_thresholds(),
         )
 
-        assert report.severity == SEVERITY_OK  # would be nonsense/negative intervals if not sorted
+        assert report.severity == SEVERITY_PASS  # would be nonsense/negative intervals if not sorted
 
     def test_avg_fps_is_none_when_all_timestamps_identical(self):
         report = analyze_topic_coverage(
@@ -255,7 +255,7 @@ class TestAnalyzeTopicCoverageStream:
         # max(0.5, 5*0.1) = 0.5, so the 5.0s interval (> 0.5) is flagged.
         # mean of the same intervals is 1.08 -> a mean-based drop_threshold
         # would be max(0.5, 5*1.08) = 5.4, under which 5.0 would NOT be
-        # flagged, so severity would stay OK. The two implementations
+        # flagged, so severity would stay PASS. The two implementations
         # disagree on both severity and whether a dropframe gap is reported.
         timestamps = [0.0, 0.1, 0.2, 0.3, 0.4, 5.4]
 
@@ -281,14 +281,14 @@ class TestAnalyzeTopicCoverageAction:
 
         assert report.severity == SEVERITY_WARNING  # NOT critical — could be a single-arm task
 
-    def test_zero_messages_with_afo_is_ok(self):
+    def test_zero_messages_with_afo_is_pass(self):
         report = analyze_topic_coverage(
             [], session_start=0.0, session_end=10.0,
             topic="/follower_r_.../commands", label="action[right]", role="action",
             thresholds=_thresholds(), action_from_observation=True,
         )
 
-        assert report.severity == SEVERITY_OK
+        assert report.severity == SEVERITY_PASS
 
     def test_long_idle_gap_is_warning_not_critical(self):
         # published at t=1.0, then idle for 5s, then again at t=6.0
@@ -303,7 +303,7 @@ class TestAnalyzeTopicCoverageAction:
         assert report.severity == SEVERITY_WARNING
         assert any(g.kind == "idle" for g in report.gaps)
 
-    def test_dense_action_is_ok(self):
+    def test_dense_action_is_pass(self):
         timestamps = [i * 0.1 for i in range(20)]  # 10Hz, no idle gaps
 
         report = analyze_topic_coverage(
@@ -312,7 +312,7 @@ class TestAnalyzeTopicCoverageAction:
             thresholds=_thresholds(action_warn_gap_s=1.0),
         )
 
-        assert report.severity == SEVERITY_OK
+        assert report.severity == SEVERITY_PASS
         assert report.avg_fps is None  # action topics don't get a fixed-rate fps figure
 
     def test_action_leading_and_trailing_gaps_are_not_flagged(self):
@@ -416,20 +416,20 @@ class TestDetectFpsDegradation:
 
 
 class TestApplyBatchFpsCheck:
-    def test_ok_episode_upgraded_to_warning_on_degradation(self):
-        ok_topic = TopicQualityReport(
+    def test_pass_episode_upgraded_to_warning_on_degradation(self):
+        pass_topic = TopicQualityReport(
             topic="/cam", label="chest", role="stream", message_count=100, avg_fps=50.0,
-            coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=SEVERITY_OK, reason="OK",
+            coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=SEVERITY_PASS, reason="PASS",
         )
         healthy_topic = TopicQualityReport(
             topic="/cam", label="chest", role="stream", message_count=100, avg_fps=60.0,
-            coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=SEVERITY_OK, reason="OK",
+            coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=SEVERITY_PASS, reason="PASS",
         )
         degraded_ep = EpisodeQualityReport(
-            path="ep_degraded", duration_s=10.0, severity=SEVERITY_OK, passed=True, topics=[ok_topic],
+            path="ep_degraded", duration_s=10.0, severity=SEVERITY_PASS, passed=True, topics=[pass_topic],
         )
         healthy_ep = EpisodeQualityReport(
-            path="ep_healthy", duration_s=10.0, severity=SEVERITY_OK, passed=True, topics=[healthy_topic],
+            path="ep_healthy", duration_s=10.0, severity=SEVERITY_PASS, passed=True, topics=[healthy_topic],
         )
 
         updated = apply_batch_fps_check([degraded_ep, healthy_ep], _thresholds(fps_degradation_tolerance=0.15))
@@ -447,13 +447,13 @@ class TestApplyBatchFpsCheck:
         )
         healthy_topic = TopicQualityReport(
             topic="/cam", label="chest", role="stream", message_count=100, avg_fps=60.0,
-            coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=SEVERITY_OK, reason="OK",
+            coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=SEVERITY_PASS, reason="PASS",
         )
         critical_ep = EpisodeQualityReport(
             path="ep_critical", duration_s=10.0, severity=SEVERITY_CRITICAL, passed=False, topics=[critical_topic],
         )
         healthy_ep = EpisodeQualityReport(
-            path="ep_healthy", duration_s=10.0, severity=SEVERITY_OK, passed=True, topics=[healthy_topic],
+            path="ep_healthy", duration_s=10.0, severity=SEVERITY_PASS, passed=True, topics=[healthy_topic],
         )
 
         updated = apply_batch_fps_check([critical_ep, healthy_ep], _thresholds(fps_degradation_tolerance=0.15))
@@ -463,16 +463,16 @@ class TestApplyBatchFpsCheck:
         assert critical_result.passed is False
 
 
-def _make_topic(topic, role, label=None, severity=SEVERITY_OK):
+def _make_topic(topic, role, label=None, severity=SEVERITY_PASS):
     return TopicQualityReport(
         topic=topic, label=label or topic, role=role, message_count=100, avg_fps=30.0,
-        coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=severity, reason="OK",
+        coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=severity, reason="PASS",
     )
 
 
 def _make_episode(path, topics):
     return EpisodeQualityReport(
-        path=path, duration_s=10.0, severity=SEVERITY_OK, passed=True, topics=topics,
+        path=path, duration_s=10.0, severity=SEVERITY_PASS, passed=True, topics=topics,
     )
 
 
@@ -532,7 +532,7 @@ class TestScanEpisodeIntegration:
         report = scan_episode(str(_STUB_MCAP), QualityThresholds())
 
         assert report.passed is True
-        assert report.severity in (SEVERITY_OK, SEVERITY_WARNING)  # never critical for a healthy stub
+        assert report.severity in (SEVERITY_PASS, SEVERITY_WARNING)  # never critical for a healthy stub
 
     def test_duration_is_a_plausible_positive_value(self):
         # NOTE: this used to be named
@@ -576,7 +576,7 @@ class TestScanEpisodeIntegration:
             assert t.role in (ROLE_STREAM, ROLE_ACTION)
             assert t.message_type is not None
 
-    def test_unclassified_topic_is_ok_and_does_not_affect_episode_severity(self, monkeypatch):
+    def test_unclassified_topic_is_pass_and_does_not_affect_episode_severity(self, monkeypatch):
         from mcap_converter.core import quality as quality_module
 
         baseline = scan_episode(str(_STUB_MCAP), QualityThresholds())
@@ -593,7 +593,7 @@ class TestScanEpisodeIntegration:
 
         rosout = next(t for t in report.topics if t.topic == "/rosout")
         assert rosout.role == ROLE_UNCLASSIFIED
-        assert rosout.severity == SEVERITY_OK
+        assert rosout.severity == SEVERITY_PASS
         assert rosout.message_count == 5
         assert rosout.message_type == "rcl_interfaces/Log"
         # /rosout has no real channel in the fixture file, so there are no
@@ -623,7 +623,7 @@ class TestScanEpisodeIntegration:
 
         joint = next(t for t in report.topics if t.topic == "/joint_states")
         assert joint.role == ROLE_UNCLASSIFIED
-        assert joint.severity == SEVERITY_OK
+        assert joint.severity == SEVERITY_PASS
         assert joint.message_count == 120
         # Pinned to the same manually-verified span used by
         # test_duration_matches_manually_verified_monitored_topic_timestamps:
@@ -657,7 +657,7 @@ class TestScanEpisodeIntegration:
         assert rosout.role == ROLE_UNCLASSIFIED
         assert rosout.message_count == 1
         assert rosout.avg_fps is None
-        assert rosout.severity == SEVERITY_OK
+        assert rosout.severity == SEVERITY_PASS
 
     def test_unclassified_topic_never_perturbs_session_bounds_or_monitored_severity(self, monkeypatch):
         # A fast, wildly-out-of-session-range unclassified topic (like a real
@@ -690,7 +690,7 @@ class TestScanEpisodeIntegration:
 
         tf = next(t for t in report.topics if t.topic == "/tf")
         assert tf.role == ROLE_UNCLASSIFIED
-        assert tf.severity == SEVERITY_OK
+        assert tf.severity == SEVERITY_PASS
         assert tf.avg_fps == pytest.approx(2 / 200.0)
 
         baseline_by_topic = {t.topic: t for t in baseline.topics}
@@ -732,9 +732,9 @@ class TestScanEpisodeIntegration:
         assert rosout.role == ROLE_UNCLASSIFIED
         assert rosout.message_count == 5
         assert rosout.avg_fps is None
-        assert rosout.severity == SEVERITY_OK
+        assert rosout.severity == SEVERITY_PASS
         # The monitored stream/action topics' own scan must be unaffected.
-        assert report.severity in (SEVERITY_OK, SEVERITY_WARNING)
+        assert report.severity in (SEVERITY_PASS, SEVERITY_WARNING)
 
     def test_monitored_timestamp_decode_failure_produces_read_error_not_a_crash(self, monkeypatch):
         # Unlike the unclassified-topics decode failure above (informational-only,
@@ -1182,7 +1182,7 @@ class TestRenderTableReasonColumn:
         clean = EpisodeQualityReport(
             path="/data/raw/session/0001/0001_0.mcap",
             duration_s=12.5,
-            severity=SEVERITY_OK,
+            severity=SEVERITY_PASS,
             passed=True,
             topics=[
                 TopicQualityReport(
@@ -1195,8 +1195,8 @@ class TestRenderTableReasonColumn:
                     coverage_ratio=1.0,
                     total_gap_s=0.0,
                     longest_gap_s=0.0,
-                    severity=SEVERITY_OK,
-                    reason="OK",
+                    severity=SEVERITY_PASS,
+                    reason="PASS",
                 ),
             ],
         )
@@ -1216,8 +1216,8 @@ class TestRenderTableReasonColumn:
                     coverage_ratio=1.0,
                     total_gap_s=0.0,
                     longest_gap_s=0.0,
-                    severity=SEVERITY_OK,
-                    reason="OK",
+                    severity=SEVERITY_PASS,
+                    reason="PASS",
                 ),
                 TopicQualityReport(
                     topic="/follower_position_controller/commands",
@@ -1257,7 +1257,7 @@ class TestRenderTableReasonColumn:
         _render_table(self._reports(), verbose=True)
 
         captured = capsys.readouterr().out
-        # Verbose mode shows every topic, including OK ones, for every episode.
+        # Verbose mode shows every topic, including PASS ones, for every episode.
         assert "joint_states" in captured
         assert "idle gap" in captured
 
@@ -1275,8 +1275,8 @@ class TestRenderTableReasonColumn:
             if "0001_0.mcap" in line and "Topics in" not in line
         ]
         assert rows, "expected the clean episode's row to appear in the table"
-        # Non-verbose mode hides OK-only topics, so the clean episode's Reason
-        # cell is "-", and its row must not mention its (all-OK) topic label.
+        # Non-verbose mode hides pass-only topics, so the clean episode's Reason
+        # cell is "-", and its row must not mention its (all-pass) topic label.
         assert "joint_states" not in rows[0]
         assert " - " in rows[0] or rows[0].rstrip().endswith("-")
 
@@ -1337,7 +1337,7 @@ class TestRenderMarkdownReport:
         healthy = EpisodeQualityReport(
             path="/data/raw/session/0001/0001_0.mcap",
             duration_s=12.5,
-            severity=SEVERITY_OK,
+            severity=SEVERITY_PASS,
             passed=True,
             topics=[
                 TopicQualityReport(
@@ -1350,8 +1350,8 @@ class TestRenderMarkdownReport:
                     coverage_ratio=1.0,
                     total_gap_s=0.0,
                     longest_gap_s=0.0,
-                    severity=SEVERITY_OK,
-                    reason="OK",
+                    severity=SEVERITY_PASS,
+                    reason="PASS",
                 ),
                 TopicQualityReport(
                     topic="/camera/image_raw",
@@ -1363,8 +1363,8 @@ class TestRenderMarkdownReport:
                     coverage_ratio=1.0,
                     total_gap_s=0.0,
                     longest_gap_s=0.0,
-                    severity=SEVERITY_OK,
-                    reason="OK",
+                    severity=SEVERITY_PASS,
+                    reason="PASS",
                 ),
                 TopicQualityReport(
                     topic="/follower_position_controller/commands",
@@ -1376,8 +1376,8 @@ class TestRenderMarkdownReport:
                     coverage_ratio=1.0,
                     total_gap_s=0.0,
                     longest_gap_s=0.0,
-                    severity=SEVERITY_OK,
-                    reason="OK",
+                    severity=SEVERITY_PASS,
+                    reason="PASS",
                 ),
             ],
         )
@@ -1415,7 +1415,7 @@ class TestRenderMarkdownReport:
 
     @staticmethod
     def _make_reports_with_readable_critical():
-        """3 readable episodes (no read_error) spanning ok / warning / critical.
+        """3 readable episodes (no read_error) spanning pass / warning / critical.
 
         Used for scenarios the 3-episode `_make_reports()` fixture can't cover on
         its own: a critical severity that comes from a genuinely-scanned episode
@@ -1423,10 +1423,10 @@ class TestRenderMarkdownReport:
         episode, so the Flagged Topics critical-before-warning sort order has
         two distinct groups to actually sort.
         """
-        ok_ep = EpisodeQualityReport(
+        pass_ep = EpisodeQualityReport(
             path="/data/raw/session/0004/0004_0.mcap",
             duration_s=10.0,
-            severity=SEVERITY_OK,
+            severity=SEVERITY_PASS,
             passed=True,
             topics=[
                 TopicQualityReport(
@@ -1438,8 +1438,8 @@ class TestRenderMarkdownReport:
                     coverage_ratio=1.0,
                     total_gap_s=0.0,
                     longest_gap_s=0.0,
-                    severity=SEVERITY_OK,
-                    reason="OK",
+                    severity=SEVERITY_PASS,
+                    reason="PASS",
                 ),
             ],
         )
@@ -1483,7 +1483,7 @@ class TestRenderMarkdownReport:
                 ),
             ],
         )
-        return [ok_ep, warning_ep, critical_ep]
+        return [pass_ep, warning_ep, critical_ep]
 
     def test_every_episode_gets_a_header(self):
         # Per-episode headers are "### `<filename>` — ...", uniquely
@@ -1539,7 +1539,7 @@ class TestRenderMarkdownReport:
         reports = self._make_reports()
         output = render_markdown_report(reports, input_path="fake/input")
 
-        assert "3 episodes: 1 ok, 1 warning, 0 critical, 1 unreadable" in output
+        assert "3 episodes: 1 pass, 1 warning, 0 critical, 1 unreadable" in output
 
     def test_output_is_plain_markdown_with_no_rich_markup(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
@@ -1557,7 +1557,7 @@ class TestRenderMarkdownReport:
 
         assert isinstance(output, str)
         assert "# mcap-valid Report" in output
-        assert "0 episodes: 0 ok, 0 warning, 0 critical" in output
+        assert "0 episodes: 0 pass, 0 warning, 0 critical" in output
         assert "### " not in output
 
     def test_summary_line_is_byte_for_byte_identical_to_render_table(self, capsys):
@@ -1591,7 +1591,7 @@ class TestRenderMarkdownReport:
     def test_topic_health_overview_has_correct_severity_counts(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
-        reports = self._make_reports()[:2]  # healthy (ok) + warning, both readable
+        reports = self._make_reports()[:2]  # healthy (pass) + warning, both readable
         output = render_markdown_report(reports, input_path="fake/input")
 
         overview_section = output.split("### Topic Health Overview")[1].split("## Episodes")[0]
@@ -1600,14 +1600,14 @@ class TestRenderMarkdownReport:
             for line in overview_section.splitlines()
             if line.startswith("|")
         }
-        # camera/joint_states only exist (ok) in the healthy episode.
+        # camera/joint_states only exist (pass) in the healthy episode.
         assert table_rows["camera"].startswith(
             "| camera | sensor_msgs/CompressedImage | 1 | 0 | 0 |"
         )
         assert table_rows["joint_states"].startswith(
             "| joint_states | sensor_msgs/JointState | 1 | 0 | 0 |"
         )
-        # action is ok in the healthy episode and warning in the warning episode.
+        # action is pass in the healthy episode and warning in the warning episode.
         assert table_rows["action"].startswith(
             "| action | std_msgs/Float64MultiArray | 1 | 1 | 0 |"
         )
@@ -1640,7 +1640,7 @@ class TestRenderMarkdownReport:
             EpisodeQualityReport(
                 path=f"/data/raw/session/000{i}/000{i}_0.mcap",
                 duration_s=10.0,
-                severity=SEVERITY_OK,
+                severity=SEVERITY_PASS,
                 passed=True,
                 topics=[
                     TopicQualityReport(
@@ -1653,8 +1653,8 @@ class TestRenderMarkdownReport:
                         coverage_ratio=1.0,
                         total_gap_s=0.0,
                         longest_gap_s=0.0,
-                        severity=SEVERITY_OK,
-                        reason="OK",
+                        severity=SEVERITY_PASS,
+                        reason="PASS",
                     ),
                 ],
             )
@@ -1714,7 +1714,7 @@ class TestRenderMarkdownReport:
     def test_conclusion_warning_verdict_when_worst_severity_is_warning(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
-        reports = self._make_reports()[:2]  # healthy (ok) + warning, no criticals
+        reports = self._make_reports()[:2]  # healthy (pass) + warning, no criticals
         output = render_markdown_report(reports, input_path="fake/input")
 
         summary_section = output.split("## Summary")[1]
@@ -1779,25 +1779,25 @@ class TestRenderMarkdownReport:
                         total_gap_s=0.0,
                         longest_gap_s=0.0,
                         severity=severity,
-                        reason="OK" if severity == SEVERITY_OK else f"flagged as {severity}",
+                        reason="PASS" if severity == SEVERITY_PASS else f"flagged as {severity}",
                     ),
                 ],
             )
 
-        n_ok, n_warning, n_critical = 5, 22, 3
+        n_pass, n_warning, n_critical = 5, 22, 3
         reports = (
-            [_episode(i, SEVERITY_OK) for i in range(n_ok)]
-            + [_episode(i, SEVERITY_WARNING) for i in range(n_ok, n_ok + n_warning)]
+            [_episode(i, SEVERITY_PASS) for i in range(n_pass)]
+            + [_episode(i, SEVERITY_WARNING) for i in range(n_pass, n_pass + n_warning)]
             + [
                 _episode(i, SEVERITY_CRITICAL)
-                for i in range(n_ok + n_warning, n_ok + n_warning + n_critical)
+                for i in range(n_pass + n_warning, n_pass + n_warning + n_critical)
             ]
         )
         output = render_markdown_report(reports, input_path="fake/input")
 
         flagged_section = output.split("### Flagged Topics")[1]
         assert (
-            f"warning in {n_warning}/{n_ok + n_warning + n_critical} episode(s)" in flagged_section
+            f"warning in {n_warning}/{n_pass + n_warning + n_critical} episode(s)" in flagged_section
         )
         assert f"... and {n_warning - _MAX_NAMES_SHOWN} more" in flagged_section
         # Critical group is under the cap, so it must list every name in full.
@@ -1828,7 +1828,7 @@ class TestRenderMarkdownReport:
                         total_gap_s=0.0,
                         longest_gap_s=0.0,
                         severity=severity,
-                        reason="OK" if severity == SEVERITY_OK else f"flagged as {severity}",
+                        reason="PASS" if severity == SEVERITY_PASS else f"flagged as {severity}",
                     ),
                 ],
             )
@@ -1880,7 +1880,7 @@ class TestRenderMarkdownReport:
         reports = self._make_reports()  # healthy + warning readable, corrupt unreadable
         output = render_markdown_report(reports, input_path="fake/input")
 
-        idx_summary_line = output.index("3 episodes: 1 ok, 1 warning, 0 critical, 1 unreadable")
+        idx_summary_line = output.index("3 episodes: 1 pass, 1 warning, 0 critical, 1 unreadable")
         idx_overview_header = output.index("| Episode | Duration | Status | Reason |")
         idx_flagged = output.index("### Flagged Topics")
         idx_topic_health = output.index("### Topic Health Overview")
@@ -1938,11 +1938,11 @@ class TestRenderMarkdownReport:
     def test_episode_overview_table_shows_dash_for_a_fully_clean_episode(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
-        reports = self._make_reports()  # first entry ("healthy") is fully OK
+        reports = self._make_reports()  # first entry ("healthy") is fully pass
         output = render_markdown_report(reports, input_path="fake/input")
 
         overview_section = output.split("## Summary")[1].split("## Episodes")[0]
-        assert "| 0001_0.mcap | 12.5s | ok | - |" in overview_section
+        assert "| 0001_0.mcap | 12.5s | pass | - |" in overview_section
 
     def test_batch_overview_and_conclusion_headings_are_gone(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report

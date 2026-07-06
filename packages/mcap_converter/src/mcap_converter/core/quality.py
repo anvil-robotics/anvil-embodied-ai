@@ -27,10 +27,10 @@ from mcap.reader import make_reader as make_mcap_reader
 from .extractor import message_timestamp
 from .reader import McapReader
 
-SEVERITY_OK = "ok"
+SEVERITY_PASS = "pass"
 SEVERITY_WARNING = "warning"
 SEVERITY_CRITICAL = "critical"
-_SEVERITY_RANK = {SEVERITY_OK: 0, SEVERITY_WARNING: 1, SEVERITY_CRITICAL: 2}
+_SEVERITY_RANK = {SEVERITY_PASS: 0, SEVERITY_WARNING: 1, SEVERITY_CRITICAL: 2}
 
 ROLE_STREAM = "stream"
 ROLE_ACTION = "action"
@@ -52,8 +52,8 @@ _ARM_SIDE_TO_LABEL = {"l": "left", "r": "right"}
 
 
 def worst_severity(severities: Iterable[str]) -> str:
-    """Return the most severe value in severities, defaulting to OK if empty."""
-    worst = SEVERITY_OK
+    """Return the most severe value in severities, defaulting to PASS if empty."""
+    worst = SEVERITY_PASS
     for sev in severities:
         if _SEVERITY_RANK[sev] > _SEVERITY_RANK[worst]:
             worst = sev
@@ -83,7 +83,7 @@ class TopicQualityReport:
     total_gap_s: float
     longest_gap_s: float
     gaps: List[GapInterval] = field(default_factory=list)
-    severity: str = SEVERITY_OK
+    severity: str = SEVERITY_PASS
     reason: str = ""
     message_type: Optional[str] = None  # normalized ROS2 schema name, e.g. "sensor_msgs/JointState"
 
@@ -210,7 +210,7 @@ def analyze_topic_coverage(
     if len(timestamps) == 0:
         if role == "action" and action_from_observation:
             severity, reason = (
-                SEVERITY_OK,
+                SEVERITY_PASS,
                 "action topic 零訊息（action_from_observation=true，可接受）",
             )
         elif role == "action":
@@ -274,7 +274,7 @@ def analyze_topic_coverage(
             severity = SEVERITY_CRITICAL
             reason = f"{len(gaps)} 個異常斷點，最長 {max(g.duration_s for g in gaps):.2f}s"
         else:
-            severity, reason = SEVERITY_OK, "OK"
+            severity, reason = SEVERITY_PASS, "PASS"
 
     else:  # role == "action"
         intervals = [b - a for a, b in zip(ts, ts[1:])]
@@ -290,7 +290,7 @@ def analyze_topic_coverage(
                 f"（持續 {longest.duration_s:.2f}s，正常，手臂未操作）"
             )
         else:
-            severity, reason = SEVERITY_OK, "OK"
+            severity, reason = SEVERITY_PASS, "PASS"
 
     total_gap = sum(g.duration_s for g in gaps)
     longest_gap = max((g.duration_s for g in gaps), default=0.0)
@@ -351,7 +351,7 @@ def apply_batch_fps_check(
 ) -> List[EpisodeQualityReport]:
     """
     Cross-episode pass: detect stream topics whose fps has degraded relative
-    to the rest of the batch, and upgrade OK -> WARNING for those topics.
+    to the rest of the batch, and upgrade PASS -> WARNING for those topics.
     Never downgrades an existing CRITICAL/WARNING severity.
     """
     # Group avg_fps by (topic, label) across all episodes that have it.
@@ -372,7 +372,7 @@ def apply_batch_fps_check(
         new_topics = []
         for t in ep.topics:
             reason_key = (ep.path, t.topic, t.label)
-            if reason_key in degraded_by_path_and_key and t.severity == SEVERITY_OK:
+            if reason_key in degraded_by_path_and_key and t.severity == SEVERITY_PASS:
                 new_topics.append(
                     replace(
                         t,
@@ -541,7 +541,7 @@ def scan_episode(
     from each topic's ROS2 message type (see classify_topic) — no config is
     consulted. Topics whose message type isn't one of the known robot-
     pipeline types are still surfaced in the report (role="unclassified",
-    severity always OK) rather than silently dropped. Their avg_fps IS
+    severity always PASS) rather than silently dropped. Their avg_fps IS
     computed from their own real message timestamps (via a best-effort,
     separate scan — see below), but everything else about them stays purely
     informational: coverage/gaps/severity are never derived from it.
@@ -632,7 +632,7 @@ def scan_episode(
                     total_gap_s=0.0,
                     longest_gap_s=0.0,
                     gaps=[],
-                    severity=SEVERITY_OK,
+                    severity=SEVERITY_PASS,
                     reason=f"unmonitored message type ({m.message_type or 'unknown'}) — informational only",
                     message_type=m.message_type,
                 )

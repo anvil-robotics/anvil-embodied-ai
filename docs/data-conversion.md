@@ -31,11 +31,11 @@ Severity model:
 |----------|---------|
 | 🔴 `critical` | A camera or `joint_states` stream has zero messages, or an internal/leading/trailing gap — real data loss, no benign explanation. Also raised if a topic present in the majority of sibling episodes in the same batch is completely absent from this one (catches a camera/driver that never started) |
 | 🟡 `warning` | An action topic has zero messages or an idle gap (e.g. one arm not yet picked up — this is normal teleop behavior, not necessarily a defect), or a stream's average fps dropped noticeably relative to the rest of the batch |
-| 🟢 `ok` | No issues detected. Unclassified topics are always `ok` — they never affect the episode's overall severity |
+| 🟢 `pass` | No issues detected. Unclassified topics are always `pass` — they never affect the episode's overall severity |
 
 An episode's overall status is its single worst topic's severity. `--fail-on-critical` only fails on `critical` — `warning` episodes convert normally unless you also pass `mcap-convert --skip-flagged warning`.
 
-**Known tradeoff — `action_from_observation` (AFO) datasets:** without a config, `mcap-valid` can't know a dataset is configured to derive actions from observations instead of a dedicated command topic. If the action-command topic was never recorded at all, it just doesn't appear in the report (not a warning). If the topic exists but has zero messages, it shows as `warning` here (vs. `ok` under the old config-aware behavior). This never blocks conversion — it only matters if you explicitly pass `mcap-convert --skip-flagged warning` on AFO data.
+**Known tradeoff — `action_from_observation` (AFO) datasets:** without a config, `mcap-valid` can't know a dataset is configured to derive actions from observations instead of a dedicated command topic. If the action-command topic was never recorded at all, it just doesn't appear in the report (not a warning). If the topic exists but has zero messages, it shows as `warning` here (vs. `pass` under the old config-aware behavior). This never blocks conversion — it only matters if you explicitly pass `mcap-convert --skip-flagged warning` on AFO data.
 
 | Flag | Default | Description |
 |------|---------|-------------|

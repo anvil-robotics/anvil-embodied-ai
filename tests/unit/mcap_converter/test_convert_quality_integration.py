@@ -35,7 +35,7 @@ class TestResolveQualitySkipSet:
     def test_bare_skip_flagged_skips_only_critical(self, tmp_path):
         from mcap_converter.cli.convert import resolve_quality_skip_paths
 
-        report = _write_report(tmp_path, [("/a.mcap", "critical"), ("/b.mcap", "warning"), ("/c.mcap", "ok")])
+        report = _write_report(tmp_path, [("/a.mcap", "critical"), ("/b.mcap", "warning"), ("/c.mcap", "pass")])
 
         skip_set = resolve_quality_skip_paths(str(report), skip_flagged="critical")
 
@@ -45,7 +45,7 @@ class TestResolveQualitySkipSet:
     def test_skip_flagged_warning_skips_both(self, tmp_path):
         from mcap_converter.cli.convert import resolve_quality_skip_paths
 
-        report = _write_report(tmp_path, [("/a.mcap", "critical"), ("/b.mcap", "warning"), ("/c.mcap", "ok")])
+        report = _write_report(tmp_path, [("/a.mcap", "critical"), ("/b.mcap", "warning"), ("/c.mcap", "pass")])
 
         skip_set = resolve_quality_skip_paths(str(report), skip_flagged="warning")
 
@@ -335,7 +335,7 @@ action_feature_mapping:
                 {
                     "path": str(p.resolve()),
                     "duration_s": 1.0,
-                    "severity": "critical" if i == critical_index else "ok",
+                    "severity": "critical" if i == critical_index else "pass",
                     "passed": i != critical_index,
                     "topics": [],
                 }
