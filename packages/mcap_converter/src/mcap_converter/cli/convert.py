@@ -39,6 +39,7 @@ from mcap_converter import (
 )
 from mcap_converter.cli.mcap_valid import default_report_paths
 from mcap_converter.core.extractor import BufferedStreamExtractor
+from mcap_converter.core.quality import SEVERITY_CRITICAL, SEVERITY_PASS, SEVERITY_WARNING
 from mcap_converter.core.reader import snap_fps
 
 console = Console()
@@ -93,7 +94,10 @@ def collect_mcap_files(input_dir: str) -> List[Path]:
     return sorted(mcap_paths)
 
 
-_SEVERITY_ORDER = ["pass", "warning", "critical"]
+# Single source of truth for severity ordering, shared with core/quality.py's
+# SEVERITY_PASS/WARNING/CRITICAL constants (rather than re-hardcoding the same
+# three strings here) so a future rename can't drift between the two files.
+_SEVERITY_ORDER = [SEVERITY_PASS, SEVERITY_WARNING, SEVERITY_CRITICAL]
 
 
 def resolve_quality_skip_paths(quality_report_path: str | None, include_flagged: str) -> dict:
@@ -764,8 +768,8 @@ examples:
     )
     parser.add_argument(
         "--include-flagged",
-        choices=["pass", "warning", "critical"],
-        default="warning",
+        choices=_SEVERITY_ORDER,
+        default=SEVERITY_WARNING,
         help=(
             "highest severity tier to include when converting, per the quality "
             "report. Inclusive threshold: 'pass' converts only clean episodes "
