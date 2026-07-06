@@ -209,15 +209,29 @@ def analyze_topic_coverage(
 
     if len(timestamps) == 0:
         if role == "action" and action_from_observation:
-            severity, reason = SEVERITY_OK, "action topic 零訊息（action_from_observation=true，可接受）"
+            severity, reason = (
+                SEVERITY_OK,
+                "action topic 零訊息（action_from_observation=true，可接受）",
+            )
         elif role == "action":
-            severity, reason = SEVERITY_WARNING, "action topic 全程零訊息，可能為單手任務或設定不符，請人工確認"
+            severity, reason = (
+                SEVERITY_WARNING,
+                "action topic 全程零訊息，可能為單手任務或設定不符，請人工確認",
+            )
         else:
             severity, reason = SEVERITY_CRITICAL, "stream topic 零訊息，完全沒錄到"
         return TopicQualityReport(
-            topic=topic, label=label, role=role, message_count=0, avg_fps=None,
-            coverage_ratio=0.0, total_gap_s=span, longest_gap_s=span,
-            gaps=[], severity=severity, reason=reason,
+            topic=topic,
+            label=label,
+            role=role,
+            message_count=0,
+            avg_fps=None,
+            coverage_ratio=0.0,
+            total_gap_s=span,
+            longest_gap_s=span,
+            gaps=[],
+            severity=severity,
+            reason=reason,
         )
 
     ts = sorted(timestamps)
@@ -227,9 +241,17 @@ def analyze_topic_coverage(
     if role == "stream":
         if len(ts) == 1:
             return TopicQualityReport(
-                topic=topic, label=label, role=role, message_count=1, avg_fps=None,
-                coverage_ratio=0.0, total_gap_s=span, longest_gap_s=span, gaps=[],
-                severity=SEVERITY_CRITICAL, reason="stream 僅 1 則訊息，幾乎沒錄到",
+                topic=topic,
+                label=label,
+                role=role,
+                message_count=1,
+                avg_fps=None,
+                coverage_ratio=0.0,
+                total_gap_s=span,
+                longest_gap_s=span,
+                gaps=[],
+                severity=SEVERITY_CRITICAL,
+                reason="stream 僅 1 則訊息，幾乎沒錄到",
             )
         avg_fps = (len(ts) - 1) / (ts[-1] - ts[0]) if ts[-1] > ts[0] else None
         intervals = [b - a for a, b in zip(ts, ts[1:])]
@@ -275,9 +297,17 @@ def analyze_topic_coverage(
     coverage = max(0.0, 1.0 - total_gap / span)
 
     return TopicQualityReport(
-        topic=topic, label=label, role=role, message_count=len(ts), avg_fps=avg_fps,
-        coverage_ratio=coverage, total_gap_s=total_gap, longest_gap_s=longest_gap,
-        gaps=gaps, severity=severity, reason=reason,
+        topic=topic,
+        label=label,
+        role=role,
+        message_count=len(ts),
+        avg_fps=avg_fps,
+        coverage_ratio=coverage,
+        total_gap_s=total_gap,
+        longest_gap_s=longest_gap,
+        gaps=gaps,
+        severity=severity,
+        reason=reason,
     )
 
 
@@ -354,7 +384,12 @@ def apply_batch_fps_check(
                 new_topics.append(t)
         new_severity = worst_severity(t.severity for t in new_topics)
         updated_reports.append(
-            replace(ep, severity=new_severity, passed=(new_severity != SEVERITY_CRITICAL), topics=new_topics)
+            replace(
+                ep,
+                severity=new_severity,
+                passed=(new_severity != SEVERITY_CRITICAL),
+                topics=new_topics,
+            )
         )
     return updated_reports
 
@@ -417,17 +452,25 @@ def apply_batch_topic_presence_check(
             continue
         extra_topics = list(r.topics)
         for topic, role in sorted(missing):
-            extra_topics.append(TopicQualityReport(
-                topic=topic, label=topic_role_label[(topic, role)], role=role,
-                message_count=0, avg_fps=None,
-                coverage_ratio=0.0, total_gap_s=0.0, longest_gap_s=0.0, gaps=[],
-                severity=SEVERITY_CRITICAL,
-                reason=(
-                    f"topic completely absent (present in {presence_count[(topic, role)]}/"
-                    f"{len(valid_reports)} sibling episodes in this batch)"
-                ),
-                message_type=None,
-            ))
+            extra_topics.append(
+                TopicQualityReport(
+                    topic=topic,
+                    label=topic_role_label[(topic, role)],
+                    role=role,
+                    message_count=0,
+                    avg_fps=None,
+                    coverage_ratio=0.0,
+                    total_gap_s=0.0,
+                    longest_gap_s=0.0,
+                    gaps=[],
+                    severity=SEVERITY_CRITICAL,
+                    reason=(
+                        f"topic completely absent (present in {presence_count[(topic, role)]}/"
+                        f"{len(valid_reports)} sibling episodes in this batch)"
+                    ),
+                    message_type=None,
+                )
+            )
         new_severity = worst_severity(t.severity for t in extra_topics)
         new_reports.append(
             replace(
@@ -539,9 +582,15 @@ def scan_episode(
             ti = topic_info[m.topic]
             topic_reports.append(
                 TopicQualityReport(
-                    topic=m.topic, label=m.label, role=ROLE_UNCLASSIFIED,
-                    message_count=ti.count, avg_fps=None,
-                    coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, gaps=[],
+                    topic=m.topic,
+                    label=m.label,
+                    role=ROLE_UNCLASSIFIED,
+                    message_count=ti.count,
+                    avg_fps=None,
+                    coverage_ratio=1.0,
+                    total_gap_s=0.0,
+                    longest_gap_s=0.0,
+                    gaps=[],
                     severity=SEVERITY_OK,
                     reason=f"unmonitored message type ({m.message_type or 'unknown'}) — informational only",
                     message_type=m.message_type,
@@ -549,9 +598,14 @@ def scan_episode(
             )
         else:
             result = analyze_topic_coverage(
-                ts_map.get(m.topic, []), session_start, session_end,
-                topic=m.topic, label=m.label, role=m.role,
-                thresholds=thresholds, action_from_observation=False,
+                ts_map.get(m.topic, []),
+                session_start,
+                session_end,
+                topic=m.topic,
+                label=m.label,
+                role=m.role,
+                thresholds=thresholds,
+                action_from_observation=False,
             )
             topic_reports.append(replace(result, message_type=m.message_type))
 

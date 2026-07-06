@@ -50,9 +50,8 @@ def _summary_line(reports) -> str:
     n_ok = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_OK)
     n_warn = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_WARNING)
     n_crit = sum(1 for r in reports if not r.read_error and r.severity == SEVERITY_CRITICAL)
-    return (
-        f"{len(reports)} episodes: {n_ok} ok, {n_warn} warning, {n_crit} critical"
-        + (f", {n_error} unreadable" if n_error else "")
+    return f"{len(reports)} episodes: {n_ok} ok, {n_warn} warning, {n_crit} critical" + (
+        f", {n_error} unreadable" if n_error else ""
     )
 
 
@@ -120,7 +119,11 @@ def _render_table(reports, *, verbose: bool) -> None:
             f"[{_SEVERITY_COLOR[t.severity]}]{escape(t.label)}[/{_SEVERITY_COLOR[t.severity]}]: {escape(t.reason)}"
             for t in flagged
         ]
-        console.print(Panel("\n".join(lines), title=Path(r.path).name, border_style=_SEVERITY_COLOR[r.severity]))
+        console.print(
+            Panel(
+                "\n".join(lines), title=Path(r.path).name, border_style=_SEVERITY_COLOR[r.severity]
+            )
+        )
 
     console.print(f"\n{_summary_line(reports)}")
 
@@ -203,7 +206,9 @@ examples:
   (by default, a JSON + Markdown report is always written to ./mcap_valid_reports/<name>.{json,md})
 """,
     )
-    parser.add_argument("-i", "--input", required=True, help="MCAP file or directory (recursive **/*.mcap)")
+    parser.add_argument(
+        "-i", "--input", required=True, help="MCAP file or directory (recursive **/*.mcap)"
+    )
     parser.add_argument("--format", choices=["table", "json"], default="table")
     parser.add_argument(
         "--output",
@@ -217,13 +222,22 @@ examples:
     parser.add_argument("--stream-min-gap", type=float, default=0.5)
     parser.add_argument("--action-warn-gap", type=float, default=1.0)
     parser.add_argument("--fps-tolerance", type=float, default=0.15)
-    parser.add_argument("--fail-on-critical", action="store_true", help="exit 1 if any episode has a critical issue")
-    parser.add_argument("--verbose", action="store_true", help="show per-topic detail even for healthy episodes")
     parser.add_argument(
-        "--topic", default=None, help="deep field-structure dump for one topic (folds in the old mcap-inspect tool)"
+        "--fail-on-critical", action="store_true", help="exit 1 if any episode has a critical issue"
     )
     parser.add_argument(
-        "--max-samples", type=int, default=5, help="max message samples for --topic field dump (default: 5)"
+        "--verbose", action="store_true", help="show per-topic detail even for healthy episodes"
+    )
+    parser.add_argument(
+        "--topic",
+        default=None,
+        help="deep field-structure dump for one topic (folds in the old mcap-inspect tool)",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=5,
+        help="max message samples for --topic field dump (default: 5)",
     )
     parsed = parser.parse_args(args)
 
@@ -259,7 +273,9 @@ examples:
             # mcap-inspect tool did — so this CLI layer must catch them itself, the
             # same way scan_episode()'s callers rely on it to turn read errors into a
             # clean report instead of a crash.
-            _status_console.print(f"[red]✗ failed to read {representative_file} for --topic: {exc}[/red]")
+            _status_console.print(
+                f"[red]✗ failed to read {representative_file} for --topic: {exc}[/red]"
+            )
             return 1
 
     default_json_path, default_md_path = default_report_paths(input_path)
