@@ -3,22 +3,27 @@
 Splits into two layers, mirroring the pattern used for action forward-fill
 in extractor.py:
   - Pure analysis functions (analyze_topic_coverage, detect_fps_degradation,
-    apply_batch_fps_check, resolve_monitored_topics, worst_severity) that
-    take already-extracted data and are fully unit-testable without any
-    MCAP file I/O.
+    apply_batch_fps_check, apply_batch_topic_presence_check, classify_topic,
+    classify_topics, worst_severity) that take already-extracted data and
+    are fully unit-testable without any MCAP file I/O.
   - A thin I/O adapter (scan_episode, and its helpers) that reads a real
     MCAP file and feeds the pure functions.
+
+Topic monitoring is config-free: which topics get analyzed, and what role
+each plays (camera/joint stream vs. action command), is inferred entirely
+from the ROS2 message type recorded in the MCAP's own schema metadata (see
+classify_topic). No DataConfig is consulted anywhere in this module.
 """
 
+import re
 import statistics
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from mcap.exceptions import McapError
 from mcap.reader import make_reader as make_mcap_reader
 
-from ..config.schema import DataConfig
 from .extractor import message_timestamp
 from .reader import McapReader
 
@@ -26,6 +31,19 @@ SEVERITY_OK = "ok"
 SEVERITY_WARNING = "warning"
 SEVERITY_CRITICAL = "critical"
 _SEVERITY_RANK = {SEVERITY_OK: 0, SEVERITY_WARNING: 1, SEVERITY_CRITICAL: 2}
+
+ROLE_STREAM = "stream"
+ROLE_ACTION = "action"
+ROLE_UNCLASSIFIED = "unclassified"
+
+_SCHEMA_JOINT_STATE = "sensor_msgs/JointState"
+_SCHEMA_COMPRESSED_IMAGE = "sensor_msgs/CompressedImage"
+_SCHEMA_IMAGE = "sensor_msgs/Image"
+_SCHEMA_FLOAT64_MULTIARR = "std_msgs/Float64MultiArray"
+
+_CAMERA_LABEL_RE = re.compile(r"^/cam_(?P<name>[^/]+)/image_raw")
+_ARM_SIDE_RE = re.compile(r"/follower_(?P<side>[lr])_.*controller/commands")
+_ARM_SIDE_TO_LABEL = {"l": "left", "r": "right"}
 
 
 def worst_severity(severities: Iterable[str]) -> str:
@@ -53,7 +71,7 @@ class TopicQualityReport:
 
     topic: str
     label: str
-    role: str  # "stream" | "action"
+    role: str  # "stream" | "action" | "unclassified"
     message_count: int
     avg_fps: Optional[float]  # only meaningful for role="stream"; None for "action"
     coverage_ratio: float
@@ -62,6 +80,7 @@ class TopicQualityReport:
     gaps: List[GapInterval] = field(default_factory=list)
     severity: str = SEVERITY_OK
     reason: str = ""
+    message_type: Optional[str] = None  # normalized ROS2 schema name, e.g. "sensor_msgs/JointState"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -94,34 +113,60 @@ class QualityThresholds:
 
 @dataclass
 class MonitoredTopic:
-    """A single topic to check, resolved from DataConfig against what's actually in the file."""
+    """A single topic to check, classified purely from its ROS2 message type."""
 
     topic: str
     label: str
-    role: str  # "stream" | "action"
+    role: str  # "stream" | "action" | "unclassified"
+    message_type: Optional[str] = None
 
 
-def resolve_monitored_topics(config: DataConfig, available_topics: Set[str]) -> List[MonitoredTopic]:
+def _normalize_schema_name(name: Optional[str]) -> Optional[str]:
+    """Normalize a ROS2 schema/type name across recorder variants.
+
+    Some recorders/readers report e.g. "sensor_msgs/msg/JointState" (with a /msg/ infix)
+    or a "ros2msg://" URI prefix instead of the bare "sensor_msgs/JointState" form. Strip
+    both so classification is robust to either convention.
     """
-    Decide which topics to check based on DataConfig, matching camera topic
-    variants against what's actually present in the file.
+    if name is None:
+        return None
+    return name.replace("ros2msg://", "").replace("/msg/", "/")
 
-    Leader-follower mode (config.action_topics empty) produces no separate
-    "action" entries — action is embedded in robot_state_topic in that mode,
-    which this MVP does not independently verify (see design doc §"MVP 範圍").
+
+def _fallback_label(topic: str) -> str:
+    """Deterministic, human-readable label when no topic-name pattern matches."""
+    return topic.lstrip("/").replace("/", "_")
+
+
+def classify_topic(topic: str, schema_name: Optional[str]) -> MonitoredTopic:
+    """Map one (topic, message-type) pair to a MonitoredTopic (role + label).
+
+    Driven purely by the message type recorded in the MCAP's own schema metadata — this
+    reproduces the same classification every real conversion config in this repo would have
+    produced via explicit config, for every real recording. A topic whose message type isn't
+    one of the 3 known robot-pipeline types is returned with role=ROLE_UNCLASSIFIED
+    (informational only — never dropped, never crashes, never affects episode severity).
     """
-    monitored = [MonitoredTopic(topic=config.robot_state_topic, label="joint_states", role="stream")]
+    norm = _normalize_schema_name(schema_name)
+    if norm == _SCHEMA_JOINT_STATE:
+        return MonitoredTopic(topic, label="joint_states", role=ROLE_STREAM, message_type=norm)
+    if norm in (_SCHEMA_COMPRESSED_IMAGE, _SCHEMA_IMAGE):
+        m = _CAMERA_LABEL_RE.match(topic)
+        label = m.group("name") if m else _fallback_label(topic)
+        return MonitoredTopic(topic, label=label, role=ROLE_STREAM, message_type=norm)
+    if norm == _SCHEMA_FLOAT64_MULTIARR:
+        m = _ARM_SIDE_RE.search(topic)
+        arm = _ARM_SIDE_TO_LABEL.get(m.group("side")) if m else None
+        label = f"action[{arm}]" if arm else f"action[{_fallback_label(topic)}]"
+        return MonitoredTopic(topic, label=label, role=ROLE_ACTION, message_type=norm)
+    return MonitoredTopic(
+        topic, label=_fallback_label(topic), role=ROLE_UNCLASSIFIED, message_type=norm
+    )
 
-    for cam_topic in config.camera_topics:
-        candidates = [cam_topic, cam_topic + "/compressed"]
-        resolved = next((c for c in candidates if c in available_topics), cam_topic)
-        label = config.camera_topic_mapping.get(cam_topic, cam_topic)
-        monitored.append(MonitoredTopic(topic=resolved, label=label, role="stream"))
 
-    for topic, topic_cfg in config.action_topics.items():
-        monitored.append(MonitoredTopic(topic=topic, label=f"action[{topic_cfg.arm}]", role="action"))
-
-    return monitored
+def classify_topics(topic_schemas: Dict[str, Optional[str]]) -> List[MonitoredTopic]:
+    """Classify every present topic (sorted by topic name for a deterministic report order)."""
+    return [classify_topic(t, s) for t, s in sorted(topic_schemas.items())]
 
 
 def analyze_topic_coverage(
@@ -309,29 +354,123 @@ def apply_batch_fps_check(
     return updated_reports
 
 
-def _summary_message_counts(mcap_path: str) -> Dict[str, int]:
+def apply_batch_topic_presence_check(
+    reports: List[EpisodeQualityReport],
+) -> List[EpisodeQualityReport]:
     """
-    O(1) per-topic message counts from the MCAP footer summary (no full scan).
+    Config-free auto-detection can only classify topics that actually exist as declared
+    channels in a file — if an entire stream/camera never published anything (no channel
+    declared at all, e.g. a camera driver never started), it's simply absent from that
+    episode's topic list rather than flagged, since there's no config declaring "this
+    topic should exist."
 
-    Raises OSError (including FileNotFoundError) or McapError if the file
-    cannot be opened or parsed — callers (scan_episode) must catch these to
-    produce a clear "file unreadable" result rather than letting a bad file
-    look like a real recording with zero messages.
+    This function closes that gap using cross-episode evidence within the same batch: any
+    (topic, role) pair present in a MAJORITY of the batch's episodes is treated as
+    "expected." Any episode missing an expected pair gets a synthesized CRITICAL
+    "topic completely absent" entry appended to its topic list, and its overall severity
+    is recomputed. Pure function — no I/O. No-ops for a single-episode batch (nothing to
+    compare against).
+
+    Design rationale: majority quorum (not "any episode has it") avoids one episode's
+    stray/noise topic making every OTHER episode look like it's "missing" something that
+    was never actually expected; and avoids false positives for topics that legitimately
+    only appear in a minority of episodes (e.g. some rare event-log topic). This does NOT
+    replace what a config could express (e.g. "this task always has exactly 4 cameras") —
+    it only catches within-batch inconsistency, but that's sufficient for the most common
+    real failure mode (a driver completely failing for one episode). Single-episode scans
+    (`-i` pointing at one file) have no batch to compare against, so this mechanism
+    naturally doesn't apply there.
+    """
+    if len(reports) <= 1:
+        return reports
+
+    valid_reports = [r for r in reports if r.read_error is None]
+    if len(valid_reports) <= 1:
+        return reports
+
+    presence_count: Dict[Tuple[str, str], int] = {}
+    topic_role_label: Dict[Tuple[str, str], str] = {}
+    for r in valid_reports:
+        for t in r.topics:
+            if t.role in (ROLE_STREAM, ROLE_ACTION):
+                key = (t.topic, t.role)
+                presence_count[key] = presence_count.get(key, 0) + 1
+                topic_role_label.setdefault(key, t.label)
+
+    quorum = len(valid_reports) // 2 + 1  # strict majority
+    expected = {key for key, cnt in presence_count.items() if cnt >= quorum}
+
+    new_reports = []
+    for r in reports:
+        if r.read_error is not None:
+            new_reports.append(r)
+            continue
+        present_keys = {(t.topic, t.role) for t in r.topics}
+        missing = expected - present_keys
+        if not missing:
+            new_reports.append(r)
+            continue
+        extra_topics = list(r.topics)
+        for topic, role in sorted(missing):
+            extra_topics.append(TopicQualityReport(
+                topic=topic, label=topic_role_label[(topic, role)], role=role,
+                message_count=0, avg_fps=None,
+                coverage_ratio=0.0, total_gap_s=0.0, longest_gap_s=0.0, gaps=[],
+                severity=SEVERITY_CRITICAL,
+                reason=(
+                    f"topic completely absent (present in {presence_count[(topic, role)]}/"
+                    f"{len(valid_reports)} sibling episodes in this batch)"
+                ),
+                message_type=None,
+            ))
+        new_severity = worst_severity(t.severity for t in extra_topics)
+        new_reports.append(
+            replace(
+                r,
+                topics=extra_topics,
+                severity=new_severity,
+                passed=(new_severity != SEVERITY_CRITICAL),
+            )
+        )
+    return new_reports
+
+
+@dataclass
+class _TopicSummary:
+    """Per-topic (message_count, schema_name) as read from the MCAP footer summary."""
+
+    count: int
+    schema_name: Optional[str]  # normalized, e.g. "sensor_msgs/JointState"; None if no schema
+
+
+def _summary_topic_info(mcap_path: str) -> Dict[str, _TopicSummary]:
+    """Per-topic (message_count, schema_name) from the MCAP footer summary (O(1), no full scan).
+
+    Iterates ALL declared channels (summary.channels), not just those with nonzero message
+    counts, so a declared-but-silent channel still surfaces (count 0) and gets correctly
+    classified/analyzed for its own zero-message severity — an improvement over the prior
+    implementation, which iterated summary.statistics.channel_message_counts and so silently
+    dropped any channel that recorded zero messages.
+
+    Raises OSError / McapError on unreadable/unparseable files — callers must catch.
     """
     with open(mcap_path, "rb") as f:
-        reader = make_mcap_reader(f)
-        summary = reader.get_summary()
-
-    if summary is None or summary.statistics is None:
+        summary = make_mcap_reader(f).get_summary()
+    if summary is None:
         return {}
-
-    id_to_topic = {cid: ch.topic for cid, ch in summary.channels.items()}
-    counts: Dict[str, int] = {}
-    for cid, count in summary.statistics.channel_message_counts.items():
-        topic = id_to_topic.get(cid)
-        if topic is not None:
-            counts[topic] = counts.get(topic, 0) + count
-    return counts
+    counts_by_cid = summary.statistics.channel_message_counts if summary.statistics else {}
+    out: Dict[str, _TopicSummary] = {}
+    for cid, ch in summary.channels.items():
+        schema = summary.schemas.get(ch.schema_id) if ch.schema_id else None
+        schema_name = _normalize_schema_name(schema.name) if schema else None
+        cnt = counts_by_cid.get(cid, 0)
+        if ch.topic in out:
+            # >1 channel publishing to the same topic name (rare): sum counts, keep first schema
+            prev = out[ch.topic]
+            out[ch.topic] = _TopicSummary(prev.count + cnt, prev.schema_name or schema_name)
+        else:
+            out[ch.topic] = _TopicSummary(cnt, schema_name)
+    return out
 
 
 def _collect_timestamps(mcap_path: str, topics: List[str]) -> Dict[str, List[float]]:
@@ -345,16 +484,22 @@ def _collect_timestamps(mcap_path: str, topics: List[str]) -> Dict[str, List[flo
 
 def scan_episode(
     mcap_path: str,
-    config: DataConfig,
     thresholds: QualityThresholds,
 ) -> EpisodeQualityReport:
     """
     Scan one MCAP episode file and produce a full quality report.
 
+    Which topics get analyzed, and what role each plays, is inferred purely
+    from each topic's ROS2 message type (see classify_topic) — no config is
+    consulted. Topics whose message type isn't one of the known robot-
+    pipeline types are still surfaced in the report (role="unclassified",
+    severity always OK) rather than silently dropped.
+
     Session start/end are computed from the actual collected message
-    timestamps across all monitored topics — never from MCAP summary
-    file-level fields (those reflect the whole file, not any single topic,
-    and would misclassify legitimate action-topic idle gaps as dropframes).
+    timestamps across all analyzable (stream/action) topics — never from
+    MCAP summary file-level fields (those reflect the whole file, not any
+    single topic, and would misclassify legitimate action-topic idle gaps
+    as dropframes).
 
     If the file itself cannot be opened or parsed, this returns a report
     with severity=CRITICAL, passed=False, no topics, and read_error set to
@@ -362,7 +507,7 @@ def scan_episode(
     file, so a caller (e.g. a CLI) can tell "bad file" from "bad recording."
     """
     try:
-        counts = _summary_message_counts(mcap_path)
+        topic_info = _summary_topic_info(mcap_path)
     except (OSError, McapError) as exc:
         return EpisodeQualityReport(
             path=str(Path(mcap_path).resolve()),
@@ -373,24 +518,37 @@ def scan_episode(
             read_error=f"{type(exc).__name__}: {exc}",
         )
 
-    available = set(counts)
-    monitored = resolve_monitored_topics(config, available)
+    monitored = classify_topics({t: ti.schema_name for t, ti in topic_info.items()})
+    analyzable = [m for m in monitored if m.role in (ROLE_STREAM, ROLE_ACTION)]
 
-    scan_topics = [m.topic for m in monitored if counts.get(m.topic, 0) > 0]
+    scan_topics = [m.topic for m in analyzable if topic_info[m.topic].count > 0]
     ts_map = _collect_timestamps(mcap_path, scan_topics) if scan_topics else {}
 
     all_ts = [t for lst in ts_map.values() for t in lst]
     session_start = min(all_ts) if all_ts else 0.0
     session_end = max(all_ts) if all_ts else 0.0
 
-    topic_reports = [
-        analyze_topic_coverage(
-            ts_map.get(m.topic, []), session_start, session_end,
-            topic=m.topic, label=m.label, role=m.role,
-            thresholds=thresholds, action_from_observation=config.action_from_observation,
-        )
-        for m in monitored
-    ]
+    topic_reports = []
+    for m in monitored:
+        if m.role == ROLE_UNCLASSIFIED:
+            ti = topic_info[m.topic]
+            topic_reports.append(
+                TopicQualityReport(
+                    topic=m.topic, label=m.label, role=ROLE_UNCLASSIFIED,
+                    message_count=ti.count, avg_fps=None,
+                    coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, gaps=[],
+                    severity=SEVERITY_OK,
+                    reason=f"unmonitored message type ({m.message_type or 'unknown'}) — informational only",
+                    message_type=m.message_type,
+                )
+            )
+        else:
+            result = analyze_topic_coverage(
+                ts_map.get(m.topic, []), session_start, session_end,
+                topic=m.topic, label=m.label, role=m.role,
+                thresholds=thresholds, action_from_observation=False,
+            )
+            topic_reports.append(replace(result, message_type=m.message_type))
 
     severity = worst_severity(r.severity for r in topic_reports)
     return EpisodeQualityReport(

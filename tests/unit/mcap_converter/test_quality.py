@@ -3,9 +3,10 @@
 Verifies:
 1. Per-topic coverage analysis (exact/idle/dropframe/leading/trailing gaps).
 2. Cross-episode fps degradation detection.
-3. Topic resolution from DataConfig (which topics to monitor, quest vs
-   leader-follower mode).
+3. Config-free topic classification from ROS2 message type (classify_topic /
+   classify_topics) — replaces the old DataConfig-based topic resolution.
 4. The I/O adapter that reads a real MCAP file and produces a report.
+5. Cross-episode topic-presence check (apply_batch_topic_presence_check).
 """
 
 import json
@@ -13,9 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from mcap_converter.config.loader import ConfigLoader
-from mcap_converter.config.schema import ActionTopicConfig, DataConfig
 from mcap_converter.core.quality import (
+    ROLE_ACTION,
+    ROLE_STREAM,
+    ROLE_UNCLASSIFIED,
     SEVERITY_CRITICAL,
     SEVERITY_OK,
     SEVERITY_WARNING,
@@ -23,10 +25,13 @@ from mcap_converter.core.quality import (
     GapInterval,
     QualityThresholds,
     TopicQualityReport,
+    _TopicSummary,
     analyze_topic_coverage,
     apply_batch_fps_check,
+    apply_batch_topic_presence_check,
+    classify_topic,
+    classify_topics,
     detect_fps_degradation,
-    resolve_monitored_topics,
     scan_episode,
     worst_severity,
 )
@@ -35,30 +40,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _STUB_MCAP = _REPO_ROOT / "tests/smoke/fixtures/test-session/0001/0001_0.mcap"
 _STUB_CMD_CONFIG = _REPO_ROOT / "tests/smoke/fixtures/configs/mcap-converter-smoke-test-cmd.yaml"
 _BIMANUAL_CONFIG = _REPO_ROOT / "configs/mcap_converter/openarm_bimanual_quest.yaml"
-
-
-def make_quest_config() -> DataConfig:
-    """Bimanual quest-teleop config, matching the real bug scenario."""
-    return DataConfig(
-        action_topics={
-            "/follower_l_forward_position_controller/commands": ActionTopicConfig(
-                arm="left", joint_order=["joint1", "joint2"]
-            ),
-            "/follower_r_forward_position_controller/commands": ActionTopicConfig(
-                arm="right", joint_order=["joint1", "joint2"]
-            ),
-        },
-        camera_topics=["/cam_chest/image_raw/compressed"],
-        camera_topic_mapping={"/cam_chest/image_raw/compressed": "chest"},
-    )
-
-
-def make_leader_follower_config() -> DataConfig:
-    """Default DataConfig has empty action_topics -> leader-follower mode."""
-    return DataConfig(
-        camera_topics=["/cam_chest/image_raw/compressed"],
-        camera_topic_mapping={"/cam_chest/image_raw/compressed": "chest"},
-    )
 
 
 class TestWorstSeverity:
@@ -75,57 +56,84 @@ class TestWorstSeverity:
         assert worst_severity([]) == SEVERITY_OK
 
 
-class TestResolveMonitoredTopics:
-    def test_picks_present_camera_variant(self):
-        config = make_quest_config()
-        available = {"/cam_chest/image_raw/compressed", "/joint_states"}
+class TestClassifyTopic:
+    def test_joint_state_is_stream_joint_states(self):
+        m = classify_topic("/joint_states", "sensor_msgs/JointState")
 
-        monitored = resolve_monitored_topics(config, available)
+        assert m.role == ROLE_STREAM
+        assert m.label == "joint_states"
+        assert m.message_type == "sensor_msgs/JointState"
 
-        camera = next(m for m in monitored if m.label == "chest")
-        assert camera.topic == "/cam_chest/image_raw/compressed"
-        assert camera.role == "stream"
+    def test_compressed_image_matching_cam_pattern_is_stream_with_camera_label(self):
+        m = classify_topic("/cam_waist/image_raw/compressed", "sensor_msgs/CompressedImage")
 
-    def test_camera_missing_all_variants_selects_base(self):
-        config = make_quest_config()
-        available = {"/joint_states"}  # camera topic entirely absent
+        assert m.role == ROLE_STREAM
+        assert m.label == "waist"
 
-        monitored = resolve_monitored_topics(config, available)
+    def test_uncompressed_image_also_classifies_as_stream(self):
+        m = classify_topic("/cam_chest/image_raw", "sensor_msgs/Image")
 
-        camera = next(m for m in monitored if m.label == "chest")
-        assert camera.topic == "/cam_chest/image_raw/compressed"  # falls back to configured name
+        assert m.role == ROLE_STREAM
+        assert m.label == "chest"
 
-    def test_quest_mode_produces_action_items_with_arm_label(self):
-        config = make_quest_config()
-        available = {
-            "/follower_l_forward_position_controller/commands",
-            "/follower_r_forward_position_controller/commands",
-            "/cam_chest/image_raw/compressed",
-            "/joint_states",
+    def test_camera_type_not_matching_cam_pattern_falls_back_without_crash(self):
+        m = classify_topic("/some/other/camera/topic", "sensor_msgs/CompressedImage")
+
+        assert m.role == ROLE_STREAM
+        assert m.label == "some_other_camera_topic"
+
+    def test_float64_multiarray_left_arm_is_action_left(self):
+        m = classify_topic(
+            "/follower_l_forward_position_controller/commands", "std_msgs/Float64MultiArray"
+        )
+
+        assert m.role == ROLE_ACTION
+        assert m.label == "action[left]"
+
+    def test_float64_multiarray_right_arm_is_action_right(self):
+        m = classify_topic(
+            "/follower_r_forward_position_controller/commands", "std_msgs/Float64MultiArray"
+        )
+
+        assert m.role == ROLE_ACTION
+        assert m.label == "action[right]"
+
+    def test_float64_multiarray_not_matching_arm_pattern_falls_back_without_crash(self):
+        m = classify_topic("/some/command/topic", "std_msgs/Float64MultiArray")
+
+        assert m.role == ROLE_ACTION
+        assert m.label == "action[some_command_topic]"
+
+    def test_unrecognized_schema_is_unclassified_with_type_preserved(self):
+        m = classify_topic("/tf", "tf2_msgs/TFMessage")
+
+        assert m.role == ROLE_UNCLASSIFIED
+        assert m.message_type == "tf2_msgs/TFMessage"
+
+    def test_none_schema_is_unclassified(self):
+        m = classify_topic("/rosout", None)
+
+        assert m.role == ROLE_UNCLASSIFIED
+        assert m.message_type is None
+
+    def test_schema_name_with_msg_infix_still_classifies_as_stream(self):
+        m = classify_topic("/joint_states", "sensor_msgs/msg/JointState")
+
+        assert m.role == ROLE_STREAM
+        assert m.label == "joint_states"
+        assert m.message_type == "sensor_msgs/JointState"
+
+    def test_classify_topics_returns_one_entry_per_key_sorted_by_topic(self):
+        topic_schemas = {
+            "/joint_states": "sensor_msgs/JointState",
+            "/cam_chest/image_raw/compressed": "sensor_msgs/CompressedImage",
+            "/follower_r_forward_position_controller/commands": "std_msgs/Float64MultiArray",
         }
 
-        monitored = resolve_monitored_topics(config, available)
+        monitored = classify_topics(topic_schemas)
 
-        labels = {m.label for m in monitored if m.role == "action"}
-        assert labels == {"action[left]", "action[right]"}
-
-    def test_leader_follower_mode_has_no_action_items(self):
-        config = make_leader_follower_config()
-        available = {"/cam_chest/image_raw/compressed", "/joint_states"}
-
-        monitored = resolve_monitored_topics(config, available)
-
-        assert not [m for m in monitored if m.role == "action"]
-
-    def test_robot_state_topic_is_a_stream(self):
-        config = make_quest_config()
-        available = {"/joint_states"}
-
-        monitored = resolve_monitored_topics(config, available)
-
-        joint_states = next(m for m in monitored if m.label == "joint_states")
-        assert joint_states.topic == "/joint_states"
-        assert joint_states.role == "stream"
+        assert len(monitored) == 3
+        assert [m.topic for m in monitored] == sorted(topic_schemas)
 
 
 def _thresholds(**overrides) -> QualityThresholds:
@@ -457,11 +465,73 @@ class TestApplyBatchFpsCheck:
         assert critical_result.passed is False
 
 
-class TestScanEpisodeIntegration:
-    def test_healthy_stub_passes_with_matching_single_arm_config(self):
-        config = ConfigLoader.from_yaml(str(_STUB_CMD_CONFIG))
+def _make_topic(topic, role, label=None, severity=SEVERITY_OK):
+    return TopicQualityReport(
+        topic=topic, label=label or topic, role=role, message_count=100, avg_fps=30.0,
+        coverage_ratio=1.0, total_gap_s=0.0, longest_gap_s=0.0, severity=severity, reason="OK",
+    )
 
-        report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
+
+def _make_episode(path, topics):
+    return EpisodeQualityReport(
+        path=path, duration_s=10.0, severity=SEVERITY_OK, passed=True, topics=topics,
+    )
+
+
+class TestApplyBatchTopicPresenceCheck:
+    def test_episode_missing_majority_topic_gets_synthesized_critical_entry(self):
+        camera = _make_topic("/cam_chest/image_raw/compressed", ROLE_STREAM, label="chest")
+        ep_with_cam = [_make_episode(f"ep{i}", [camera]) for i in range(3)]
+        ep_missing_cam = _make_episode("ep_missing", [])
+
+        updated = apply_batch_topic_presence_check([*ep_with_cam, ep_missing_cam])
+
+        missing_result = next(r for r in updated if r.path == "ep_missing")
+        synthesized = next(t for t in missing_result.topics if t.topic == "/cam_chest/image_raw/compressed")
+        assert synthesized.severity == SEVERITY_CRITICAL
+        assert "3/4" in synthesized.reason
+        assert missing_result.severity == SEVERITY_CRITICAL
+        assert missing_result.passed is False
+
+    def test_episodes_not_missing_anything_are_returned_unchanged(self):
+        camera = _make_topic("/cam_chest/image_raw/compressed", ROLE_STREAM, label="chest")
+        episodes = [_make_episode(f"ep{i}", [camera]) for i in range(3)]
+
+        updated = apply_batch_topic_presence_check(episodes)
+
+        for original, result in zip(episodes, updated):
+            assert result.topics == original.topics
+            assert result.severity == original.severity
+            assert result.passed == original.passed
+
+    def test_single_episode_batch_is_a_no_op(self):
+        episodes = [_make_episode("ep0", [])]
+
+        updated = apply_batch_topic_presence_check(episodes)
+
+        assert updated == episodes
+
+    def test_minority_topic_does_not_trigger_false_positive_on_majority(self):
+        camera = _make_topic("/cam_chest/image_raw/compressed", ROLE_STREAM, label="chest")
+        rare_topic = _make_topic("/rare/event_log", ROLE_ACTION, label="rare")
+        # Only 1 of 3 episodes has the rare topic -> below quorum (2) -> the
+        # other 2 episodes must NOT be flagged as "missing" it.
+        ep0 = _make_episode("ep0", [camera, rare_topic])
+        ep1 = _make_episode("ep1", [camera])
+        ep2 = _make_episode("ep2", [camera])
+
+        updated = apply_batch_topic_presence_check([ep0, ep1, ep2])
+
+        for result in updated:
+            assert not any(t.topic == "/rare/event_log" for t in result.topics if t.severity == SEVERITY_CRITICAL)
+        # And none of them gained any synthesized entries at all.
+        assert len(next(r for r in updated if r.path == "ep1").topics) == 1
+        assert len(next(r for r in updated if r.path == "ep2").topics) == 1
+
+
+class TestScanEpisodeIntegration:
+    def test_healthy_stub_passes(self):
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
 
         assert report.passed is True
         assert report.severity in (SEVERITY_OK, SEVERITY_WARNING)  # never critical for a healthy stub
@@ -475,13 +545,11 @@ class TestScanEpisodeIntegration:
         # cameras, the action-command topic) spans the exact same range,
         # 0.0 -> 3.966666627s, which is also exactly what the MCAP summary's
         # file-level message_start_time/message_end_time report. So no
-        # config subset of this fixture can discriminate the two approaches.
+        # subset of this fixture can discriminate the two approaches.
         # This test is renamed to describe what it actually checks; see
         # test_duration_matches_manually_verified_monitored_topic_timestamps
         # below for a test that pins the exact computation.
-        config = ConfigLoader.from_yaml(str(_STUB_CMD_CONFIG))
-
-        report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
 
         assert 1.0 < report.duration_s < 30.0
 
@@ -495,40 +563,45 @@ class TestScanEpisodeIntegration:
         # test_duration_is_a_plausible_positive_value above), but it does
         # pin the exact computed value to high precision, which the old
         # loose range check did not.
-        config = ConfigLoader.from_yaml(str(_STUB_CMD_CONFIG))
-
-        report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
 
         assert report.duration_s == pytest.approx(3.966666627, abs=1e-6)
 
-    def test_missing_arm_is_warning_with_bimanual_config_on_single_arm_stub(self):
-        config = ConfigLoader.from_yaml(str(_BIMANUAL_CONFIG))
-        # The single-arm stub never recorded a left-wrist camera (no left-arm
-        # hardware was mounted for this session), so the bimanual config's
-        # full camera list would also surface an unrelated, genuinely-correct
-        # CRITICAL for that missing stream. Drop it so this test isolates the
-        # actual regression under test: the missing *action* topic alone.
-        left_wrist_cam = "/cam_wrist_l/image_raw/compressed"
-        config.camera_topics = [c for c in config.camera_topics if c != left_wrist_cam]
-        config.camera_topic_mapping.pop(left_wrist_cam, None)
+    def test_every_topic_is_classified_stream_or_action_with_message_type(self):
+        # The stub fixture (/joint_states, 3 camera topics, 1 action topic)
+        # has no unclassified topics — every declared channel is one of the
+        # 3 known robot-pipeline message types.
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
 
-        report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
+        assert len(report.topics) == 5
+        for t in report.topics:
+            assert t.role in (ROLE_STREAM, ROLE_ACTION)
+            assert t.message_type is not None
 
-        left_action = next(t for t in report.topics if t.label == "action[left]")
-        assert left_action.severity == SEVERITY_WARNING  # NOT critical — key regression test for this revision
-        assert report.passed is True  # a warning-only episode still passes
+    def test_unclassified_topic_is_ok_and_does_not_affect_episode_severity(self, monkeypatch):
+        from mcap_converter.core import quality as quality_module
 
-    def test_missing_arm_is_ok_when_action_from_observation_true(self):
-        config = ConfigLoader.from_yaml(str(_BIMANUAL_CONFIG))
-        config.action_from_observation = True
+        baseline = scan_episode(str(_STUB_MCAP), QualityThresholds())
+        real_info = quality_module._summary_topic_info(str(_STUB_MCAP))
 
-        report = scan_episode(str(_STUB_MCAP), config, QualityThresholds())
+        def fake_summary_topic_info(mcap_path):
+            info = dict(real_info)
+            info["/rosout"] = _TopicSummary(count=5, schema_name="rcl_interfaces/Log")
+            return info
 
-        left_action = next(t for t in report.topics if t.label == "action[left]")
-        assert left_action.severity == SEVERITY_OK
+        monkeypatch.setattr(quality_module, "_summary_topic_info", fake_summary_topic_info)
+
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
+
+        rosout = next(t for t in report.topics if t.topic == "/rosout")
+        assert rosout.role == ROLE_UNCLASSIFIED
+        assert rosout.severity == SEVERITY_OK
+        assert rosout.message_count == 5
+        assert rosout.message_type == "rcl_interfaces/Log"
+        assert report.severity == baseline.severity
 
     def test_nonexistent_file_produces_read_error_not_a_crash(self):
-        report = scan_episode("/no/such/file.mcap", ConfigLoader.get_default(), QualityThresholds())
+        report = scan_episode("/no/such/file.mcap", QualityThresholds())
 
         assert report.passed is False
         assert report.severity == SEVERITY_CRITICAL
@@ -539,7 +612,7 @@ class TestScanEpisodeIntegration:
         garbage_file = tmp_path / "corrupt.mcap"
         garbage_file.write_bytes(b"this is not a valid mcap file at all, just garbage bytes")
 
-        report = scan_episode(str(garbage_file), ConfigLoader.get_default(), QualityThresholds())
+        report = scan_episode(str(garbage_file), QualityThresholds())
 
         assert report.passed is False
         assert report.read_error is not None
