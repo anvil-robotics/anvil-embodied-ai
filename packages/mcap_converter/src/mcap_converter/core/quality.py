@@ -42,7 +42,12 @@ _SCHEMA_IMAGE = "sensor_msgs/Image"
 _SCHEMA_FLOAT64_MULTIARR = "std_msgs/Float64MultiArray"
 
 _CAMERA_LABEL_RE = re.compile(r"^/cam_(?P<name>[^/]+)/image_raw")
-_ARM_SIDE_RE = re.compile(r"/follower_(?P<side>[lr])_.*controller/commands")
+# Anchored (fullmatch-style) rather than a bare .search() substring match, so a topic that
+# merely happens to CONTAIN this pattern somewhere in the middle of a longer/nested path
+# (e.g. a future multi-robot namespace like "/robot2/follower_l_x_controller/commands/debug")
+# can't be misclassified as an action topic. No real topic in this repo is nested/suffixed
+# like that today, but anchoring costs nothing and removes the risk entirely.
+_ARM_SIDE_RE = re.compile(r"^/follower_(?P<side>[lr])_.*controller/commands$")
 _ARM_SIDE_TO_LABEL = {"l": "left", "r": "right"}
 
 
@@ -155,7 +160,7 @@ def classify_topic(topic: str, schema_name: Optional[str]) -> MonitoredTopic:
         label = m.group("name") if m else _fallback_label(topic)
         return MonitoredTopic(topic, label=label, role=ROLE_STREAM, message_type=norm)
     if norm == _SCHEMA_FLOAT64_MULTIARR:
-        m = _ARM_SIDE_RE.search(topic)
+        m = _ARM_SIDE_RE.match(topic)
         arm = _ARM_SIDE_TO_LABEL.get(m.group("side")) if m else None
         label = f"action[{arm}]" if arm else f"action[{_fallback_label(topic)}]"
         return MonitoredTopic(topic, label=label, role=ROLE_ACTION, message_type=norm)
