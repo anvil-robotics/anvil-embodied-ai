@@ -69,6 +69,13 @@ def _truncate_names(names: List[str], limit: int = _MAX_NAMES_SHOWN) -> str:
     return f"{shown}, ... and {len(names) - limit} more (see the JSON report for the full list)"
 
 
+def _flagged_topics(r) -> List:
+    """This episode's non-OK topics — the shared "what's actually flagged" predicate
+    used to build the Reason cell/column in both the terminal table and the
+    Markdown per-episode overview table, so the two never drift apart."""
+    return [t for t in r.topics if t.severity != SEVERITY_OK]
+
+
 def _summary_line(reports) -> str:
     """Build the one-line episode-count summary shared by the table and Markdown report."""
     n_error = sum(1 for r in reports if r.read_error)
@@ -126,7 +133,7 @@ def _render_table(reports, *, verbose: bool) -> None:
             table.add_row(Path(r.path).name, "-", "[red]error[/red]", escape(r.read_error))
             continue
         color = _SEVERITY_COLOR[r.severity]
-        flagged = [t for t in r.topics if t.severity != SEVERITY_OK] if not verbose else r.topics
+        flagged = r.topics if verbose else _flagged_topics(r)
         if flagged:
             # escape(): labels like "action[left]" would otherwise be parsed as Rich
             # markup tags, silently dropping the bracketed arm suffix from the output.
@@ -207,7 +214,7 @@ def _episode_overview_table_lines(reports) -> List[str]:
             reason = r.read_error.replace("|", "\\|")
             lines.append(f"| {name} | - | error | {reason} |")
             continue
-        flagged = [t for t in r.topics if t.severity != SEVERITY_OK]
+        flagged = _flagged_topics(r)
         if flagged:
             reason = "; ".join(f"{t.label}: {t.reason}" for t in flagged).replace("|", "\\|")
         else:
