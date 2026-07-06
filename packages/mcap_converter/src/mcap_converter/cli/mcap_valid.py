@@ -279,7 +279,9 @@ def _conclusion_section(reports) -> List[str]:
     n_critical = sum(1 for r in readable if r.severity == SEVERITY_CRITICAL) + len(unreadable)
     n_warning = sum(1 for r in readable if r.severity == SEVERITY_WARNING)
 
-    if n_critical:
+    if total == 0:
+        lines.append("**No episodes found** — nothing was scanned, nothing to convert.")
+    elif n_critical:
         lines.append(
             f"**❌ Not ready to convert** — {n_critical}/{total} episode(s) flagged critical. "
             "Fix the underlying recordings, or run `mcap-convert --skip-flagged` to exclude them."

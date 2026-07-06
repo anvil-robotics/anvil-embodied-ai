@@ -1503,6 +1503,17 @@ class TestRenderMarkdownReport:
         assert "⚠️ Ready to convert with warnings" in conclusion_section
         assert "1/2 episode(s) have non-blocking issues" in conclusion_section
 
+    def test_conclusion_no_episodes_verdict_is_not_falsely_all_clean(self):
+        # An empty reports list (e.g. an input dir with no .mcap files) must
+        # not render "All episodes clean" — nothing was actually scanned.
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        output = render_markdown_report([], input_path="fake/input")
+
+        conclusion_section = output.split("## Conclusion")[1]
+        assert "No episodes found" in conclusion_section
+        assert "All episodes clean" not in conclusion_section
+
     def test_flagged_topics_groups_by_label_and_severity_sorted_critical_first(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
