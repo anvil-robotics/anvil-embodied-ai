@@ -876,9 +876,18 @@ class TestMcapValidCli:
         # New "what's in this file" table (folded in from the old mcap-inspect
         # topic summary): every topic in a representative episode, regardless
         # of severity, with its message type and role.
+        #
+        # This table now renders through the same terminal-width-aware `console`
+        # as everything else (see test_topics_baseline_table_respects_narrow_terminal_width
+        # below for the narrow-width behavior), rather than a fixed 200-column
+        # console. Under pytest, stdout isn't a real terminal, so Rich falls back
+        # to an 80-column default unless COLUMNS says otherwise; simulate a wide
+        # real terminal here so the full topic/type strings are asserted the same
+        # way a user on a wide terminal would actually see them.
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COLUMNS", "200")
         exit_code = main([
             "-i", str(_STUB_MCAP),
         ])
@@ -894,6 +903,89 @@ class TestMcapValidCli:
         assert "sensor_msgs/JointState" in captured.out
         assert "sensor_msgs/CompressedImage" in captured.out
         assert "std_msgs/Float64MultiArray" in captured.out
+
+    def test_topics_baseline_table_respects_narrow_terminal_width(self, tmp_path, monkeypatch, capsys):
+        # Regression test for the fixed Console(width=200) that used to back this
+        # table: it always rendered at exactly 200 columns regardless of the real
+        # terminal width, causing a jarring width mismatch against every other
+        # table in the same output (which correctly adapts to the real width).
+        # The table must now shrink/truncate consistently with the rest of the
+        # output on a narrow terminal, and must not crash while doing so.
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COLUMNS", "60")
+        exit_code = main([
+            "-i", str(_STUB_MCAP),
+        ])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "Topics in" in captured.out
+        # No line in the rendered output should exceed the narrow terminal width
+        # (plus a small allowance for Rich's own box-drawing edge characters);
+        # this is the actual regression the old fixed-width console produced.
+        for line in captured.out.splitlines():
+            assert len(line) <= 60 + 2
+
+    def test_topic_flag_on_corrupt_file_errors_cleanly_without_traceback(self, tmp_path, monkeypatch, capsys):
+        # inspect_message_structure() deliberately lets I/O/parse errors (e.g.
+        # mcap.exceptions.InvalidMagic for a corrupt file) propagate uncaught —
+        # main() must catch them itself and report a clean error, the same way
+        # scan_episode()'s callers turn a read error into a report instead of a
+        # crash, rather than letting a raw traceback reach the user.
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        garbage_file = tmp_path / "corrupt.mcap"
+        garbage_file.write_bytes(b"not a real mcap file")
+
+        exit_code = main([
+            "-i", str(garbage_file),
+            "--topic", "/joint_states",
+        ])
+
+        captured = capsys.readouterr()
+        assert exit_code != 0
+        assert "Traceback" not in captured.out
+        assert "Traceback" not in captured.err
+
+    def test_topics_baseline_table_skipped_for_empty_directory(self, tmp_path, monkeypatch, capsys):
+        # No .mcap files at all -> nothing to build a baseline table from;
+        # must be gracefully skipped, not crash or render misleading content.
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        empty_dir = tmp_path / "empty-session"
+        empty_dir.mkdir()
+
+        exit_code = main([
+            "-i", str(empty_dir),
+        ])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "Topics in" not in captured.out
+
+    def test_topics_baseline_table_skipped_when_all_reports_are_read_errors(self, tmp_path, monkeypatch, capsys):
+        # Every file in the batch is corrupt/unreadable -> no representative
+        # episode exists to build the baseline table from; must be gracefully
+        # skipped rather than rendering an empty/misleading table.
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        session_dir = tmp_path / "all-corrupt-session"
+        session_dir.mkdir()
+        (session_dir / "a.mcap").write_bytes(b"not a real mcap file")
+        (session_dir / "b.mcap").write_bytes(b"also not a real mcap file")
+
+        exit_code = main([
+            "-i", str(session_dir),
+        ])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "Topics in" not in captured.out
 
 
 class TestDefaultReportPaths:

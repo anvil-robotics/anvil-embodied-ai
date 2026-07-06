@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from typing import List
 
+from mcap.exceptions import McapError
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
@@ -69,19 +70,19 @@ def _render_topics_table(reports) -> None:
         return
 
     topics_table = Table(title=f"Topics in {Path(representative.path).name}")
-    topics_table.add_column("Topic")
-    topics_table.add_column("Type")
+    # no_wrap=True: topic/type strings are long and have no spaces to word-wrap
+    # on, so they'd otherwise fold mid-word across lines on a narrow terminal.
+    # Using the shared `console` (real terminal-aware width) instead of a
+    # separate fixed-width Console keeps this table consistent with every
+    # other table/panel in this command's output; no_wrap keeps names intact
+    # by letting Rich shrink other columns instead.
+    topics_table.add_column("Topic", no_wrap=True)
+    topics_table.add_column("Type", no_wrap=True)
     topics_table.add_column("Messages", justify="right")
     topics_table.add_column("Role")
     for t in representative.topics:
         topics_table.add_row(t.topic, t.message_type or "-", str(t.message_count), t.role)
-    # A dedicated wide console just for this table: topic/type strings are long
-    # and have no spaces to word-wrap on, so at the default ~80-column fallback
-    # width used when stdout isn't a real terminal (e.g. piped, or under test),
-    # Rich would otherwise truncate them with an ellipsis or fold them mid-word
-    # across lines. A generously wide fixed console keeps full names on one line
-    # for this table specifically, without changing the width used elsewhere.
-    Console(width=200).print(topics_table)
+    console.print(topics_table)
 
 
 def _render_table(reports, *, verbose: bool) -> None:
@@ -248,12 +249,24 @@ examples:
     structure = None
     if parsed.topic and mcap_files:
         representative_file = mcap_files[0]
-        structure = inspect_message_structure(
-            str(representative_file), topic=parsed.topic, max_samples=parsed.max_samples
-        )
+        try:
+            structure = inspect_message_structure(
+                str(representative_file), topic=parsed.topic, max_samples=parsed.max_samples
+            )
+        except (OSError, McapError) as exc:
+            # inspect_message_structure() deliberately lets I/O/parse errors propagate
+            # (see its docstring) rather than swallowing them like the old standalone
+            # mcap-inspect tool did — so this CLI layer must catch them itself, the
+            # same way scan_episode()'s callers rely on it to turn read errors into a
+            # clean report instead of a crash.
+            _status_console.print(f"[red]✗ failed to read {representative_file} for --topic: {exc}[/red]")
+            return 1
 
     default_json_path, default_md_path = default_report_paths(input_path)
     default_json_path.parent.mkdir(parents=True, exist_ok=True)
+    # default_payload: always written to the default on-disk report path below.
+    # It's always episodes-only — --topic's structure dump is a --format json/
+    # --output-only convenience and has no place in the always-on disk report.
     default_payload = {"episodes": [r.to_dict() for r in reports]}
     payload_json = json.dumps(default_payload, indent=2)
     default_json_path.write_text(payload_json)
@@ -261,6 +274,10 @@ examples:
     _status_console.print(f"[dim]報告已寫入: {default_json_path}, {default_md_path}[/dim]")
 
     if parsed.format == "json":
+        # json_payload: the ad-hoc `--format json` stdout/`--output` payload, derived
+        # from default_payload but with `topic_structure` folded in when --topic was
+        # given — kept separate from default_payload so the always-on disk report
+        # above never accidentally gains an extra key based on this run's flags.
         json_payload = dict(default_payload)
         if structure is not None:
             json_payload["topic_structure"] = structure
