@@ -15,6 +15,7 @@ per-message field-structure dump for a single topic (opt-in, off by default).
 
 import argparse
 import json
+import statistics
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -46,12 +47,27 @@ _status_console = Console(stderr=True)
 
 _SEVERITY_COLOR = {SEVERITY_OK: "green", SEVERITY_WARNING: "yellow", SEVERITY_CRITICAL: "red"}
 _SEVERITY_ICON = {SEVERITY_OK: "🟢", SEVERITY_WARNING: "🟡", SEVERITY_CRITICAL: "🔴"}
-# Row-grouping order for the cross-episode comparison tables: stream topics
-# first, then action, then unclassified — reads more naturally than the flat
+# Row-grouping order for the Topic Health Overview table: stream topics first,
+# then action, then unclassified — reads more naturally than the flat
 # alphabetical-by-topic-path order the per-episode tables use.
 _ROW_ROLE_ORDER = {ROLE_STREAM: 0, ROLE_ACTION: 1, ROLE_UNCLASSIFIED: 2}
 # Recurring-issue grouping order for the Conclusion: critical groups before warning.
 _FLAG_SEVERITY_ORDER = {SEVERITY_CRITICAL: 0, SEVERITY_WARNING: 1}
+# Cap on how many episode filenames get listed inline in a report bullet —
+# beyond this, list the rest by count instead so a batch with hundreds of
+# flagged/unreadable episodes doesn't produce one unreadable line (or,
+# pre-this-cap, hundreds of individual bullets).
+_MAX_NAMES_SHOWN = 20
+
+
+def _truncate_names(names: List[str], limit: int = _MAX_NAMES_SHOWN) -> str:
+    """Comma-join up to `limit` names; beyond that, summarize the rest by count
+    instead of listing every one, so a report with hundreds of flagged
+    episodes stays readable instead of producing one enormous line."""
+    if len(names) <= limit:
+        return ", ".join(names)
+    shown = ", ".join(names[:limit])
+    return f"{shown}, ... and {len(names) - limit} more (see the JSON report for the full list)"
 
 
 def _summary_line(reports) -> str:
@@ -176,51 +192,92 @@ def _ordered_labels(readable) -> List[str]:
     )
 
 
-def _cross_episode_comparison_section(reports) -> List[str]:
-    """Severity matrix + avg-fps trend table, side by side across episodes.
+def _batch_overview_section(reports) -> List[str]:
+    """Bucketed episode-status counts + a single fixed-column topic health table.
+
+    Replaces the old per-episode-column Severity/Avg-FPS-Trend tables, which
+    rendered one Markdown column per episode — unusable at real batch sizes
+    (500 episodes -> a 500-column table). Both subsections here are bounded
+    independent of episode count: the status bucket name-lists are capped via
+    _truncate_names, and the topic table has exactly one row per distinct
+    topic label (small and fixed for a given robot/config, not growing with
+    episode count) and always exactly 8 columns.
 
     Omitted entirely with fewer than 2 readable episodes — a single episode
     has nothing to compare against, matching the batch-only convention used
     by apply_batch_fps_check/apply_batch_topic_presence_check in
     core/quality.py (both only activate for >1 episode; this section's
     threshold is about READABLE episodes specifically, not raw len(reports)).
-    Unreadable episodes never get a column in either table.
+    Unreadable episodes never contribute a row/count to the topic table.
     """
     readable = _readable_reports(reports)
     if len(readable) < 2:
         return []
 
-    labels = _ordered_labels(readable)
-    severity_by_label: Dict[str, Dict[str, str]] = {}
-    fps_by_label: Dict[str, Dict[str, float]] = {}
-    for r in readable:
-        for t in r.topics:
-            severity_by_label.setdefault(t.label, {})[r.path] = t.severity
-            if t.avg_fps is not None:
-                fps_by_label.setdefault(t.label, {})[r.path] = t.avg_fps
+    # Same counting predicates as _summary_line (readable-episode-only, keyed
+    # off severity) so these numbers can never drift from the Summary line.
+    n_ok = sum(1 for r in readable if r.severity == SEVERITY_OK)
+    n_warning = sum(1 for r in readable if r.severity == SEVERITY_WARNING)
+    n_critical = sum(1 for r in readable if r.severity == SEVERITY_CRITICAL)
+    n_unreadable = len(reports) - len(readable)
 
-    headers = [Path(r.path).name for r in readable]
-    header_row = "| Topic | " + " | ".join(headers) + " |"
-    separator_row = "|---|" + "---|" * len(headers)
-
-    lines = ["## Cross-Episode Comparison", "", "### Severity", "", header_row, separator_row]
-    for label in labels:
-        cells = [
-            _SEVERITY_ICON.get(severity_by_label.get(label, {}).get(r.path), "-") for r in readable
-        ]
-        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    lines = [
+        "## Batch Overview",
+        "",
+        "### Episode Status",
+        "",
+        f"- Total: {len(reports)} episode(s) — {len(readable)} readable, {n_unreadable} unreadable",
+    ]
+    if n_ok:
+        lines.append(f"- {_SEVERITY_ICON[SEVERITY_OK]} OK: {n_ok}")
+    if n_warning:
+        names = _truncate_names(
+            [Path(r.path).name for r in readable if r.severity == SEVERITY_WARNING]
+        )
+        lines.append(f"- {_SEVERITY_ICON[SEVERITY_WARNING]} Warning: {n_warning} ({names})")
+    if n_critical:
+        names = _truncate_names(
+            [Path(r.path).name for r in readable if r.severity == SEVERITY_CRITICAL]
+        )
+        lines.append(f"- {_SEVERITY_ICON[SEVERITY_CRITICAL]} Critical: {n_critical} ({names})")
     lines.append("")
 
-    # Skip rows that would be all-dashes (e.g. action topics never have a
-    # numeric fps) — the Severity table above already covers those topics.
-    fps_labels = [label for label in labels if label in fps_by_label]
-    lines.extend(["### Avg FPS Trend", "", header_row, separator_row])
-    for label in fps_labels:
-        cells = [
-            f"{fps_by_label[label][r.path]:.2f}" if r.path in fps_by_label[label] else "-"
-            for r in readable
+    labels = _ordered_labels(readable)
+    type_by_label: Dict[str, str] = {}
+    severity_counts_by_label: Dict[str, Dict[str, int]] = {}
+    fps_by_label: Dict[str, List[float]] = {}
+    for r in readable:
+        for t in r.topics:
+            type_by_label.setdefault(t.label, t.message_type)
+            counts = severity_counts_by_label.setdefault(
+                t.label, {SEVERITY_OK: 0, SEVERITY_WARNING: 0, SEVERITY_CRITICAL: 0}
+            )
+            counts[t.severity] = counts.get(t.severity, 0) + 1
+            if t.avg_fps is not None:
+                fps_by_label.setdefault(t.label, []).append(t.avg_fps)
+
+    lines.extend(
+        [
+            "### Topic Health Overview",
+            "",
+            "| Topic | Type | OK | Warning | Critical | Min FPS | Median FPS | Max FPS |",
+            "|---|---|---|---|---|---|---|---|",
         ]
-        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    )
+    for label in labels:
+        counts = severity_counts_by_label.get(label, {})
+        fps_values = fps_by_label.get(label)
+        if fps_values:
+            min_fps = f"{min(fps_values):.2f}"
+            max_fps = f"{max(fps_values):.2f}"
+            median_fps = f"{statistics.median(fps_values):.2f}"
+        else:
+            min_fps = median_fps = max_fps = "-"
+        lines.append(
+            f"| {label} | {type_by_label.get(label) or '-'} | {counts.get(SEVERITY_OK, 0)} | "
+            f"{counts.get(SEVERITY_WARNING, 0)} | {counts.get(SEVERITY_CRITICAL, 0)} | "
+            f"{min_fps} | {median_fps} | {max_fps} |"
+        )
     lines.append("")
 
     return lines
@@ -268,8 +325,17 @@ def _conclusion_section(reports) -> List[str]:
     lines = ["## Conclusion", "", _summary_line(reports), ""]
 
     if unreadable:
-        for r in unreadable:
+        # Each unreadable episode carries a unique read_error message, so
+        # these can't be comma-joined onto one line the way name-only lists
+        # can (_truncate_names) — instead cap the individual bullets and
+        # summarize the remainder by count.
+        for r in unreadable[:_MAX_NAMES_SHOWN]:
             lines.append(f"- ⚠ {Path(r.path).name}: {r.read_error}")
+        if len(unreadable) > _MAX_NAMES_SHOWN:
+            lines.append(
+                f"- ... and {len(unreadable) - _MAX_NAMES_SHOWN} more unreadable episode(s) "
+                "(see the JSON report for details)"
+            )
         lines.append("")
 
     total = len(reports)
@@ -303,7 +369,7 @@ def _conclusion_section(reports) -> List[str]:
         total_readable = len(readable)
         for (label, severity), (episodes, reason) in groups:
             icon = _SEVERITY_ICON[severity]
-            ep_list = ", ".join(episodes)
+            ep_list = _truncate_names(episodes)
             lines.append(
                 f"- {icon} **{label}**: {severity} in {len(episodes)}/{total_readable} "
                 f'episode(s) ({ep_list}) — e.g. "{reason}"'
@@ -318,10 +384,11 @@ def render_markdown_report(reports, *, input_path: str) -> str:
 
     Unlike the terminal table (which hides healthy detail by default), this
     always lists every episode and every topic (including unclassified ones),
-    regardless of severity. Also includes a Cross-Episode Comparison section
-    (severity matrix + fps trend, batch-only) and a rule-based Conclusion
-    section (stats + readiness verdict + recurring-issue groups) so the
-    reader doesn't have to manually diff N near-identical per-episode tables.
+    regardless of severity. Also includes a Batch Overview section (bucketed
+    episode-status counts + a single fixed-column topic health table,
+    batch-only) and a rule-based Conclusion section (stats + readiness
+    verdict + recurring-issue groups) so the reader doesn't have to manually
+    diff N near-identical per-episode tables.
     """
     summary = _summary_line(reports)
 
@@ -335,7 +402,7 @@ def render_markdown_report(reports, *, input_path: str) -> str:
         summary,
         "",
     ]
-    lines.extend(_cross_episode_comparison_section(reports))
+    lines.extend(_batch_overview_section(reports))
     lines.append("## Episodes")
     lines.append("")
 
