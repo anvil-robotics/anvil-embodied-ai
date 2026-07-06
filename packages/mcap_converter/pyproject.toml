@@ -47,7 +47,6 @@ dev = [
 
 [project.scripts]
 mcap-convert = "mcap_converter.cli.convert:main"
-mcap-inspect = "mcap_converter.cli.inspect:main"
 dataset-valid = "mcap_converter.cli.validate:main"
 hf-upload = "mcap_converter.cli.upload:main"
 mcap-to-video = "mcap_converter.cli.video:main"

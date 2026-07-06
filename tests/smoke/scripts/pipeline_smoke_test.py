@@ -187,6 +187,22 @@ def run_step_convert(sc: Scenario, force: bool) -> StepResult:
     if expected.exists() and not force:
         return StepResult(ok=True, duration_s=0.0, artifact=sc.dataset_dir, notes="cached")
 
+    # mcap-convert now requires a mcap-valid quality report to exist first.
+    # All scenarios share the same mcap_root, so one report is generated once
+    # and reused across scenarios/reruns.
+    report_path = OUTPUTS / "mcap_valid_reports" / f"{sc.mcap_root.name}.json"
+    if force or not report_path.exists():
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        valid_rc = _run([
+            "uv", "run", "mcap-valid",
+            "-i", str(sc.mcap_root),
+            "--format", "json",
+            "--output", str(report_path),
+        ])
+        if valid_rc != 0:
+            return StepResult(ok=False, duration_s=0.0, artifact=report_path,
+                              notes=f"mcap-valid exit {valid_rc}")
+
     t0 = time.monotonic()
     rc = _run([
         "uv", "run", "mcap-convert",
@@ -194,6 +210,7 @@ def run_step_convert(sc: Scenario, force: bool) -> StepResult:
         "-o", str(sc.dataset_dir.parent),
         "--config", str(sc.convert_config),
         "--robot-type", "anvil_openarm",
+        "--quality-report", str(report_path),
     ])
     dt = time.monotonic() - t0
 

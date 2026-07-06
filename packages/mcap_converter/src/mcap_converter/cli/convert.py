@@ -583,7 +583,7 @@ def convert_session(
             "  1. Camera topics in config don't match MCAP topics\n"
             "  2. Action topics don't exist in MCAP (quest mode)\n"
             "  3. Joint name prefixes don't match config source mapping\n"
-            "  Run [bold]mcap-inspect[/bold] on your MCAP to see available topics.\n"
+            "  Run [bold]mcap-valid[/bold] on your MCAP to see all recorded topics and message types.\n"
         )
         return dataset
 

@@ -131,7 +131,6 @@ def run_section_a() -> None:
     base_cmd = [
         "uv", "run", "mcap-valid",
         "-i", str(MCAP_ROOT),
-        "--config", str(CONFIG),
     ]
 
     with tempfile.TemporaryDirectory() as base_tmpdir:
@@ -255,7 +254,6 @@ def run_section_b() -> None:
         proc = _run([
             "uv", "run", "mcap-valid",
             "-i", str(MCAP_ROOT),
-            "--config", str(CONFIG),
             "--format", "json",
             "--output", str(report_path),
         ], cwd=tmp)
@@ -351,6 +349,7 @@ def run_section_b() -> None:
         out3 = tmp / "out3"
         proc = _run(base_convert_cmd + [
             "-o", str(out3),
+            "--quality-report", str(report_path),
             "--skip-episode-idx", "2:4",
         ], cwd=tmp)
         _assert("B4 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
@@ -378,6 +377,7 @@ def run_section_b() -> None:
         marker.write_text("pre-existing content")
         proc = _run(base_convert_cmd + [
             "-o", str(out4_base),
+            "--quality-report", str(report_path),
             "--skip-episode-idx", "99",
         ], cwd=tmp)
         _assert(
