@@ -22,6 +22,7 @@ from typing import Dict, List, Tuple
 from mcap.exceptions import McapError
 from rich.console import Console
 from rich.markup import escape
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TimeElapsedColumn
 from rich.table import Table
 
 from mcap_converter.core.quality import (
@@ -485,7 +486,26 @@ examples:
 
     mcap_files = [input_path] if input_path.is_file() else sorted(input_path.glob("**/*.mcap"))
 
-    reports = [scan_episode(str(p), thresholds) for p in mcap_files]
+    if len(mcap_files) > 1:
+        # Rendered to _status_console (stderr), never `console` (stdout) — scan_episode()
+        # does a real full-message decode for stream/action/unclassified topics, so a
+        # large batch can take a while, but --format json's stdout must stay pure,
+        # parseable JSON for downstream tooling.
+        with Progress(
+            SpinnerColumn(),
+            "[progress.description]{task.description}",
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=_status_console,
+        ) as progress:
+            scan_task = progress.add_task("[bold blue]Scanning episodes", total=len(mcap_files))
+            reports = []
+            for p in mcap_files:
+                reports.append(scan_episode(str(p), thresholds))
+                progress.advance(scan_task)
+    else:
+        reports = [scan_episode(str(p), thresholds) for p in mcap_files]
     if len(reports) > 1:
         reports = apply_batch_fps_check(reports, thresholds)
         reports = apply_batch_topic_presence_check(reports)

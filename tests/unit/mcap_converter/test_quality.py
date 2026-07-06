@@ -855,9 +855,30 @@ class TestMcapValidCli:
         ])
 
         captured = capsys.readouterr()
+        # stdout must stay pure, parseable JSON — the progress bar (and any other
+        # status/progress noise) must land on stderr only, never mixed into stdout.
         payload = json.loads(captured.out)
         assert len(payload["episodes"]) == 5  # all 5 stub episodes discovered
         assert exit_code == 0
+        # The multi-episode progress bar renders to stderr (_status_console), not stdout.
+        assert "Scanning episodes" in captured.err
+        assert "Scanning episodes" not in captured.out
+
+    def test_single_file_scan_shows_no_progress_bar(self, tmp_path, monkeypatch, capsys):
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+
+        exit_code = main([
+            "-i", str(_STUB_MCAP),
+            "--format", "json",
+        ])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        # A single file scans near-instantly; the progress bar would just flash
+        # uselessly, so it's gated on len(mcap_files) > 1 and must not appear here.
+        assert "Scanning episodes" not in captured.err
 
     def test_table_format_with_output_still_writes_json_file(self, tmp_path, monkeypatch, capsys):
         from mcap_converter.cli.mcap_valid import main
