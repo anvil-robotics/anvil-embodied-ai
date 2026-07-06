@@ -617,7 +617,7 @@ class TestScanEpisodeIntegration:
 
 
 class TestMcapValidCli:
-    # NOTE: mcap-valid now *always* writes ./mcap_valid_reports/<name>.{json,md}
+    # NOTE: mcap-valid now *always* writes ./mcap_valid_reports/<name>/report.{json,md}
     # relative to the current working directory (see TestDefaultReportPaths /
     # TestDefaultReportWriting below). Every test in this class chdirs into
     # tmp_path first so that unconditional default-report writing never lands
@@ -750,8 +750,8 @@ class TestMcapValidCli:
         ])
 
         assert exit_code == 0
-        default_json = tmp_path / "mcap_valid_reports" / "test-session.json"
-        default_md = tmp_path / "mcap_valid_reports" / "test-session.md"
+        default_json = tmp_path / "mcap_valid_reports" / "test-session" / "report.json"
+        default_md = tmp_path / "mcap_valid_reports" / "test-session" / "report.md"
         assert default_json.exists()
         assert default_md.exists()
 
@@ -775,8 +775,8 @@ class TestMcapValidCli:
         ])
 
         assert exit_code == 0
-        assert (tmp_path / "mcap_valid_reports" / "test-session.json").exists()
-        assert (tmp_path / "mcap_valid_reports" / "test-session.md").exists()
+        assert (tmp_path / "mcap_valid_reports" / "test-session" / "report.json").exists()
+        assert (tmp_path / "mcap_valid_reports" / "test-session" / "report.md").exists()
         assert custom_output.exists()
 
     def test_nonexistent_input_path_errors_without_writing_reports(self, tmp_path, monkeypatch):
@@ -997,10 +997,12 @@ class TestDefaultReportPaths:
 
         json_path, md_path = default_report_paths(session_dir)
 
-        assert json_path.name == "my-session.json"
-        assert md_path.name == "my-session.md"
-        assert json_path.parent.name == "mcap_valid_reports"
-        assert md_path.parent.name == "mcap_valid_reports"
+        assert json_path.name == "report.json"
+        assert md_path.name == "report.md"
+        assert json_path.parent.name == "my-session"
+        assert md_path.parent.name == "my-session"
+        assert json_path.parent.parent.name == "mcap_valid_reports"
+        assert md_path.parent.parent.name == "mcap_valid_reports"
 
     def test_file_input_uses_stem_without_extension(self, tmp_path):
         from mcap_converter.cli.mcap_valid import default_report_paths
@@ -1010,8 +1012,10 @@ class TestDefaultReportPaths:
 
         json_path, md_path = default_report_paths(mcap_file)
 
-        assert json_path.name == "recording.json"
-        assert md_path.name == "recording.md"
+        assert json_path.name == "report.json"
+        assert md_path.name == "report.md"
+        assert json_path.parent.name == "recording"
+        assert md_path.parent.name == "recording"
 
     def test_uses_cwd_not_input_parent(self, tmp_path, monkeypatch):
         from mcap_converter.cli.mcap_valid import default_report_paths
@@ -1030,8 +1034,8 @@ class TestDefaultReportPaths:
 
         # mcap_valid_reports/ is created relative to cwd, not relative to
         # the input path's own parent directory.
-        assert json_path.parent.parent == cwd_dir
-        assert md_path.parent.parent == cwd_dir
+        assert json_path.parent.parent.parent == cwd_dir
+        assert md_path.parent.parent.parent == cwd_dir
 
 
 class TestRenderMarkdownReport:

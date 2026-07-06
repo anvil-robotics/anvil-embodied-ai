@@ -17,11 +17,11 @@ A  `mcap-valid` basic CLI behavior (fast, no mutation)
    A4. --fail-on-critical exits 0 on the healthy fixture
    A5. --fail-on-critical exits 1 when the input file itself is unreadable
    A6. default behavior (no flags) always writes a JSON + Markdown report to
-       ./mcap_valid_reports/<name>.{json,md} relative to cwd
+       ./mcap_valid_reports/<name>/report.{json,md} relative to cwd
 
 Note: every `mcap-valid` subprocess below runs with `cwd` pointed at an
 isolated temp directory (NOT the repo root) — since Task 10, mcap-valid
-unconditionally writes ./mcap_valid_reports/<name>.{json,md} relative to its
+unconditionally writes ./mcap_valid_reports/<name>/report.{json,md} relative to its
 cwd, and running with cwd=REPO would leave that directory behind in the
 actual git working tree as a side effect of this smoke test.
 
@@ -87,7 +87,7 @@ def _run(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     """Run a `uv run <cli>` subprocess with an explicit, isolated `cwd`.
 
     Since Task 10, `mcap-valid` unconditionally writes
-    ./mcap_valid_reports/<name>.{json,md} relative to its cwd, so every call
+    ./mcap_valid_reports/<name>/report.{json,md} relative to its cwd, so every call
     here must run with cwd pointed at a temp directory rather than REPO — a
     cwd=REPO invocation would leave that report directory behind in the real
     git working tree. `--project REPO` is injected so `uv run` still finds
@@ -208,8 +208,8 @@ def run_section_a() -> None:
         proc = _run(base_cmd, cwd=tmp)
         _assert("A6 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
 
-        default_json = tmp / "mcap_valid_reports" / "test-session.json"
-        default_md = tmp / "mcap_valid_reports" / "test-session.md"
+        default_json = tmp / "mcap_valid_reports" / "test-session" / "report.json"
+        default_md = tmp / "mcap_valid_reports" / "test-session" / "report.md"
         _assert(
             "A6 default JSON report written and non-empty",
             default_json.exists() and default_json.stat().st_size > 0,

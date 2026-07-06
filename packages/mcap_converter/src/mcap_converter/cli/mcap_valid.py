@@ -6,7 +6,7 @@ config is needed or accepted.
 
 By default (no flags needed), a JSON report and a comprehensive Markdown
 report covering every episode and topic are always written to
-./mcap_valid_reports/<name>.{json,md}, in addition to whatever --format /
+./mcap_valid_reports/<name>/report.{json,md}, in addition to whatever --format /
 --output produce.
 
 `--topic`/`--max-samples` fold in the old standalone `mcap-inspect` tool's deep
@@ -132,14 +132,15 @@ def default_report_paths(input_path: Path) -> tuple[Path, Path]:
     """
     Compute the default (JSON, Markdown) report paths for an input path.
 
-    Reports are always written to ./mcap_valid_reports/<name>.{json,md}
-    (relative to the current working directory), named after the input:
-    a directory's own name, or a single file's stem (extension stripped).
+    Reports are always written to ./mcap_valid_reports/<name>/report.{json,md}
+    (relative to the current working directory), grouped in a per-session
+    subfolder named after the input: a directory's own name, or a single
+    file's stem (extension stripped).
     """
     resolved = input_path.resolve()
     name = resolved.stem if resolved.is_file() else resolved.name
-    report_dir = Path.cwd() / "mcap_valid_reports"
-    return report_dir / f"{name}.json", report_dir / f"{name}.md"
+    report_dir = Path.cwd() / "mcap_valid_reports" / name
+    return report_dir / "report.json", report_dir / "report.md"
 
 
 def render_markdown_report(reports, *, input_path: str) -> str:
@@ -203,7 +204,7 @@ examples:
   mcap-valid -i data/raw/my-session --fail-on-critical   # CI gate, exit 1 on any critical episode
   mcap-valid -i recording.mcap --topic /joint_states     # deep field-structure dump for one topic
 
-  (by default, a JSON + Markdown report is always written to ./mcap_valid_reports/<name>.{json,md})
+  (by default, a JSON + Markdown report is always written to ./mcap_valid_reports/<name>/report.{json,md})
 """,
     )
     parser.add_argument(
@@ -215,7 +216,7 @@ examples:
         default=None,
         help=(
             "also write the report to this file, IN ADDITION to the default "
-            "./mcap_valid_reports/<name>.{json,md} report files that are always written"
+            "./mcap_valid_reports/<name>/report.{json,md} report files that are always written"
         ),
     )
     parser.add_argument("--stream-gap-factor", type=float, default=5.0)

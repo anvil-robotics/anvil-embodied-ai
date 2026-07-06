@@ -21,7 +21,7 @@ uv run mcap-valid -i data/raw/my-session --fail-on-critical   # CI gate, exit 1 
 uv run mcap-valid -i data/raw/my-session --topic /joint_states  # deep field-structure dump for one topic
 ```
 
-A JSON report and a comprehensive Markdown report are **always** written to `./mcap_valid_reports/<input-dir-name>.{json,md}`, in addition to the terminal table — no flags required. **`mcap-convert` refuses to run without this report** (see below) — running `mcap-valid` first is a required step, not optional.
+A JSON report and a comprehensive Markdown report are **always** written to `./mcap_valid_reports/<input-dir-name>/report.{json,md}`, in addition to the terminal table — no flags required. **`mcap-convert` refuses to run without this report** (see below) — running `mcap-valid` first is a required step, not optional.
 
 Every run also prints a baseline table of every topic found in the file (`Topic | Type | Messages | Role`), regardless of severity — this replaces the old standalone `mcap-inspect` tool's topic listing. Pass `--topic TOPIC` for a deeper per-message field-structure dump of one topic (also folded in from the old `mcap-inspect`).
 
@@ -55,7 +55,7 @@ An episode's overall status is its single worst topic's severity. `--fail-on-cri
 
 ## mcap-convert
 
-**Requires a `mcap-valid` quality report to exist first** — either auto-discovered at the default `./mcap_valid_reports/<input-dir-name>.json` (written automatically by `mcap-valid`, see above), or pointed at explicitly with `--quality-report PATH`. If neither is found, `mcap-convert` exits with an error telling you to run `mcap-valid` first — it does not fall back to converting without one. This only checks that a report *file* exists; it does not require you to act on its contents (`--skip-flagged` below is a separate, still-optional, opt-in mechanism).
+**Requires a `mcap-valid` quality report to exist first** — either auto-discovered at the default `./mcap_valid_reports/<input-dir-name>/report.json` (written automatically by `mcap-valid`, see above), or pointed at explicitly with `--quality-report PATH`. If neither is found, `mcap-convert` exits with an error telling you to run `mcap-valid` first — it does not fall back to converting without one. This only checks that a report *file* exists; it does not require you to act on its contents (`--skip-flagged` below is a separate, still-optional, opt-in mechanism).
 
 Pick the config that matches your recording setup:
 
@@ -97,7 +97,7 @@ uv run mcap-convert \
 | `--vcodec` | `h264` | `h264` · `hevc` · `libsvtav1` |
 | `--robot-type` | `anvil_openarm` | `anvil_openarm` · `anvil_yam` |
 | `--act-from-obs-n-step N` | config value | Override `action_from_observation_n` at runtime: `action[t] = observation[t+N]` |
-| `--quality-report PATH` | auto-discovered | Path to a mcap-valid JSON report — mcap-convert requires one to exist; if omitted, the default `./mcap_valid_reports/<input-dir-name>.json` is used |
+| `--quality-report PATH` | auto-discovered | Path to a mcap-valid JSON report — mcap-convert requires one to exist; if omitted, the default `./mcap_valid_reports/<input-dir-name>/report.json` is used |
 | `--skip-flagged [critical\|warning]` | — | Bare flag skips `critical`-only episodes; `--skip-flagged warning` also skips `warning` episodes too. Works against whichever report the mandatory gate resolved (explicit or auto-discovered) |
 | `--skip-episode-idx SPEC` | — | Manually skip episodes by 1-based index (see below) |
 

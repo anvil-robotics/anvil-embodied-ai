@@ -748,7 +748,7 @@ examples:
         "--quality-report", type=str, default=None,
         help=(
             "path to a mcap-valid JSON report. A report is REQUIRED to run mcap-convert — "
-            "if omitted, it is auto-discovered at ./mcap_valid_reports/<input-dir-name>.json "
+            "if omitted, it is auto-discovered at ./mcap_valid_reports/<input-dir-name>/report.json "
             "(run `mcap-valid -i INPUT_DIR` first to generate it); if neither is found, "
             "mcap-convert exits with an error before touching the output directory"
         ),
