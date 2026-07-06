@@ -1126,6 +1126,114 @@ class TestMcapValidCli:
         assert "Topics in" not in captured.out
 
 
+class TestRenderTableReasonColumn:
+    """`_render_table`'s Reason column, which replaces the old separate per-episode
+    Panel boxes that used to render below the table."""
+
+    @staticmethod
+    def _reports():
+        clean = EpisodeQualityReport(
+            path="/data/raw/session/0001/0001_0.mcap",
+            duration_s=12.5,
+            severity=SEVERITY_OK,
+            passed=True,
+            topics=[
+                TopicQualityReport(
+                    topic="/joint_states",
+                    label="joint_states",
+                    role="stream",
+                    message_type="sensor_msgs/JointState",
+                    message_count=9897,
+                    avg_fps=499.9,
+                    coverage_ratio=1.0,
+                    total_gap_s=0.0,
+                    longest_gap_s=0.0,
+                    severity=SEVERITY_OK,
+                    reason="OK",
+                ),
+            ],
+        )
+        warning = EpisodeQualityReport(
+            path="/data/raw/session/0002/0002_0.mcap",
+            duration_s=8.2,
+            severity=SEVERITY_WARNING,
+            passed=True,
+            topics=[
+                TopicQualityReport(
+                    topic="/joint_states",
+                    label="joint_states",
+                    role="stream",
+                    message_type="sensor_msgs/JointState",
+                    message_count=100,
+                    avg_fps=10.0,
+                    coverage_ratio=1.0,
+                    total_gap_s=0.0,
+                    longest_gap_s=0.0,
+                    severity=SEVERITY_OK,
+                    reason="OK",
+                ),
+                TopicQualityReport(
+                    topic="/follower_position_controller/commands",
+                    label="action",
+                    role="action",
+                    message_type="std_msgs/Float64MultiArray",
+                    message_count=250,
+                    avg_fps=None,
+                    coverage_ratio=0.95,
+                    total_gap_s=5.61,
+                    longest_gap_s=5.61,
+                    severity=SEVERITY_WARNING,
+                    reason="1 個 idle gap，最長 5.61s（正常，手臂未操作）",
+                ),
+            ],
+        )
+        return [clean, warning]
+
+    def test_reason_column_header_and_flagged_reason_appear_with_no_separate_panel(self, capsys):
+        from mcap_converter.cli.mcap_valid import _render_table
+
+        _render_table(self._reports(), verbose=False)
+
+        captured = capsys.readouterr().out
+        assert "Reason" in captured
+        assert "idle gap" in captured
+        # The old design printed a separate Panel box titled with the flagged
+        # episode's filename below the table — that would make the filename
+        # appear twice in the output (once as a table cell, once as a Panel
+        # title). Under the new design it appears exactly once, confirming no
+        # separate panel is rendered for this episode.
+        assert captured.count("0002_0.mcap") == 1
+
+    def test_reason_column_shows_full_topic_list_in_verbose_mode(self, capsys):
+        from mcap_converter.cli.mcap_valid import _render_table
+
+        _render_table(self._reports(), verbose=True)
+
+        captured = capsys.readouterr().out
+        # Verbose mode shows every topic, including OK ones, for every episode.
+        assert "joint_states" in captured
+        assert "idle gap" in captured
+
+    def test_reason_column_shows_dash_for_a_fully_clean_episode_non_verbose(self, capsys):
+        from mcap_converter.cli.mcap_valid import _render_table
+
+        _render_table(self._reports(), verbose=False)
+
+        captured = capsys.readouterr().out
+        # Exclude the "Topics in 0001_0.mcap" baseline-table title, which also
+        # mentions the filename but isn't the mcap-valid report table row.
+        rows = [
+            line
+            for line in captured.splitlines()
+            if "0001_0.mcap" in line and "Topics in" not in line
+        ]
+        assert rows, "expected the clean episode's row to appear in the table"
+        # Non-verbose mode hides OK-only topics, so the clean episode's Reason
+        # cell is "-", and its row must not mention its (all-OK) topic label.
+        assert "joint_states" not in rows[0]
+        assert " - " in rows[0] or rows[0].rstrip().endswith("-")
+
+
 class TestDefaultReportPaths:
     def test_directory_input_uses_directory_name(self, tmp_path):
         from mcap_converter.cli.mcap_valid import default_report_paths
@@ -1420,17 +1528,18 @@ class TestRenderMarkdownReport:
         assert table_summary == md_summary
 
     def test_batch_overview_present_with_two_readable_episodes(self):
+        # "## Batch Overview" no longer exists as its own heading — its remaining
+        # content (Topic Health Overview) is relocated directly under Summary.
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
         reports = self._make_reports()  # healthy + warning readable, corrupt unreadable
         output = render_markdown_report(reports, input_path="fake/input")
 
-        assert "## Batch Overview" in output
-        assert "### Episode Status" in output
+        assert "## Batch Overview" not in output
         assert "### Topic Health Overview" in output
         # Must sit between Summary and Episodes.
-        assert output.index("## Summary") < output.index("## Batch Overview")
-        assert output.index("## Batch Overview") < output.index("## Episodes")
+        assert output.index("## Summary") < output.index("### Topic Health Overview")
+        assert output.index("### Topic Health Overview") < output.index("## Episodes")
 
     def test_topic_health_overview_has_correct_severity_counts(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
@@ -1514,39 +1623,32 @@ class TestRenderMarkdownReport:
             row == "| joint_states | sensor_msgs/JointState | 3 | 0 | 0 | 10.00 | 20.00 | 30.00 |"
         )
 
-    def test_episode_status_shows_bucket_counts_and_names_only_for_flagged_buckets(self):
-        from mcap_converter.cli.mcap_valid import render_markdown_report
-
-        reports = self._make_reports()  # 1 ok, 1 warning readable + 1 unreadable
-        output = render_markdown_report(reports, input_path="fake/input")
-
-        status_section = output.split("### Episode Status")[1].split("### Topic Health Overview")[0]
-        assert "Total: 3 episode(s) — 2 readable, 1 unreadable" in status_section
-        assert "🟢 OK: 1" in status_section
-        assert "🟡 Warning: 1 (0002_0.mcap)" in status_section
-        assert "🔴 Critical" not in status_section
-        # OK bucket must not list a filename — only the count.
-        assert "0001_0.mcap" not in status_section
-
     def test_comparison_section_omitted_with_a_single_readable_episode(self):
+        # A single readable episode has nothing to compare against, so the
+        # Topic Health Overview table is omitted entirely (see the
+        # len(readable) < 2 guard in render_markdown_report).
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
         reports = self._make_reports()[:1]  # just the healthy episode
         output = render_markdown_report(reports, input_path="fake/input")
 
-        assert "## Batch Overview" not in output
+        assert "### Topic Health Overview" not in output
 
-    def test_unreadable_episode_excluded_from_overview_but_shown_in_conclusion(self):
+    def test_unreadable_episode_excluded_from_topic_health_but_shown_in_episode_overview_table(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
         reports = self._make_reports()
         output = render_markdown_report(reports, input_path="fake/input")
 
-        overview_section = output.split("## Batch Overview")[1].split("## Episodes")[0]
-        assert "0003_0.mcap" not in overview_section
+        # Unreadable episodes have topics=[], so they never contribute a row/count
+        # to the per-topic Topic Health Overview table.
+        health_section = output.split("### Topic Health Overview")[1].split("## Episodes")[0]
+        assert "0003_0.mcap" not in health_section
 
-        conclusion_section = output.split("## Conclusion")[1]
-        assert "- ⚠ 0003_0.mcap: InvalidMagic: not a valid mcap file" in conclusion_section
+        # But they DO get their own row in the new per-episode overview table,
+        # with their read_error text as the Reason and Status=error.
+        overview_section = output.split("## Summary")[1].split("### Flagged Topics")[0]
+        assert "| 0003_0.mcap | - | error | InvalidMagic: not a valid mcap file |" in overview_section
 
     def test_conclusion_not_ready_verdict_for_a_genuinely_readable_critical_episode(self):
         # Distinct from a read_error-driven critical: this critical severity
@@ -1556,9 +1658,11 @@ class TestRenderMarkdownReport:
         reports = self._make_reports_with_readable_critical()
         output = render_markdown_report(reports, input_path="fake/input")
 
-        conclusion_section = output.split("## Conclusion")[1]
-        assert "❌ Not ready to convert" in conclusion_section
-        assert "1/3 episode(s) flagged critical" in conclusion_section
+        # The verdict now lives inline under "## Summary" (no more separate
+        # "## Conclusion" heading), after the per-episode overview table.
+        summary_section = output.split("## Summary")[1]
+        assert "❌ Not ready to convert" in summary_section
+        assert "1/3 episode(s) flagged critical" in summary_section
 
     def test_conclusion_warning_verdict_when_worst_severity_is_warning(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
@@ -1566,9 +1670,9 @@ class TestRenderMarkdownReport:
         reports = self._make_reports()[:2]  # healthy (ok) + warning, no criticals
         output = render_markdown_report(reports, input_path="fake/input")
 
-        conclusion_section = output.split("## Conclusion")[1]
-        assert "⚠️ Ready to convert with warnings" in conclusion_section
-        assert "1/2 episode(s) have non-blocking issues" in conclusion_section
+        summary_section = output.split("## Summary")[1]
+        assert "⚠️ Ready to convert with warnings" in summary_section
+        assert "1/2 episode(s) have non-blocking issues" in summary_section
 
     def test_conclusion_no_episodes_verdict_is_not_falsely_all_clean(self):
         # An empty reports list (e.g. an input dir with no .mcap files) must
@@ -1577,9 +1681,9 @@ class TestRenderMarkdownReport:
 
         output = render_markdown_report([], input_path="fake/input")
 
-        conclusion_section = output.split("## Conclusion")[1]
-        assert "No episodes found" in conclusion_section
-        assert "All episodes clean" not in conclusion_section
+        summary_section = output.split("## Summary")[1]
+        assert "No episodes found" in summary_section
+        assert "All episodes clean" not in summary_section
 
     def test_flagged_topics_groups_by_label_and_severity_sorted_critical_first(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
@@ -1598,15 +1702,16 @@ class TestRenderMarkdownReport:
             'e.g. "1 個 idle gap，最長 2.00s（正常，手臂未操作）"' in flagged_section
         )
 
-    def test_episode_status_and_flagged_topics_truncate_names_beyond_the_cap(self):
-        # The core scalability fix: name lists must summarize by count past
+    def test_flagged_topics_truncates_names_beyond_the_cap(self):
+        # The core scalability fix for the prose-based Flagged Topics group list:
+        # comma-joined episode-name lists must summarize by count past
         # _MAX_NAMES_SHOWN instead of listing every episode inline. Uses 22
         # warning + 3 critical (rather than a smaller illustrative split) so
-        # the warning bucket actually exceeds the 20-name cap and triggers
-        # truncation, while the critical bucket (3, under the cap) stays
+        # the warning group actually exceeds the 20-name cap and triggers
+        # truncation, while the critical group (3, under the cap) stays
         # untruncated as a control to confirm truncation is count-driven, not
         # unconditional. All warning episodes share one (label, severity) so
-        # they also form a single Flagged Topics group with >20 members.
+        # they form a single Flagged Topics group with >20 members.
         from mcap_converter.cli.mcap_valid import _MAX_NAMES_SHOWN, render_markdown_report
 
         def _episode(index: int, severity: str) -> EpisodeQualityReport:
@@ -1643,22 +1748,61 @@ class TestRenderMarkdownReport:
         )
         output = render_markdown_report(reports, input_path="fake/input")
 
-        status_section = output.split("### Episode Status")[1].split("### Topic Health Overview")[0]
-        assert f"🟡 Warning: {n_warning}" in status_section
-        assert f"... and {n_warning - _MAX_NAMES_SHOWN} more" in status_section
-        # Critical bucket is under the cap, so it must list every name in full.
-        assert f"🔴 Critical: {n_critical}" in status_section
-        assert "0027_0.mcap, 0028_0.mcap, 0029_0.mcap" in status_section
-        assert "... and" not in status_section.split(f"🔴 Critical: {n_critical}")[1].split("\n")[0]
-
         flagged_section = output.split("### Flagged Topics")[1]
         assert (
             f"warning in {n_warning}/{n_ok + n_warning + n_critical} episode(s)" in flagged_section
         )
         assert f"... and {n_warning - _MAX_NAMES_SHOWN} more" in flagged_section
+        # Critical group is under the cap, so it must list every name in full.
+        assert "0027_0.mcap, 0028_0.mcap, 0029_0.mcap" in flagged_section
 
-    def test_unreadable_episode_callout_caps_bullets_and_summarizes_the_rest(self):
-        from mcap_converter.cli.mcap_valid import _MAX_NAMES_SHOWN, render_markdown_report
+    def test_episode_overview_table_lists_every_episode_uncapped(self):
+        # Unlike the old per-episode-column matrix / name-lists (which needed
+        # capping via _truncate_names), the per-episode overview table is
+        # row-based and scales fine with no truncation — every episode gets
+        # its own row regardless of how many there are.
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        def _episode(index: int, severity: str) -> EpisodeQualityReport:
+            return EpisodeQualityReport(
+                path=f"/data/raw/session/{index:04d}/{index:04d}_0.mcap",
+                duration_s=10.0,
+                severity=severity,
+                passed=severity != SEVERITY_CRITICAL,
+                topics=[
+                    TopicQualityReport(
+                        topic="/joint_states",
+                        label="joint_states",
+                        role="stream",
+                        message_type="sensor_msgs/JointState",
+                        message_count=1000,
+                        avg_fps=100.0,
+                        coverage_ratio=1.0,
+                        total_gap_s=0.0,
+                        longest_gap_s=0.0,
+                        severity=severity,
+                        reason="OK" if severity == SEVERITY_OK else f"flagged as {severity}",
+                    ),
+                ],
+            )
+
+        n_episodes = 25
+        reports = [_episode(i, SEVERITY_WARNING) for i in range(n_episodes)]
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        overview_section = output.split("## Summary")[1].split("### Flagged Topics")[0]
+        for i in range(n_episodes):
+            assert f"{i:04d}_0.mcap" in overview_section
+        assert "... and" not in overview_section
+
+    def test_many_unreadable_episodes_all_appear_as_rows_in_episode_overview_table_uncapped(self):
+        # The old unreadable-episode callout capped individual bullets at
+        # _MAX_NAMES_SHOWN and summarized the rest by count. That whole
+        # mechanism is removed: unreadable episodes are now just ordinary
+        # rows in the per-episode overview table, which needs no cap at all —
+        # every one of them appears, each with its own individual read_error
+        # text as Reason.
+        from mcap_converter.cli.mcap_valid import render_markdown_report
 
         n_unreadable = 25
         reports = [
@@ -1674,9 +1818,103 @@ class TestRenderMarkdownReport:
         ]
         output = render_markdown_report(reports, input_path="fake/input")
 
-        conclusion_section = output.split("## Conclusion")[1]
-        assert conclusion_section.count("- ⚠ ") == _MAX_NAMES_SHOWN
-        assert (
-            f"- ... and {n_unreadable - _MAX_NAMES_SHOWN} more unreadable episode(s) "
-            "(see the JSON report for details)" in conclusion_section
+        overview_section = output.split("## Summary")[1].split("## Episodes")[0]
+        for i in range(n_unreadable):
+            assert f"| {i:04d}_0.mcap | - | error | InvalidMagic: corrupt file #{i} |" in overview_section
+        assert "... and" not in overview_section
+
+    def test_episode_overview_table_sits_directly_under_summary_stats_line(self):
+        # The new per-episode overview table must appear right under the
+        # `## Summary` stats line, before the readiness verdict / Flagged
+        # Topics / Topic Health Overview / Episodes sections — not scattered
+        # further down the document like the old Batch Overview / Conclusion.
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()  # healthy + warning readable, corrupt unreadable
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        idx_summary_line = output.index("3 episodes: 1 ok, 1 warning, 0 critical, 1 unreadable")
+        idx_overview_header = output.index("| Episode | Duration | Status | Reason |")
+        idx_flagged = output.index("### Flagged Topics")
+        idx_topic_health = output.index("### Topic Health Overview")
+        idx_episodes = output.index("## Episodes")
+
+        assert idx_summary_line < idx_overview_header
+        assert idx_overview_header < idx_flagged
+        assert idx_overview_header < idx_topic_health
+        assert idx_overview_header < idx_episodes
+
+    def test_episode_overview_table_joins_multiple_flagged_topics_with_semicolon(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        multi_flagged = EpisodeQualityReport(
+            path="/data/raw/session/0009/0009_0.mcap",
+            duration_s=9.0,
+            severity=SEVERITY_WARNING,
+            passed=True,
+            topics=[
+                TopicQualityReport(
+                    topic="/follower_l_forward_position_controller/commands",
+                    label="action[left]",
+                    role="action",
+                    message_count=100,
+                    avg_fps=None,
+                    coverage_ratio=0.9,
+                    total_gap_s=2.0,
+                    longest_gap_s=2.0,
+                    severity=SEVERITY_WARNING,
+                    reason="1 個 idle gap，範圍 6.54s~12.15s",
+                ),
+                TopicQualityReport(
+                    topic="/follower_r_forward_position_controller/commands",
+                    label="action[right]",
+                    role="action",
+                    message_count=100,
+                    avg_fps=None,
+                    coverage_ratio=0.9,
+                    total_gap_s=1.0,
+                    longest_gap_s=1.0,
+                    severity=SEVERITY_WARNING,
+                    reason="1 個 idle gap，範圍 0.0s~1.0s",
+                ),
+            ],
         )
+        output = render_markdown_report([multi_flagged], input_path="fake/input")
+
+        overview_section = output.split("## Summary")[1].split("## Episodes")[0]
+        assert (
+            "| 0009_0.mcap | 9.0s | warning | "
+            "action[left]: 1 個 idle gap，範圍 6.54s~12.15s; "
+            "action[right]: 1 個 idle gap，範圍 0.0s~1.0s |" in overview_section
+        )
+
+    def test_episode_overview_table_shows_dash_for_a_fully_clean_episode(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()  # first entry ("healthy") is fully OK
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        overview_section = output.split("## Summary")[1].split("## Episodes")[0]
+        assert "| 0001_0.mcap | 12.5s | ok | - |" in overview_section
+
+    def test_batch_overview_and_conclusion_headings_are_gone(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports_with_readable_critical()
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        assert "## Batch Overview" not in output
+        assert "## Conclusion" not in output
+
+    def test_flagged_topics_and_topic_health_overview_sit_before_episodes_section(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports_with_readable_critical()
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        idx_flagged = output.index("### Flagged Topics")
+        idx_topic_health = output.index("### Topic Health Overview")
+        idx_episodes = output.index("## Episodes")
+
+        assert idx_flagged < idx_episodes
+        assert idx_topic_health < idx_episodes

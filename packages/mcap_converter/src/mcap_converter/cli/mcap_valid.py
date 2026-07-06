@@ -22,7 +22,6 @@ from typing import Dict, List, Tuple
 from mcap.exceptions import McapError
 from rich.console import Console
 from rich.markup import escape
-from rich.panel import Panel
 from rich.table import Table
 
 from mcap_converter.core.quality import (
@@ -51,7 +50,7 @@ _SEVERITY_ICON = {SEVERITY_OK: "🟢", SEVERITY_WARNING: "🟡", SEVERITY_CRITIC
 # then action, then unclassified — reads more naturally than the flat
 # alphabetical-by-topic-path order the per-episode tables use.
 _ROW_ROLE_ORDER = {ROLE_STREAM: 0, ROLE_ACTION: 1, ROLE_UNCLASSIFIED: 2}
-# Recurring-issue grouping order for the Conclusion: critical groups before warning.
+# Recurring-issue grouping order for Flagged Topics: critical groups before warning.
 _FLAG_SEVERITY_ORDER = {SEVERITY_CRITICAL: 0, SEVERITY_WARNING: 1}
 # Cap on how many episode filenames get listed inline in a report bullet —
 # beyond this, list the rest by count instead so a batch with hundreds of
@@ -117,39 +116,34 @@ def _render_table(reports, *, verbose: bool) -> None:
     table.add_column("Episode")
     table.add_column("Duration", justify="right")
     table.add_column("Status")
-
-    for r in reports:
-        if r.read_error:
-            table.add_row(Path(r.path).name, "-", "[red]error[/red]")
-            continue
-        color = _SEVERITY_COLOR[r.severity]
-        table.add_row(Path(r.path).name, f"{r.duration_s:.1f}s", f"[{color}]{r.severity}[/{color}]")
-
-    console.print(table)
+    table.add_column("Reason")
 
     for r in reports:
         if r.read_error:
             # File-level failure — topics is always empty here, so the
-            # topic-based detail panel below would silently show nothing.
-            # Print the read error explicitly regardless of --verbose.
-            console.print(Panel(r.read_error, title=Path(r.path).name, border_style="red"))
+            # topic-selection logic below would silently show nothing. Show
+            # the read error itself as the Reason, regardless of --verbose.
+            table.add_row(Path(r.path).name, "-", "[red]error[/red]", escape(r.read_error))
             continue
-        if r.severity == SEVERITY_OK and not verbose:
-            continue
+        color = _SEVERITY_COLOR[r.severity]
         flagged = [t for t in r.topics if t.severity != SEVERITY_OK] if not verbose else r.topics
-        if not flagged:
-            continue
-        # escape(): labels like "action[left]" would otherwise be parsed as Rich
-        # markup tags, silently dropping the bracketed arm suffix from the output.
-        lines = [
-            f"[{_SEVERITY_COLOR[t.severity]}]{escape(t.label)}[/{_SEVERITY_COLOR[t.severity]}]: {escape(t.reason)}"
-            for t in flagged
-        ]
-        console.print(
-            Panel(
-                "\n".join(lines), title=Path(r.path).name, border_style=_SEVERITY_COLOR[r.severity]
+        if flagged:
+            # escape(): labels like "action[left]" would otherwise be parsed as Rich
+            # markup tags, silently dropping the bracketed arm suffix from the output.
+            # A literal "\n" is fine here (unlike the Markdown table's cells) since
+            # Rich table cells natively support multi-line wrapped content.
+            reason = "\n".join(
+                f"[{_SEVERITY_COLOR[t.severity]}]{escape(t.label)}[/{_SEVERITY_COLOR[t.severity]}]: "
+                f"{escape(t.reason)}"
+                for t in flagged
             )
+        else:
+            reason = "-"
+        table.add_row(
+            Path(r.path).name, f"{r.duration_s:.1f}s", f"[{color}]{r.severity}[/{color}]", reason
         )
+
+    console.print(table)
 
     console.print(f"\n{_summary_line(reports)}")
 
@@ -173,8 +167,8 @@ def _readable_reports(reports) -> List:
     """Episodes that were actually readable (read_error is None).
 
     read_error episodes have topics=[] and contribute nothing to per-topic
-    comparisons or recurring-issue grouping — they're covered separately via
-    their own `###` section and the Conclusion's unreadable-episode callout.
+    comparisons or recurring-issue grouping — they still get their own row
+    in the per-episode overview table, with their read_error text as Reason.
     """
     return [r for r in reports if r.read_error is None]
 
@@ -192,37 +186,33 @@ def _ordered_labels(readable) -> List[str]:
     )
 
 
-def _episode_status_lines(reports, readable) -> List[str]:
-    """Bucketed OK/Warning/Critical episode counts, name-capped via _truncate_names.
+def _episode_overview_table_lines(reports) -> List[str]:
+    """One row per episode (including unreadable ones): Episode/Duration/Status/Reason.
 
-    OK is count-only (an OK bucket at scale is just noise — the interesting
-    story is what's flagged); Warning/Critical also list which episodes,
-    truncated past _MAX_NAMES_SHOWN. Empty buckets print nothing at all.
+    This is what "merges the warning message into the report table" for the
+    Markdown report: instead of a separate per-episode-column matrix (which
+    broke down at high episode counts, since columns don't scroll) or a
+    scattered Batch-Overview/Conclusion split, every episode gets exactly one
+    row here, with its non-OK topics folded into a single Reason cell. Rows
+    scale fine no matter how many episodes there are, so this is never
+    truncated the way _truncate_names's comma-lists are.
     """
-    # Same counting predicates as _summary_line (readable-episode-only, keyed
-    # off severity) so these numbers can never drift from the Summary line.
-    n_ok = sum(1 for r in readable if r.severity == SEVERITY_OK)
-    n_warning = sum(1 for r in readable if r.severity == SEVERITY_WARNING)
-    n_critical = sum(1 for r in readable if r.severity == SEVERITY_CRITICAL)
-    n_unreadable = len(reports) - len(readable)
-
     lines = [
-        "### Episode Status",
-        "",
-        f"- Total: {len(reports)} episode(s) — {len(readable)} readable, {n_unreadable} unreadable",
+        "| Episode | Duration | Status | Reason |",
+        "|---|---|---|---|",
     ]
-    if n_ok:
-        lines.append(f"- {_SEVERITY_ICON[SEVERITY_OK]} OK: {n_ok}")
-    if n_warning:
-        names = _truncate_names(
-            [Path(r.path).name for r in readable if r.severity == SEVERITY_WARNING]
-        )
-        lines.append(f"- {_SEVERITY_ICON[SEVERITY_WARNING]} Warning: {n_warning} ({names})")
-    if n_critical:
-        names = _truncate_names(
-            [Path(r.path).name for r in readable if r.severity == SEVERITY_CRITICAL]
-        )
-        lines.append(f"- {_SEVERITY_ICON[SEVERITY_CRITICAL]} Critical: {n_critical} ({names})")
+    for r in reports:
+        name = Path(r.path).name
+        if r.read_error:
+            reason = r.read_error.replace("|", "\\|")
+            lines.append(f"| {name} | - | error | {reason} |")
+            continue
+        flagged = [t for t in r.topics if t.severity != SEVERITY_OK]
+        if flagged:
+            reason = "; ".join(f"{t.label}: {t.reason}" for t in flagged).replace("|", "\\|")
+        else:
+            reason = "-"
+        lines.append(f"| {name} | {r.duration_s:.1f}s | {r.severity} | {reason} |")
     lines.append("")
     return lines
 
@@ -279,31 +269,6 @@ def _topic_health_table_lines(readable) -> List[str]:
     return lines
 
 
-def _batch_overview_section(reports) -> List[str]:
-    """Bucketed episode-status counts + a single fixed-column topic health table.
-
-    Replaces the old per-episode-column Severity/Avg-FPS-Trend tables, which
-    rendered one Markdown column per episode — unusable at real batch sizes
-    (500 episodes -> a 500-column table). Both subsections here are bounded
-    independent of episode count: see _episode_status_lines/_topic_health_table_lines.
-
-    Omitted entirely with fewer than 2 readable episodes — a single episode
-    has nothing to compare against, matching the batch-only convention used
-    by apply_batch_fps_check/apply_batch_topic_presence_check in
-    core/quality.py (both only activate for >1 episode; this section's
-    threshold is about READABLE episodes specifically, not raw len(reports)).
-    Unreadable episodes never contribute a row/count to the topic table.
-    """
-    readable = _readable_reports(reports)
-    if len(readable) < 2:
-        return []
-
-    lines = ["## Batch Overview", ""]
-    lines.extend(_episode_status_lines(reports, readable))
-    lines.extend(_topic_health_table_lines(readable))
-    return lines
-
-
 def _flagged_topic_groups(
     readable,
 ) -> List[Tuple[Tuple[str, str], Tuple[List[str], str]]]:
@@ -334,83 +299,74 @@ def _flagged_topic_groups(
     return [(key, (episodes_by_key[key], reason_by_key[key])) for key in ordered_keys]
 
 
-def _conclusion_section(reports) -> List[str]:
-    """Stats + rule-based readiness verdict + recurring-issue groups.
+def _readiness_verdict_lines(reports, readable) -> List[str]:
+    """Rule-based readiness verdict: ❌ critical / ⚠️ warning / ✅ all-clean, or the
+    "no episodes found" edge case for an empty batch.
 
-    Reuses `_summary_line` verbatim (never reformats the counts) so the
-    Summary and Conclusion numbers can never drift apart.
+    Unreadable episodes already carry severity=SEVERITY_CRITICAL upstream (see
+    scan_episode's read_error branch) but are excluded from `readable`, so
+    they're added back in explicitly here for the critical count.
     """
-    readable = _readable_reports(reports)
     unreadable = [r for r in reports if r.read_error is not None]
-
-    lines = ["## Conclusion", "", _summary_line(reports), ""]
-
-    if unreadable:
-        # Each unreadable episode carries a unique read_error message, so
-        # these can't be comma-joined onto one line the way name-only lists
-        # can (_truncate_names) — instead cap the individual bullets and
-        # summarize the remainder by count.
-        for r in unreadable[:_MAX_NAMES_SHOWN]:
-            lines.append(f"- ⚠ {Path(r.path).name}: {r.read_error}")
-        if len(unreadable) > _MAX_NAMES_SHOWN:
-            lines.append(
-                f"- ... and {len(unreadable) - _MAX_NAMES_SHOWN} more unreadable episode(s) "
-                "(see the JSON report for details)"
-            )
-        lines.append("")
-
     total = len(reports)
-    # read_error episodes already carry severity=SEVERITY_CRITICAL upstream
-    # (see scan_episode's read_error branch) but are excluded from `readable`
-    # above, so they're added back in explicitly here for the critical count.
     n_critical = sum(1 for r in readable if r.severity == SEVERITY_CRITICAL) + len(unreadable)
     n_warning = sum(1 for r in readable if r.severity == SEVERITY_WARNING)
 
     if total == 0:
-        lines.append("**No episodes found** — nothing was scanned, nothing to convert.")
+        verdict = "**No episodes found** — nothing was scanned, nothing to convert."
     elif n_critical:
-        lines.append(
+        verdict = (
             f"**❌ Not ready to convert** — {n_critical}/{total} episode(s) flagged critical. "
             "Fix the underlying recordings, or run `mcap-convert --skip-flagged` to exclude them."
         )
     elif n_warning:
-        lines.append(
+        verdict = (
             f"**⚠️ Ready to convert with warnings** — {n_warning}/{total} episode(s) have "
             "non-blocking issues (see below). Warnings never block `mcap-convert` unless you "
             "explicitly pass `--skip-flagged warning`."
         )
     else:
-        lines.append("**✅ All episodes clean** — ready to convert.")
-    lines.append("")
+        verdict = "**✅ All episodes clean** — ready to convert."
+    return [verdict, ""]
 
+
+def _flagged_topics_lines(readable) -> List[str]:
+    """### Flagged Topics: recurring (label, severity) issues across readable episodes,
+    sorted critical-before-warning. Empty (no lines at all) when nothing is flagged.
+    """
     groups = _flagged_topic_groups(readable)
-    if groups:
-        lines.append("### Flagged Topics")
-        lines.append("")
-        total_readable = len(readable)
-        for (label, severity), (episodes, reason) in groups:
-            icon = _SEVERITY_ICON[severity]
-            ep_list = _truncate_names(episodes)
-            lines.append(
-                f"- {icon} **{label}**: {severity} in {len(episodes)}/{total_readable} "
-                f'episode(s) ({ep_list}) — e.g. "{reason}"'
-            )
-        lines.append("")
+    if not groups:
+        return []
 
+    lines = ["### Flagged Topics", ""]
+    total_readable = len(readable)
+    for (label, severity), (episodes, reason) in groups:
+        icon = _SEVERITY_ICON[severity]
+        ep_list = _truncate_names(episodes)
+        lines.append(
+            f"- {icon} **{label}**: {severity} in {len(episodes)}/{total_readable} "
+            f'episode(s) ({ep_list}) — e.g. "{reason}"'
+        )
+    lines.append("")
     return lines
 
 
 def render_markdown_report(reports, *, input_path: str) -> str:
     """Render a comprehensive Markdown report listing every episode and topic.
 
-    Unlike the terminal table (which hides healthy detail by default), this
-    always lists every episode and every topic (including unclassified ones),
-    regardless of severity. Also includes a Batch Overview section (bucketed
-    episode-status counts + a single fixed-column topic health table,
-    batch-only) and a rule-based Conclusion section (stats + readiness
-    verdict + recurring-issue groups) so the reader doesn't have to manually
-    diff N near-identical per-episode tables.
+    Everything comprehensive lives up front under `## Summary`: the stats
+    line, a per-episode overview table (Episode/Duration/Status/Reason — one
+    row per episode, including unreadable ones, with non-OK topics folded
+    into the Reason cell), the rule-based readiness verdict, `### Flagged
+    Topics` (recurring cross-episode issues), and `### Topic Health Overview`
+    (a single fixed-column table, batch-only, omitted with fewer than 2
+    readable episodes since a single episode has nothing to compare against).
+    Only the exhaustive per-topic detail per episode (`## Episodes`) stays at
+    the bottom as the drill-down/raw-data section — unlike the terminal table
+    (which hides healthy detail by default), it always lists every episode
+    and every topic (including unclassified ones), regardless of severity.
     """
+    readable = _readable_reports(reports)
     summary = _summary_line(reports)
 
     lines = [
@@ -423,7 +379,11 @@ def render_markdown_report(reports, *, input_path: str) -> str:
         summary,
         "",
     ]
-    lines.extend(_batch_overview_section(reports))
+    lines.extend(_episode_overview_table_lines(reports))
+    lines.extend(_readiness_verdict_lines(reports, readable))
+    lines.extend(_flagged_topics_lines(readable))
+    if len(readable) >= 2:
+        lines.extend(_topic_health_table_lines(readable))
     lines.append("## Episodes")
     lines.append("")
 
@@ -451,8 +411,6 @@ def render_markdown_report(reports, *, input_path: str) -> str:
                 f"{t.severity} | {reason} |"
             )
         lines.append("")
-
-    lines.extend(_conclusion_section(reports))
 
     return "\n".join(lines)
 
