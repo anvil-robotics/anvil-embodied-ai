@@ -1254,13 +1254,93 @@ class TestRenderMarkdownReport:
         )
         return [healthy, warning, corrupt]
 
+    @staticmethod
+    def _make_reports_with_readable_critical():
+        """3 readable episodes (no read_error) spanning ok / warning / critical.
+
+        Used for scenarios the 3-episode `_make_reports()` fixture can't cover on
+        its own: a critical severity that comes from a genuinely-scanned episode
+        (not a read_error stand-in), together with a warning in a sibling
+        episode, so the Flagged Topics critical-before-warning sort order has
+        two distinct groups to actually sort.
+        """
+        ok_ep = EpisodeQualityReport(
+            path="/data/raw/session/0004/0004_0.mcap",
+            duration_s=10.0,
+            severity=SEVERITY_OK,
+            passed=True,
+            topics=[
+                TopicQualityReport(
+                    topic="/joint_states",
+                    label="joint_states",
+                    role="stream",
+                    message_count=1000,
+                    avg_fps=100.0,
+                    coverage_ratio=1.0,
+                    total_gap_s=0.0,
+                    longest_gap_s=0.0,
+                    severity=SEVERITY_OK,
+                    reason="OK",
+                ),
+            ],
+        )
+        warning_ep = EpisodeQualityReport(
+            path="/data/raw/session/0005/0005_0.mcap",
+            duration_s=8.0,
+            severity=SEVERITY_WARNING,
+            passed=True,
+            topics=[
+                TopicQualityReport(
+                    topic="/follower_position_controller/commands",
+                    label="action",
+                    role="action",
+                    message_count=100,
+                    avg_fps=None,
+                    coverage_ratio=0.9,
+                    total_gap_s=2.0,
+                    longest_gap_s=2.0,
+                    severity=SEVERITY_WARNING,
+                    reason="1 個 idle gap，最長 2.00s（正常，手臂未操作）",
+                ),
+            ],
+        )
+        critical_ep = EpisodeQualityReport(
+            path="/data/raw/session/0006/0006_0.mcap",
+            duration_s=5.0,
+            severity=SEVERITY_CRITICAL,
+            passed=False,
+            topics=[
+                TopicQualityReport(
+                    topic="/joint_states",
+                    label="joint_states",
+                    role="stream",
+                    message_count=1,
+                    avg_fps=None,
+                    coverage_ratio=0.0,
+                    total_gap_s=5.0,
+                    longest_gap_s=5.0,
+                    severity=SEVERITY_CRITICAL,
+                    reason="stream 僅 1 則訊息，幾乎沒錄到",
+                ),
+            ],
+        )
+        return [ok_ep, warning_ep, critical_ep]
+
     def test_every_episode_gets_a_header(self):
+        # Per-episode headers are "### `<filename>` — ...", uniquely
+        # identifiable by the backtick right after "### " — the new
+        # Cross-Episode Comparison / Conclusion sub-headings (### Severity,
+        # ### Avg FPS Trend, ### Flagged Topics) are also "### "-prefixed
+        # (note: bumping them to "#### " would NOT avoid a naive
+        # `output.count("### ")` check, since "#### " contains "### " as a
+        # substring), so this test must key off the backtick to stay scoped
+        # to episode headers specifically.
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
         reports = self._make_reports()
         output = render_markdown_report(reports, input_path="fake/input")
 
-        assert output.count("### ") == 3
+        assert output.count("### `") == 3
 
     def test_every_topic_appears_in_a_table_row(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
@@ -1334,3 +1414,108 @@ class TestRenderMarkdownReport:
         md_summary = next(line for line in md_output.splitlines() if line.startswith(f"{len(reports)} episodes:"))
 
         assert table_summary == md_summary
+
+    def test_cross_episode_comparison_present_with_two_readable_episodes(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()  # healthy + warning readable, corrupt unreadable
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        assert "## Cross-Episode Comparison" in output
+        assert "### Severity" in output
+        assert "### Avg FPS Trend" in output
+        # Must sit between Summary and Episodes.
+        assert output.index("## Summary") < output.index("## Cross-Episode Comparison")
+        assert output.index("## Cross-Episode Comparison") < output.index("## Episodes")
+
+    def test_severity_matrix_has_correct_cells(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()[:2]  # healthy + warning, both readable
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        severity_section = output.split("### Severity")[1].split("### Avg FPS Trend")[0]
+        table_rows = {
+            line.split("|")[1].strip(): line
+            for line in severity_section.splitlines()
+            if line.startswith("|")
+        }
+        assert table_rows["Topic"] == "| Topic | 0001_0.mcap | 0002_0.mcap |"
+        # camera/joint_states only exist in the healthy episode -> "-" for warning.
+        assert table_rows["camera"] == "| camera | 🟢 | - |"
+        assert table_rows["joint_states"] == "| joint_states | 🟢 | - |"
+        # action exists (ok) in healthy and (warning) in the warning episode.
+        assert table_rows["action"] == "| action | 🟢 | 🟡 |"
+
+    def test_fps_trend_excludes_label_with_no_numeric_fps_in_any_episode(self):
+        # "action" never has an avg_fps (role="action" is event-driven, never
+        # gets a computed rate) -> it must be excluded from the trend table
+        # even though it's a normal row in the severity matrix.
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()[:2]
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        fps_section = output.split("### Avg FPS Trend")[1].split("## Episodes")[0]
+        assert "action" not in fps_section
+        assert "joint_states" in fps_section
+        assert "camera" in fps_section
+
+    def test_comparison_section_omitted_with_a_single_readable_episode(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()[:1]  # just the healthy episode
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        assert "## Cross-Episode Comparison" not in output
+
+    def test_unreadable_episode_excluded_from_comparison_but_shown_in_conclusion(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        comparison_section = output.split("## Cross-Episode Comparison")[1].split("## Episodes")[0]
+        assert "0003_0.mcap" not in comparison_section
+
+        conclusion_section = output.split("## Conclusion")[1]
+        assert "- ⚠ 0003_0.mcap: InvalidMagic: not a valid mcap file" in conclusion_section
+
+    def test_conclusion_not_ready_verdict_for_a_genuinely_readable_critical_episode(self):
+        # Distinct from a read_error-driven critical: this critical severity
+        # comes from an actually-scanned episode's topic.
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports_with_readable_critical()
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        conclusion_section = output.split("## Conclusion")[1]
+        assert "❌ Not ready to convert" in conclusion_section
+        assert "1/3 episode(s) flagged critical" in conclusion_section
+
+    def test_conclusion_warning_verdict_when_worst_severity_is_warning(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports()[:2]  # healthy (ok) + warning, no criticals
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        conclusion_section = output.split("## Conclusion")[1]
+        assert "⚠️ Ready to convert with warnings" in conclusion_section
+        assert "1/2 episode(s) have non-blocking issues" in conclusion_section
+
+    def test_flagged_topics_groups_by_label_and_severity_sorted_critical_first(self):
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        reports = self._make_reports_with_readable_critical()
+        output = render_markdown_report(reports, input_path="fake/input")
+
+        flagged_section = output.split("### Flagged Topics")[1]
+        assert flagged_section.index("joint_states") < flagged_section.index("action")
+        assert (
+            "🔴 **joint_states**: critical in 1/3 episode(s) (0006_0.mcap) — "
+            'e.g. "stream 僅 1 則訊息，幾乎沒錄到"' in flagged_section
+        )
+        assert (
+            "🟡 **action**: warning in 1/3 episode(s) (0005_0.mcap) — "
+            'e.g. "1 個 idle gap，最長 2.00s（正常，手臂未操作）"' in flagged_section
+        )

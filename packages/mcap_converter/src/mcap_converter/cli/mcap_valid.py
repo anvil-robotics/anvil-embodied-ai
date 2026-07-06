@@ -16,7 +16,7 @@ per-message field-structure dump for a single topic (opt-in, off by default).
 import argparse
 import json
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
 from mcap.exceptions import McapError
 from rich.console import Console
@@ -25,6 +25,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 from mcap_converter.core.quality import (
+    ROLE_ACTION,
+    ROLE_STREAM,
+    ROLE_UNCLASSIFIED,
     SEVERITY_CRITICAL,
     SEVERITY_OK,
     SEVERITY_WARNING,
@@ -42,6 +45,13 @@ console = Console()
 _status_console = Console(stderr=True)
 
 _SEVERITY_COLOR = {SEVERITY_OK: "green", SEVERITY_WARNING: "yellow", SEVERITY_CRITICAL: "red"}
+_SEVERITY_ICON = {SEVERITY_OK: "🟢", SEVERITY_WARNING: "🟡", SEVERITY_CRITICAL: "🔴"}
+# Row-grouping order for the cross-episode comparison tables: stream topics
+# first, then action, then unclassified — reads more naturally than the flat
+# alphabetical-by-topic-path order the per-episode tables use.
+_ROW_ROLE_ORDER = {ROLE_STREAM: 0, ROLE_ACTION: 1, ROLE_UNCLASSIFIED: 2}
+# Recurring-issue grouping order for the Conclusion: critical groups before warning.
+_FLAG_SEVERITY_ORDER = {SEVERITY_CRITICAL: 0, SEVERITY_WARNING: 1}
 
 
 def _summary_line(reports) -> str:
@@ -143,12 +153,173 @@ def default_report_paths(input_path: Path) -> tuple[Path, Path]:
     return report_dir / "report.json", report_dir / "report.md"
 
 
+def _readable_reports(reports) -> List:
+    """Episodes that were actually readable (read_error is None).
+
+    read_error episodes have topics=[] and contribute nothing to per-topic
+    comparisons or recurring-issue grouping — they're covered separately via
+    their own `###` section and the Conclusion's unreadable-episode callout.
+    """
+    return [r for r in reports if r.read_error is None]
+
+
+def _ordered_labels(readable) -> List[str]:
+    """Distinct topic labels across readable episodes (union, not intersection),
+    grouped by role (stream, then action, then unclassified) and alphabetical
+    within each group — see _ROW_ROLE_ORDER."""
+    role_by_label: Dict[str, str] = {}
+    for r in readable:
+        for t in r.topics:
+            role_by_label.setdefault(t.label, t.role)
+    return sorted(
+        role_by_label, key=lambda label: (_ROW_ROLE_ORDER.get(role_by_label[label], 99), label)
+    )
+
+
+def _cross_episode_comparison_section(reports) -> List[str]:
+    """Severity matrix + avg-fps trend table, side by side across episodes.
+
+    Omitted entirely with fewer than 2 readable episodes — a single episode
+    has nothing to compare against, matching the batch-only convention used
+    by apply_batch_fps_check/apply_batch_topic_presence_check in
+    core/quality.py (both only activate for >1 episode; this section's
+    threshold is about READABLE episodes specifically, not raw len(reports)).
+    Unreadable episodes never get a column in either table.
+    """
+    readable = _readable_reports(reports)
+    if len(readable) < 2:
+        return []
+
+    labels = _ordered_labels(readable)
+    severity_by_label: Dict[str, Dict[str, str]] = {}
+    fps_by_label: Dict[str, Dict[str, float]] = {}
+    for r in readable:
+        for t in r.topics:
+            severity_by_label.setdefault(t.label, {})[r.path] = t.severity
+            if t.avg_fps is not None:
+                fps_by_label.setdefault(t.label, {})[r.path] = t.avg_fps
+
+    headers = [Path(r.path).name for r in readable]
+    header_row = "| Topic | " + " | ".join(headers) + " |"
+    separator_row = "|---|" + "---|" * len(headers)
+
+    lines = ["## Cross-Episode Comparison", "", "### Severity", "", header_row, separator_row]
+    for label in labels:
+        cells = [
+            _SEVERITY_ICON.get(severity_by_label.get(label, {}).get(r.path), "-") for r in readable
+        ]
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    lines.append("")
+
+    # Skip rows that would be all-dashes (e.g. action topics never have a
+    # numeric fps) — the Severity table above already covers those topics.
+    fps_labels = [label for label in labels if label in fps_by_label]
+    lines.extend(["### Avg FPS Trend", "", header_row, separator_row])
+    for label in fps_labels:
+        cells = [
+            f"{fps_by_label[label][r.path]:.2f}" if r.path in fps_by_label[label] else "-"
+            for r in readable
+        ]
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    lines.append("")
+
+    return lines
+
+
+def _flagged_topic_groups(
+    readable,
+) -> List[Tuple[Tuple[str, str], Tuple[List[str], str]]]:
+    """Group non-OK (label, severity) pairs across readable episodes' topics.
+
+    Rule-based only (no LLM / free-text generation): each group carries the
+    count + list of episodes it occurs in, plus ONE verbatim representative
+    reason string (from the first episode encountered) — never a paraphrase
+    or merge of multiple episodes' reasons. Sorted critical-before-warning,
+    then alphabetically by label within the same severity.
+    """
+    episodes_by_key: Dict[Tuple[str, str], List[str]] = {}
+    reason_by_key: Dict[Tuple[str, str], str] = {}
+    for r in readable:
+        name = Path(r.path).name
+        seen_in_episode = set()
+        for t in r.topics:
+            if t.severity == SEVERITY_OK:
+                continue
+            key = (t.label, t.severity)
+            if key in seen_in_episode:
+                continue
+            seen_in_episode.add(key)
+            episodes_by_key.setdefault(key, []).append(name)
+            reason_by_key.setdefault(key, t.reason)
+
+    ordered_keys = sorted(episodes_by_key, key=lambda k: (_FLAG_SEVERITY_ORDER.get(k[1], 99), k[0]))
+    return [(key, (episodes_by_key[key], reason_by_key[key])) for key in ordered_keys]
+
+
+def _conclusion_section(reports) -> List[str]:
+    """Stats + rule-based readiness verdict + recurring-issue groups.
+
+    Reuses `_summary_line` verbatim (never reformats the counts) so the
+    Summary and Conclusion numbers can never drift apart.
+    """
+    readable = _readable_reports(reports)
+    unreadable = [r for r in reports if r.read_error is not None]
+
+    lines = ["## Conclusion", "", _summary_line(reports), ""]
+
+    if unreadable:
+        for r in unreadable:
+            lines.append(f"- ⚠ {Path(r.path).name}: {r.read_error}")
+        lines.append("")
+
+    total = len(reports)
+    # read_error episodes already carry severity=SEVERITY_CRITICAL upstream
+    # (see scan_episode's read_error branch) but are excluded from `readable`
+    # above, so they're added back in explicitly here for the critical count.
+    n_critical = sum(1 for r in readable if r.severity == SEVERITY_CRITICAL) + len(unreadable)
+    n_warning = sum(1 for r in readable if r.severity == SEVERITY_WARNING)
+
+    if n_critical:
+        lines.append(
+            f"**❌ Not ready to convert** — {n_critical}/{total} episode(s) flagged critical. "
+            "Fix the underlying recordings, or run `mcap-convert --skip-flagged` to exclude them."
+        )
+    elif n_warning:
+        lines.append(
+            f"**⚠️ Ready to convert with warnings** — {n_warning}/{total} episode(s) have "
+            "non-blocking issues (see below). Warnings never block `mcap-convert` unless you "
+            "explicitly pass `--skip-flagged warning`."
+        )
+    else:
+        lines.append("**✅ All episodes clean** — ready to convert.")
+    lines.append("")
+
+    groups = _flagged_topic_groups(readable)
+    if groups:
+        lines.append("### Flagged Topics")
+        lines.append("")
+        total_readable = len(readable)
+        for (label, severity), (episodes, reason) in groups:
+            icon = _SEVERITY_ICON[severity]
+            ep_list = ", ".join(episodes)
+            lines.append(
+                f"- {icon} **{label}**: {severity} in {len(episodes)}/{total_readable} "
+                f'episode(s) ({ep_list}) — e.g. "{reason}"'
+            )
+        lines.append("")
+
+    return lines
+
+
 def render_markdown_report(reports, *, input_path: str) -> str:
     """Render a comprehensive Markdown report listing every episode and topic.
 
     Unlike the terminal table (which hides healthy detail by default), this
     always lists every episode and every topic (including unclassified ones),
-    regardless of severity.
+    regardless of severity. Also includes a Cross-Episode Comparison section
+    (severity matrix + fps trend, batch-only) and a rule-based Conclusion
+    section (stats + readiness verdict + recurring-issue groups) so the
+    reader doesn't have to manually diff N near-identical per-episode tables.
     """
     summary = _summary_line(reports)
 
@@ -161,9 +332,10 @@ def render_markdown_report(reports, *, input_path: str) -> str:
         "",
         summary,
         "",
-        "## Episodes",
-        "",
     ]
+    lines.extend(_cross_episode_comparison_section(reports))
+    lines.append("## Episodes")
+    lines.append("")
 
     for r in reports:
         lines.append(f"### `{Path(r.path).name}` — {r.severity} (passed: {r.passed})")
@@ -189,6 +361,8 @@ def render_markdown_report(reports, *, input_path: str) -> str:
                 f"{t.severity} | {reason} |"
             )
         lines.append("")
+
+    lines.extend(_conclusion_section(reports))
 
     return "\n".join(lines)
 
