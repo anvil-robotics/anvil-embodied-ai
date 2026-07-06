@@ -230,10 +230,14 @@ def run_section_a() -> None:
                 _assert_episode_shape("A6", payload)
         if default_md.exists():
             md_text = default_md.read_text()
+            # Episode headers are uniquely "### `filename`" (backtick right after
+            # the space) — scoped this way so it doesn't also match the "###
+            # Topic Health Overview" / "### Flagged Topics" subsection headings
+            # that live under the same report's Summary section.
             _assert(
                 "A6 default Markdown report has a header per episode",
-                md_text.count("### ") == _EXPECTED_EPISODES,
-                f"got {md_text.count('### ')} headers",
+                md_text.count("### `") == _EXPECTED_EPISODES,
+                f"got {md_text.count('### `')} headers",
             )
 
 
