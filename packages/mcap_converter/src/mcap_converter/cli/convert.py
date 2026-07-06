@@ -36,6 +36,7 @@ from mcap_converter import (
     LeRobotWriter,
     McapReader,
 )
+from mcap_converter.cli.mcap_valid import default_report_paths
 from mcap_converter.core.extractor import BufferedStreamExtractor
 from mcap_converter.core.reader import snap_fps
 
@@ -744,14 +745,19 @@ examples:
     )
     parser.add_argument(
         "--quality-report", type=str, default=None,
-        help="path to a mcap-valid JSON report (from `mcap-valid --format json --output PATH`)",
+        help=(
+            "path to a mcap-valid JSON report. A report is REQUIRED to run mcap-convert — "
+            "if omitted, it is auto-discovered at ./mcap_valid_reports/<input-dir-name>.json "
+            "(run `mcap-valid -i INPUT_DIR` first to generate it); if neither is found, "
+            "mcap-convert exits with an error before touching the output directory"
+        ),
     )
     parser.add_argument(
         "--skip-flagged", nargs="?", choices=["critical", "warning"], const="critical", default=None,
         help=(
-            "skip episodes flagged in --quality-report. Bare flag skips only critical "
-            "episodes (default); pass 'warning' to also skip warning-level episodes. "
-            "Requires --quality-report."
+            "skip episodes flagged in the quality report (explicit --quality-report or "
+            "auto-discovered default). Bare flag skips only critical episodes (default); "
+            "pass 'warning' to also skip warning-level episodes."
         ),
     )
     parser.add_argument(
@@ -796,10 +802,32 @@ examples:
         config = ConfigLoader.get_default()
         log("Using default configuration")
 
-    # Validate --quality-report early (before any output-dir mutation below)
-    quality_skip_paths = resolve_quality_skip_paths(args.quality_report, args.skip_flagged)
-    if args.skip_flagged and not args.quality_report:
-        log("[yellow]⚠ --skip-flagged given without --quality-report — nothing will be skipped[/yellow]")
+    # ── Mandatory quality-report gate ──────────────────────────────────
+    # mcap-convert refuses to run without a mcap-valid quality report (explicit
+    # --quality-report, or auto-discovered at the default path) so bad
+    # recordings are caught before they enter a dataset. This only checks that
+    # a report FILE exists — --skip-flagged (below) is a fully independent,
+    # opt-in mechanism that reads the report's *contents*.
+    report_path = args.quality_report
+    if report_path is None:
+        default_json, _ = default_report_paths(Path(args.input_dir))
+        if default_json.exists():
+            report_path = str(default_json)
+    if report_path is None or not Path(report_path).exists():
+        default_json, _ = default_report_paths(Path(args.input_dir))
+        console.print(
+            "\n[bold red]ERROR: No mcap-valid quality report found for this input.[/bold red]\n"
+            "mcap-convert requires a quality report to exist before conversion, so bad\n"
+            "recordings are caught before they enter a dataset.\n"
+            f"Run mcap-valid first:\n"
+            f"  [bold]uv run mcap-valid -i {args.input_dir}[/bold]\n"
+            f"then re-run this command — the report is auto-discovered at\n"
+            f"  {default_json}\n"
+            "or pass --quality-report PATH to point at a report elsewhere.\n"
+        )
+        exit(1)
+
+    quality_skip_paths = resolve_quality_skip_paths(report_path, args.skip_flagged)
 
     if args.act_from_obs_n_step is not None:
         config.action_from_observation_n = args.act_from_obs_n_step

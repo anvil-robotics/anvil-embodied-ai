@@ -1,6 +1,7 @@
 """Tests for mcap-convert's --quality-report / --skip-flagged integration."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -211,3 +212,50 @@ class TestParseEpisodeIndexSpec:
 
         with pytest.raises(ValueError):
             parse_episode_index_spec("abc", total_episodes=10)
+
+
+class TestMandatoryQualityGate:
+    """mcap-convert must refuse to run without a mcap-valid quality report,
+    exiting before any output-directory mutation. This gate only checks that
+    a report FILE exists — it does not validate contents (that's the
+    orthogonal --skip-flagged mechanism, covered by TestResolveQualitySkipSet)."""
+
+    def _base_argv(self, tmp_path, output_dir):
+        return [
+            "-i", str(tmp_path / "fake-input-dir"),
+            "-o", str(output_dir),
+            "--hf-user", "testuser",
+        ]
+
+    def test_explicit_quality_report_path_missing_blocks_and_exits_1(self, tmp_path, capsys):
+        from mcap_converter.cli.convert import main
+
+        output_dir = tmp_path / "output"
+        missing_report = tmp_path / "nonexistent" / "report.json"
+        argv = self._base_argv(tmp_path, output_dir) + [
+            "--quality-report", str(missing_report),
+        ]
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(argv)
+
+        assert exc_info.value.code == 1
+        assert not os.path.exists(output_dir), "output dir must not be created when the gate rejects the run"
+        captured = capsys.readouterr()
+        assert "No mcap-valid quality report found" in captured.out
+
+    def test_no_quality_report_and_no_default_blocks_and_exits_1(self, tmp_path, monkeypatch, capsys):
+        from mcap_converter.cli.convert import main
+
+        # cwd with guaranteed no ./mcap_valid_reports/ — so auto-discovery finds nothing.
+        monkeypatch.chdir(tmp_path)
+        output_dir = tmp_path / "output"
+        argv = self._base_argv(tmp_path, output_dir)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(argv)
+
+        assert exc_info.value.code == 1
+        assert not os.path.exists(output_dir), "output dir must not be created when the gate rejects the run"
+        captured = capsys.readouterr()
+        assert "No mcap-valid quality report found" in captured.out
