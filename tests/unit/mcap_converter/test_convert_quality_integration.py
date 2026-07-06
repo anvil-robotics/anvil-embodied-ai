@@ -51,6 +51,17 @@ class TestResolveQualitySkipSet:
 
         assert set(skip_set.keys()) == {"/a.mcap", "/b.mcap"}
 
+    def test_skip_flagged_none_skips_nothing(self, tmp_path):
+        """--skip-flagged none is the explicit escape hatch: even with critical
+        and warning episodes present in the report, nothing should be skipped."""
+        from mcap_converter.cli.convert import resolve_quality_skip_paths
+
+        report = _write_report(tmp_path, [("/a.mcap", "critical"), ("/b.mcap", "warning")])
+
+        skip_set = resolve_quality_skip_paths(str(report), skip_flagged="none")
+
+        assert skip_set == {}
+
 
 def _single_camera_config():
     """A minimal DataConfig with exactly one camera.
@@ -280,3 +291,104 @@ class TestMandatoryQualityGate:
         assert not os.path.exists(output_dir), "output dir must not be created when the gate rejects the run"
         captured = capsys.readouterr()
         assert "No mcap-valid quality report found" in captured.out
+
+
+class TestSkipFlaggedDefaultsToCritical:
+    """--skip-flagged now defaults to 'critical' (instead of None), so a
+    critical episode is skipped automatically even without passing the flag
+    at all. 'none' is the explicit escape hatch to convert everything."""
+
+    def _write_single_camera_yaml_config(self, tmp_path) -> Path:
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            """
+robot_state_topic: "/joint_states"
+joint_names:
+  separator: "_"
+  source:
+    follower: observation
+  arms:
+    r: right
+action_topics:
+  "/follower_r_forward_position_controller/commands":
+    arm: "right"
+    joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
+action_from_observation: false
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed": "waist"
+image_resolution: [640, 480]
+observation_feature_mapping:
+  state: "position"
+  others: []
+action_feature_mapping:
+  state: "position"
+  others: []
+"""
+        )
+        return config_path
+
+    def _write_report_marking_one_critical(self, tmp_path, mcap_files, critical_index) -> Path:
+        payload = {
+            "episodes": [
+                {
+                    "path": str(p.resolve()),
+                    "duration_s": 1.0,
+                    "severity": "critical" if i == critical_index else "ok",
+                    "passed": i != critical_index,
+                    "topics": [],
+                }
+                for i, p in enumerate(mcap_files)
+            ]
+        }
+        report_path = tmp_path / "report.json"
+        report_path.write_text(json.dumps(payload))
+        return report_path
+
+    def _base_argv(self, tmp_path, config_path, report_path):
+        return [
+            "-i", str(FIXTURES_ROOT),
+            "-o", str(tmp_path / "out"),
+            "--config", str(config_path),
+            "--robot-type", "anvil_openarm",
+            "--hf-user", "testuser",
+            "--quality-report", str(report_path),
+            "--max-episodes", "3",
+            "--debug-plot-episodes", "0",
+        ]
+
+    def test_no_skip_flagged_arg_skips_critical_episode_by_default(self, tmp_path, capsys):
+        from mcap_converter.cli.convert import collect_mcap_files, main
+
+        mcap_files = collect_mcap_files(str(FIXTURES_ROOT))[:3]
+        config_path = self._write_single_camera_yaml_config(tmp_path)
+        report_path = self._write_report_marking_one_critical(tmp_path, mcap_files, critical_index=1)
+
+        argv = self._base_argv(tmp_path, config_path, report_path)
+
+        main(argv)
+
+        captured = capsys.readouterr()
+        assert f"{mcap_files[1].name}  skipped (quality: critical)" in captured.out, (
+            "the critical episode should be skipped automatically even though "
+            "--skip-flagged was never passed on the command line"
+        )
+
+    def test_skip_flagged_none_converts_the_critical_episode_anyway(self, tmp_path, capsys):
+        from mcap_converter.cli.convert import collect_mcap_files, main
+
+        mcap_files = collect_mcap_files(str(FIXTURES_ROOT))[:3]
+        config_path = self._write_single_camera_yaml_config(tmp_path)
+        report_path = self._write_report_marking_one_critical(tmp_path, mcap_files, critical_index=1)
+
+        argv = self._base_argv(tmp_path, config_path, report_path) + ["--skip-flagged", "none"]
+
+        main(argv)
+
+        captured = capsys.readouterr()
+        assert "skipped (quality:" not in captured.out, (
+            "--skip-flagged none must override the new default and convert "
+            "every episode, including the one marked critical"
+        )
+        assert f"{mcap_files[1].name}" in captured.out

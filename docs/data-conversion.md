@@ -55,7 +55,7 @@ An episode's overall status is its single worst topic's severity. `--fail-on-cri
 
 ## mcap-convert
 
-**Requires a `mcap-valid` quality report to exist first** — either auto-discovered at the default `./mcap_valid_reports/<input-dir-name>/report.json` (written automatically by `mcap-valid`, see above), or pointed at explicitly with `--quality-report PATH`. If neither is found, `mcap-convert` exits with an error telling you to run `mcap-valid` first — it does not fall back to converting without one. This only checks that a report *file* exists; it does not require you to act on its contents (`--skip-flagged` below is a separate, still-optional, opt-in mechanism).
+**Requires a `mcap-valid` quality report to exist first** — either auto-discovered at the default `./mcap_valid_reports/<input-dir-name>/report.json` (written automatically by `mcap-valid`, see above), or pointed at explicitly with `--quality-report PATH`. If neither is found, `mcap-convert` exits with an error telling you to run `mcap-valid` first — it does not fall back to converting without one. This gate only checks that a report *file* exists — but `mcap-convert` also acts on its *contents* automatically: `--skip-flagged` defaults to `critical`, so critical episodes (e.g. a camera with zero messages) are skipped without you having to pass anything. `--skip-flagged warning` opts into also skipping warning-level episodes, and `--skip-flagged none` opts back out entirely, converting every episode regardless of severity.
 
 Pick the config that matches your recording setup:
 
@@ -98,19 +98,23 @@ uv run mcap-convert \
 | `--robot-type` | `anvil_openarm` | `anvil_openarm` · `anvil_yam` |
 | `--act-from-obs-n-step N` | config value | Override `action_from_observation_n` at runtime: `action[t] = observation[t+N]` |
 | `--quality-report PATH` | auto-discovered | Path to a mcap-valid JSON report — mcap-convert requires one to exist; if omitted, the default `./mcap_valid_reports/<input-dir-name>/report.json` is used |
-| `--skip-flagged [critical\|warning]` | — | Bare flag skips `critical`-only episodes; `--skip-flagged warning` also skips `warning` episodes too. Works against whichever report the mandatory gate resolved (explicit or auto-discovered) |
+| `--skip-flagged [critical\|warning\|none]` | `critical` | Critical episodes are skipped automatically, even without passing this flag. `--skip-flagged warning` also skips `warning` episodes; `--skip-flagged none` disables skipping entirely and converts every episode. Works against whichever report the mandatory gate resolved (explicit or auto-discovered) |
 | `--skip-episode-idx SPEC` | — | Manually skip episodes by 1-based index (see below) |
 
 **Skipping flagged or known-bad episodes** — two independent mechanisms, usable together:
 
 ```bash
-# Scan first, then convert skipping anything flagged critical
+# Scan first — critical episodes from this report are now skipped by default,
+# with no extra flag needed:
 uv run mcap-valid -i data/raw/my-session --format json --output /tmp/quality.json
 uv run mcap-convert -i data/raw/my-session --config configs/mcap_converter/openarm_bimanual_quest.yaml \
-  --quality-report /tmp/quality.json --skip-flagged
+  --quality-report /tmp/quality.json
 
 # Also skip warning-level episodes (only convert fully-clean episodes)
 uv run mcap-convert -i data/raw/my-session --config ... --quality-report /tmp/quality.json --skip-flagged warning
+
+# Opt out of quality-based skipping entirely — convert every episode, including critical ones
+uv run mcap-convert -i data/raw/my-session --config ... --quality-report /tmp/quality.json --skip-flagged none
 
 # Manually skip specific episodes by 1-based index — no quality report needed
 uv run mcap-convert -i data/raw/my-session --config ... --skip-episode-idx "3,7"       # episodes 3 and 7
