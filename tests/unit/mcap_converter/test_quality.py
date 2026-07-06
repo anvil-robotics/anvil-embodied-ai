@@ -736,6 +736,32 @@ class TestScanEpisodeIntegration:
         # The monitored stream/action topics' own scan must be unaffected.
         assert report.severity in (SEVERITY_OK, SEVERITY_WARNING)
 
+    def test_monitored_timestamp_decode_failure_produces_read_error_not_a_crash(self, monkeypatch):
+        # Unlike the unclassified-topics decode failure above (informational-only,
+        # degrades gracefully to avg_fps=None), a decode failure while collecting
+        # timestamps for the MONITORED (stream/action) topics means the file's
+        # message stream itself is truncated/corrupted — e.g. a readable footer
+        # but a recording process killed mid-write. That's just as much a
+        # "this file is broken" situation as a footer-read failure, so it must
+        # produce the same read_error report shape, not crash the whole scan.
+        from mcap.exceptions import McapError
+
+        from mcap_converter.core import quality as quality_module
+
+        def fake_collect_timestamps(mcap_path, topics):
+            raise McapError("simulated decode failure")
+
+        monkeypatch.setattr(quality_module, "_collect_timestamps", fake_collect_timestamps)
+
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
+
+        assert report.passed is False
+        assert report.severity == SEVERITY_CRITICAL
+        assert report.topics == []
+        assert report.read_error is not None
+        assert "McapError" in report.read_error
+        assert "simulated decode failure" in report.read_error
+
     def test_nonexistent_file_produces_read_error_not_a_crash(self):
         report = scan_episode("/no/such/file.mcap", QualityThresholds())
 

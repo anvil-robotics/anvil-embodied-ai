@@ -574,7 +574,23 @@ def scan_episode(
     unclassified = [m for m in monitored if m.role == ROLE_UNCLASSIFIED]
 
     scan_topics = [m.topic for m in analyzable if topic_info[m.topic].count > 0]
-    ts_map = _collect_timestamps(mcap_path, scan_topics) if scan_topics else {}
+    # Unlike the unclassified-topics decode below, a decode failure here means the
+    # actual monitored (stream/action) message stream is truncated/corrupted — e.g. a
+    # readable footer but a recording process killed mid-write. That's just as much a
+    # "this file is broken" situation as the footer-read failure above, so it must fail
+    # the whole episode the same way, not degrade gracefully like the informational-only
+    # unclassified topics do.
+    try:
+        ts_map = _collect_timestamps(mcap_path, scan_topics) if scan_topics else {}
+    except (OSError, McapError) as exc:
+        return EpisodeQualityReport(
+            path=str(Path(mcap_path).resolve()),
+            duration_s=0.0,
+            severity=SEVERITY_CRITICAL,
+            passed=False,
+            topics=[],
+            read_error=f"{type(exc).__name__}: {exc}",
+        )
 
     all_ts = [t for lst in ts_map.values() for t in lst]
     session_start = min(all_ts) if all_ts else 0.0
