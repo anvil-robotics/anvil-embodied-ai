@@ -38,8 +38,6 @@ from mcap_converter.core.quality import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _STUB_MCAP = _REPO_ROOT / "tests/smoke/fixtures/test-session/0001/0001_0.mcap"
-_STUB_CMD_CONFIG = _REPO_ROOT / "tests/smoke/fixtures/configs/mcap-converter-smoke-test-cmd.yaml"
-_BIMANUAL_CONFIG = _REPO_ROOT / "configs/mcap_converter/openarm_bimanual_quest.yaml"
 
 
 class TestWorstSeverity:
@@ -631,7 +629,6 @@ class TestMcapValidCli:
         monkeypatch.chdir(tmp_path)
         exit_code = main([
             "-i", str(_STUB_MCAP),
-            "--config", str(_STUB_CMD_CONFIG),
             "--format", "json",
             "--fail-on-critical",
         ])
@@ -646,17 +643,15 @@ class TestMcapValidCli:
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
-        # Point camera_topics at something that doesn't exist in the stub -> critical.
-        bad_config_path = tmp_path / "bad.yaml"
-        bad_config_path.write_text(
-            "robot_state_topic: \"/joint_states\"\n"
-            "camera_topics:\n  - \"/nonexistent_camera/image_raw\"\n"
-            "camera_topic_mapping:\n  \"/nonexistent_camera/image_raw\": \"missing_cam\"\n"
-        )
+        # Config-free classification has no equivalent of the old "config points
+        # at a camera topic that doesn't exist" trick to force a critical episode.
+        # An unreadable/corrupt file always produces a CRITICAL, failed episode
+        # report regardless of config, so it's the simplest reliable trigger here.
+        garbage_file = tmp_path / "corrupt.mcap"
+        garbage_file.write_bytes(b"not a real mcap file")
 
         exit_code = main([
-            "-i", str(_STUB_MCAP),
-            "--config", str(bad_config_path),
+            "-i", str(garbage_file),
             "--format", "json",
             "--fail-on-critical",
         ])
@@ -669,7 +664,7 @@ class TestMcapValidCli:
         monkeypatch.chdir(tmp_path)
         out_file = tmp_path / "report.json"
         main([
-            "-i", str(_STUB_MCAP), "--config", str(_STUB_CMD_CONFIG),
+            "-i", str(_STUB_MCAP),
             "--format", "json", "--output", str(out_file),
         ])
 
@@ -684,7 +679,7 @@ class TestMcapValidCli:
         garbage_file.write_bytes(b"not a real mcap file")
 
         exit_code = main([
-            "-i", str(garbage_file), "--config", str(_STUB_CMD_CONFIG),
+            "-i", str(garbage_file),
             "--format", "json", "--fail-on-critical",
         ])
 
@@ -700,7 +695,7 @@ class TestMcapValidCli:
         garbage_file = tmp_path / "corrupt.mcap"
         garbage_file.write_bytes(b"not a real mcap file")
 
-        main(["-i", str(garbage_file), "--config", str(_STUB_CMD_CONFIG)])
+        main(["-i", str(garbage_file)])
 
         captured = capsys.readouterr()
         assert "error" in captured.out.lower()
@@ -718,7 +713,6 @@ class TestMcapValidCli:
 
         exit_code = main([
             "-i", str(stub_session_dir),
-            "--config", str(_STUB_CMD_CONFIG),
             "--format", "json",
         ])
 
@@ -733,7 +727,7 @@ class TestMcapValidCli:
         monkeypatch.chdir(tmp_path)
         out_file = tmp_path / "report.json"
         main([
-            "-i", str(_STUB_MCAP), "--config", str(_STUB_CMD_CONFIG),
+            "-i", str(_STUB_MCAP),
             "--output", str(out_file),  # no --format flag -> defaults to table
         ])
 
@@ -753,7 +747,6 @@ class TestMcapValidCli:
 
         exit_code = main([
             "-i", str(stub_session_dir),
-            "--config", str(_STUB_CMD_CONFIG),
         ])
 
         assert exit_code == 0
@@ -777,7 +770,6 @@ class TestMcapValidCli:
 
         exit_code = main([
             "-i", str(stub_session_dir),
-            "--config", str(_STUB_CMD_CONFIG),
             "--format", "json",
             "--output", str(custom_output),
         ])
@@ -794,7 +786,6 @@ class TestMcapValidCli:
 
         exit_code = main([
             "-i", str(tmp_path / "does-not-exist"),
-            "--config", str(_STUB_CMD_CONFIG),
         ])
 
         assert exit_code != 0
@@ -803,24 +794,106 @@ class TestMcapValidCli:
     def test_verbose_table_shows_full_action_label_not_swallowed_by_rich_markup(self, tmp_path, monkeypatch, capsys):
         # Regression test for Rich markup swallowing "[left]"/"[right]" out of
         # "action[left]"/"action[right]" labels when embedded unescaped in a
-        # markup f-string. The bimanual config against the single-arm stub
-        # produces both an action[left] (zero-message, warning) and an
-        # action[right] (present) topic — exactly the scenario that triggered
-        # the original bug. --verbose forces the panel to render even for
-        # topics/episodes that would otherwise be hidden.
+        # markup f-string. Config-free classification can no longer force a
+        # synthetic bimanual (both action[left] AND action[right]) scenario the
+        # way the old config-based version of this test did — there's no config
+        # left to declare a fictional second arm. The real single-arm fixture's
+        # own action topic still classifies to "action[right]" (see
+        # TestScanEpisodeIntegration.test_every_topic_is_classified_...), which
+        # is sufficient to exercise the actual regression this test guards
+        # against: that the "[right]" bracket doesn't get silently swallowed as
+        # Rich markup. This narrows the original two-arm coverage to a single
+        # arm; disclosed here as an accepted narrowing of this regression test.
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
         exit_code = main([
             "-i", str(_STUB_MCAP),
-            "--config", str(_BIMANUAL_CONFIG),
             "--verbose",
         ])
 
         captured = capsys.readouterr()
         assert exit_code == 0
-        assert "action[left]" in captured.out
         assert "action[right]" in captured.out
+
+    def test_topic_flag_dumps_field_structure_in_table_mode(self, tmp_path, monkeypatch, capsys):
+        # Folds in the old standalone `mcap-inspect` tool: --topic triggers a deep
+        # per-message field-structure dump for that one topic.
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        exit_code = main([
+            "-i", str(_STUB_MCAP),
+            "--topic", "/joint_states",
+        ])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "position" in captured.out
+        assert "name" in captured.out
+        # Regression: field types like "List[float]" must not be swallowed by Rich
+        # markup (the "[float]" part would otherwise be parsed as a markup tag and
+        # silently dropped), same class of bug as the "action[left]" escaping above.
+        assert "List[float]" in captured.out
+
+    def test_topic_flag_with_json_format_includes_topic_structure_alongside_episodes(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        exit_code = main([
+            "-i", str(_STUB_MCAP),
+            "--format", "json",
+            "--topic", "/joint_states",
+        ])
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert exit_code == 0
+        assert "episodes" in payload
+        assert "topic_structure" in payload
+        assert "/joint_states" in payload["topic_structure"]
+        assert "position" in payload["topic_structure"]["/joint_states"]["fields"]
+
+    def test_json_format_without_topic_flag_has_no_topic_structure_key(self, tmp_path, monkeypatch, capsys):
+        # The --topic addition must not change existing --format json behavior
+        # when --topic isn't given.
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        exit_code = main([
+            "-i", str(_STUB_MCAP),
+            "--format", "json",
+        ])
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert exit_code == 0
+        assert "topic_structure" not in payload
+
+    def test_topics_baseline_table_lists_all_fixture_topics_with_types(self, tmp_path, monkeypatch, capsys):
+        # New "what's in this file" table (folded in from the old mcap-inspect
+        # topic summary): every topic in a representative episode, regardless
+        # of severity, with its message type and role.
+        from mcap_converter.cli.mcap_valid import main
+
+        monkeypatch.chdir(tmp_path)
+        exit_code = main([
+            "-i", str(_STUB_MCAP),
+        ])
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "Topics in" in captured.out
+        assert "/joint_states" in captured.out
+        assert "/cam_chest/image_raw/compressed" in captured.out
+        assert "/cam_waist/image_raw/compressed" in captured.out
+        assert "/cam_wrist_r/image_raw/compressed" in captured.out
+        assert "/follower_r_forward_position_controller/commands" in captured.out
+        assert "sensor_msgs/JointState" in captured.out
+        assert "sensor_msgs/CompressedImage" in captured.out
+        assert "std_msgs/Float64MultiArray" in captured.out
 
 
 class TestDefaultReportPaths:
@@ -951,7 +1024,7 @@ class TestRenderMarkdownReport:
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
         reports = self._make_reports()
-        output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+        output = render_markdown_report(reports, input_path="fake/input")
 
         assert output.count("### ") == 3
 
@@ -959,17 +1032,30 @@ class TestRenderMarkdownReport:
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
         reports = self._make_reports()
-        output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+        output = render_markdown_report(reports, input_path="fake/input")
 
         assert "/joint_states" in output
         assert "/camera/image_raw" in output
         assert output.count("/follower_position_controller/commands") == 2  # healthy + warning episodes
 
+    def test_type_column_appears_with_real_message_type_values(self):
+        # New "Type" column (between Label and Role), populated from a real
+        # scan_episode() report against the smoke-test fixture.
+        from mcap_converter.cli.mcap_valid import render_markdown_report
+
+        report = scan_episode(str(_STUB_MCAP), QualityThresholds())
+        output = render_markdown_report([report], input_path="fake/input")
+
+        assert "| Topic | Label | Type | Role |" in output
+        assert "sensor_msgs/JointState" in output
+        assert "sensor_msgs/CompressedImage" in output
+        assert "std_msgs/Float64MultiArray" in output
+
     def test_read_error_episode_shows_error_and_no_topics_table(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
         reports = self._make_reports()
-        output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+        output = render_markdown_report(reports, input_path="fake/input")
 
         assert "**Read error:**" in output
         assert "InvalidMagic" in output
@@ -978,7 +1064,7 @@ class TestRenderMarkdownReport:
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
         reports = self._make_reports()
-        output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+        output = render_markdown_report(reports, input_path="fake/input")
 
         assert "3 episodes: 1 ok, 1 warning, 0 critical, 1 unreadable" in output
 
@@ -986,7 +1072,7 @@ class TestRenderMarkdownReport:
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
         reports = self._make_reports()
-        output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+        output = render_markdown_report(reports, input_path="fake/input")
 
         for tag in ("[green]", "[/green]", "[yellow]", "[/yellow]", "[red]", "[/red]"):
             assert tag not in output
@@ -994,7 +1080,7 @@ class TestRenderMarkdownReport:
     def test_empty_reports_list_produces_valid_document_without_crashing(self):
         from mcap_converter.cli.mcap_valid import render_markdown_report
 
-        output = render_markdown_report([], input_path="some/input", config_path=None)
+        output = render_markdown_report([], input_path="some/input")
 
         assert isinstance(output, str)
         assert "# mcap-valid Report" in output
@@ -1010,7 +1096,7 @@ class TestRenderMarkdownReport:
         table_output = capsys.readouterr().out
         table_summary = [line for line in table_output.splitlines() if line.strip()][-1]
 
-        md_output = render_markdown_report(reports, input_path="fake/input", config_path="fake/config.yaml")
+        md_output = render_markdown_report(reports, input_path="fake/input")
         md_summary = next(line for line in md_output.splitlines() if line.startswith(f"{len(reports)} episodes:"))
 
         assert table_summary == md_summary

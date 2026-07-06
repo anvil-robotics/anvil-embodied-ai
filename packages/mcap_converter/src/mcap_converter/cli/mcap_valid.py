@@ -1,9 +1,16 @@
 """mcap-valid: scan raw MCAP sessions for topic coverage/gap issues before conversion.
 
+Config-free: which topics get analyzed, and what role each plays, is inferred entirely
+from each topic's ROS2 message type (see core/quality.classify_topic) — no conversion
+config is needed or accepted.
+
 By default (no flags needed), a JSON report and a comprehensive Markdown
 report covering every episode and topic are always written to
 ./mcap_valid_reports/<name>.{json,md}, in addition to whatever --format /
 --output produce.
+
+`--topic`/`--max-samples` fold in the old standalone `mcap-inspect` tool's deep
+per-message field-structure dump for a single topic (opt-in, off by default).
 """
 
 import argparse
@@ -16,15 +23,16 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from mcap_converter.config.loader import ConfigLoader
 from mcap_converter.core.quality import (
     SEVERITY_CRITICAL,
     SEVERITY_OK,
     SEVERITY_WARNING,
     QualityThresholds,
     apply_batch_fps_check,
+    apply_batch_topic_presence_check,
     scan_episode,
 )
+from mcap_converter.core.schema_inspect import inspect_message_structure, render_structure_text
 
 console = Console()
 # Status/progress notices (e.g. "report written to ...") go to stderr so they
@@ -47,7 +55,38 @@ def _summary_line(reports) -> str:
     )
 
 
+def _render_topics_table(reports) -> None:
+    """Print a baseline "what's in this file" table for one representative episode.
+
+    Folds in the old `mcap-inspect` tool's topic-summary table: every topic present in
+    the file (including role="unclassified" ones), regardless of severity. Uses the
+    first readable report in the batch as the representative episode — real recordings
+    in the same session all share the same topic layout, so any one of them is
+    representative for this purpose.
+    """
+    representative = next((r for r in reports if r.read_error is None), None)
+    if representative is None:
+        return
+
+    topics_table = Table(title=f"Topics in {Path(representative.path).name}")
+    topics_table.add_column("Topic")
+    topics_table.add_column("Type")
+    topics_table.add_column("Messages", justify="right")
+    topics_table.add_column("Role")
+    for t in representative.topics:
+        topics_table.add_row(t.topic, t.message_type or "-", str(t.message_count), t.role)
+    # A dedicated wide console just for this table: topic/type strings are long
+    # and have no spaces to word-wrap on, so at the default ~80-column fallback
+    # width used when stdout isn't a real terminal (e.g. piped, or under test),
+    # Rich would otherwise truncate them with an ellipsis or fold them mid-word
+    # across lines. A generously wide fixed console keeps full names on one line
+    # for this table specifically, without changing the width used elsewhere.
+    Console(width=200).print(topics_table)
+
+
 def _render_table(reports, *, verbose: bool) -> None:
+    _render_topics_table(reports)
+
     table = Table(title="mcap-valid report")
     table.add_column("Episode")
     table.add_column("Duration", justify="right")
@@ -99,11 +138,12 @@ def default_report_paths(input_path: Path) -> tuple[Path, Path]:
     return report_dir / f"{name}.json", report_dir / f"{name}.md"
 
 
-def render_markdown_report(reports, *, input_path: str, config_path: str | None) -> str:
+def render_markdown_report(reports, *, input_path: str) -> str:
     """Render a comprehensive Markdown report listing every episode and topic.
 
     Unlike the terminal table (which hides healthy detail by default), this
-    always lists every episode and every topic, regardless of severity.
+    always lists every episode and every topic (including unclassified ones),
+    regardless of severity.
     """
     summary = _summary_line(reports)
 
@@ -111,7 +151,6 @@ def render_markdown_report(reports, *, input_path: str, config_path: str | None)
         "# mcap-valid Report",
         "",
         f"- Input: `{input_path}`",
-        f"- Config: `{config_path or 'default'}`",
         "",
         "## Summary",
         "",
@@ -133,14 +172,14 @@ def render_markdown_report(reports, *, input_path: str, config_path: str | None)
         lines.append(f"- Duration: `{r.duration_s:.1f}s`")
         lines.append("")
         lines.append(
-            "| Topic | Label | Role | Messages | Avg FPS | Coverage | Total Gap (s) | Longest Gap (s) | Severity | Reason |"
+            "| Topic | Label | Type | Role | Messages | Avg FPS | Coverage | Total Gap (s) | Longest Gap (s) | Severity | Reason |"
         )
-        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for t in r.topics:
             avg_fps = f"{t.avg_fps:.2f}" if t.avg_fps is not None else "-"
             reason = t.reason.replace("|", "\\|")
             lines.append(
-                f"| {t.topic} | {t.label} | {t.role} | {t.message_count} | {avg_fps} | "
+                f"| {t.topic} | {t.label} | {t.message_type or '-'} | {t.role} | {t.message_count} | {avg_fps} | "
                 f"{t.coverage_ratio:.2f} | {t.total_gap_s:.2f} | {t.longest_gap_s:.2f} | "
                 f"{t.severity} | {reason} |"
             )
@@ -155,15 +194,15 @@ def main(args: List[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  mcap-valid -i data/raw/my-session --config configs/mcap_converter/openarm_bimanual_quest.yaml
+  mcap-valid -i data/raw/my-session   # no config needed - topics are auto-detected by message type
   mcap-valid -i recording.mcap --format json --output report.json
   mcap-valid -i data/raw/my-session --fail-on-critical   # CI gate, exit 1 on any critical episode
+  mcap-valid -i recording.mcap --topic /joint_states     # deep field-structure dump for one topic
 
   (by default, a JSON + Markdown report is always written to ./mcap_valid_reports/<name>.{json,md})
 """,
     )
     parser.add_argument("-i", "--input", required=True, help="MCAP file or directory (recursive **/*.mcap)")
-    parser.add_argument("--config", default=None, help="conversion config YAML (same one used by mcap-convert)")
     parser.add_argument("--format", choices=["table", "json"], default="table")
     parser.add_argument(
         "--output",
@@ -179,9 +218,14 @@ examples:
     parser.add_argument("--fps-tolerance", type=float, default=0.15)
     parser.add_argument("--fail-on-critical", action="store_true", help="exit 1 if any episode has a critical issue")
     parser.add_argument("--verbose", action="store_true", help="show per-topic detail even for healthy episodes")
+    parser.add_argument(
+        "--topic", default=None, help="deep field-structure dump for one topic (folds in the old mcap-inspect tool)"
+    )
+    parser.add_argument(
+        "--max-samples", type=int, default=5, help="max message samples for --topic field dump (default: 5)"
+    )
     parsed = parser.parse_args(args)
 
-    config = ConfigLoader.from_yaml(parsed.config) if parsed.config else ConfigLoader.get_default()
     thresholds = QualityThresholds(
         stream_gap_factor=parsed.stream_gap_factor,
         stream_min_gap_s=parsed.stream_min_gap,
@@ -196,25 +240,43 @@ examples:
 
     mcap_files = [input_path] if input_path.is_file() else sorted(input_path.glob("**/*.mcap"))
 
-    reports = [scan_episode(str(p), config, thresholds) for p in mcap_files]
+    reports = [scan_episode(str(p), thresholds) for p in mcap_files]
     if len(reports) > 1:
         reports = apply_batch_fps_check(reports, thresholds)
+        reports = apply_batch_topic_presence_check(reports)
+
+    structure = None
+    if parsed.topic and mcap_files:
+        representative_file = mcap_files[0]
+        structure = inspect_message_structure(
+            str(representative_file), topic=parsed.topic, max_samples=parsed.max_samples
+        )
 
     default_json_path, default_md_path = default_report_paths(input_path)
     default_json_path.parent.mkdir(parents=True, exist_ok=True)
-    payload_json = json.dumps({"episodes": [r.to_dict() for r in reports]}, indent=2)
+    default_payload = {"episodes": [r.to_dict() for r in reports]}
+    payload_json = json.dumps(default_payload, indent=2)
     default_json_path.write_text(payload_json)
-    default_md_path.write_text(render_markdown_report(reports, input_path=str(input_path), config_path=parsed.config))
+    default_md_path.write_text(render_markdown_report(reports, input_path=str(input_path)))
     _status_console.print(f"[dim]報告已寫入: {default_json_path}, {default_md_path}[/dim]")
 
     if parsed.format == "json":
-        payload = payload_json
+        json_payload = dict(default_payload)
+        if structure is not None:
+            json_payload["topic_structure"] = structure
+        payload = json.dumps(json_payload, indent=2)
         if parsed.output:
             Path(parsed.output).write_text(payload)
         else:
             print(payload)
     else:
         _render_table(reports, verbose=parsed.verbose)
+        if structure is not None:
+            # escape(): field types like "List[float]" would otherwise be parsed as
+            # Rich markup tags, silently dropping the "[float]" part from the output —
+            # the same class of bug the "action[left]"/"action[right]" escaping above
+            # guards against.
+            console.print(escape(render_structure_text(structure)))
         if parsed.output:
             Path(parsed.output).write_text(payload_json)
 
