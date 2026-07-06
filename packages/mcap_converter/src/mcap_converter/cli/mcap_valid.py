@@ -192,28 +192,13 @@ def _ordered_labels(readable) -> List[str]:
     )
 
 
-def _batch_overview_section(reports) -> List[str]:
-    """Bucketed episode-status counts + a single fixed-column topic health table.
+def _episode_status_lines(reports, readable) -> List[str]:
+    """Bucketed OK/Warning/Critical episode counts, name-capped via _truncate_names.
 
-    Replaces the old per-episode-column Severity/Avg-FPS-Trend tables, which
-    rendered one Markdown column per episode — unusable at real batch sizes
-    (500 episodes -> a 500-column table). Both subsections here are bounded
-    independent of episode count: the status bucket name-lists are capped via
-    _truncate_names, and the topic table has exactly one row per distinct
-    topic label (small and fixed for a given robot/config, not growing with
-    episode count) and always exactly 8 columns.
-
-    Omitted entirely with fewer than 2 readable episodes — a single episode
-    has nothing to compare against, matching the batch-only convention used
-    by apply_batch_fps_check/apply_batch_topic_presence_check in
-    core/quality.py (both only activate for >1 episode; this section's
-    threshold is about READABLE episodes specifically, not raw len(reports)).
-    Unreadable episodes never contribute a row/count to the topic table.
+    OK is count-only (an OK bucket at scale is just noise — the interesting
+    story is what's flagged); Warning/Critical also list which episodes,
+    truncated past _MAX_NAMES_SHOWN. Empty buckets print nothing at all.
     """
-    readable = _readable_reports(reports)
-    if len(readable) < 2:
-        return []
-
     # Same counting predicates as _summary_line (readable-episode-only, keyed
     # off severity) so these numbers can never drift from the Summary line.
     n_ok = sum(1 for r in readable if r.severity == SEVERITY_OK)
@@ -222,8 +207,6 @@ def _batch_overview_section(reports) -> List[str]:
     n_unreadable = len(reports) - len(readable)
 
     lines = [
-        "## Batch Overview",
-        "",
         "### Episode Status",
         "",
         f"- Total: {len(reports)} episode(s) — {len(readable)} readable, {n_unreadable} unreadable",
@@ -241,29 +224,43 @@ def _batch_overview_section(reports) -> List[str]:
         )
         lines.append(f"- {_SEVERITY_ICON[SEVERITY_CRITICAL]} Critical: {n_critical} ({names})")
     lines.append("")
+    return lines
 
+
+def _topic_health_table_lines(readable) -> List[str]:
+    """Single fixed-8-column table, one row per distinct topic label.
+
+    Size depends only on topic count (small and fixed for a given
+    robot/config), never on episode count — this is what actually fixes the
+    500-episode-columns scalability bug. Every label gets a row, including
+    ones with no numeric fps anywhere (rendered as `-`, not omitted).
+    """
     labels = _ordered_labels(readable)
     type_by_label: Dict[str, str] = {}
     severity_counts_by_label: Dict[str, Dict[str, int]] = {}
     fps_by_label: Dict[str, List[float]] = {}
     for r in readable:
         for t in r.topics:
+            # First-seen message_type per label wins — a label's type should
+            # be consistent across episodes in practice, same "first
+            # representative" convention _flagged_topic_groups uses for reasons.
             type_by_label.setdefault(t.label, t.message_type)
             counts = severity_counts_by_label.setdefault(
                 t.label, {SEVERITY_OK: 0, SEVERITY_WARNING: 0, SEVERITY_CRITICAL: 0}
             )
-            counts[t.severity] = counts.get(t.severity, 0) + 1
+            # Direct indexing (not .get(..., 0)): counts is pre-seeded with
+            # all 3 valid severities, so an unexpected severity value should
+            # raise here rather than silently vanish from the rendered row.
+            counts[t.severity] += 1
             if t.avg_fps is not None:
                 fps_by_label.setdefault(t.label, []).append(t.avg_fps)
 
-    lines.extend(
-        [
-            "### Topic Health Overview",
-            "",
-            "| Topic | Type | OK | Warning | Critical | Min FPS | Median FPS | Max FPS |",
-            "|---|---|---|---|---|---|---|---|",
-        ]
-    )
+    lines = [
+        "### Topic Health Overview",
+        "",
+        "| Topic | Type | OK | Warning | Critical | Min FPS | Median FPS | Max FPS |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
     for label in labels:
         counts = severity_counts_by_label.get(label, {})
         fps_values = fps_by_label.get(label)
@@ -279,7 +276,31 @@ def _batch_overview_section(reports) -> List[str]:
             f"{min_fps} | {median_fps} | {max_fps} |"
         )
     lines.append("")
+    return lines
 
+
+def _batch_overview_section(reports) -> List[str]:
+    """Bucketed episode-status counts + a single fixed-column topic health table.
+
+    Replaces the old per-episode-column Severity/Avg-FPS-Trend tables, which
+    rendered one Markdown column per episode — unusable at real batch sizes
+    (500 episodes -> a 500-column table). Both subsections here are bounded
+    independent of episode count: see _episode_status_lines/_topic_health_table_lines.
+
+    Omitted entirely with fewer than 2 readable episodes — a single episode
+    has nothing to compare against, matching the batch-only convention used
+    by apply_batch_fps_check/apply_batch_topic_presence_check in
+    core/quality.py (both only activate for >1 episode; this section's
+    threshold is about READABLE episodes specifically, not raw len(reports)).
+    Unreadable episodes never contribute a row/count to the topic table.
+    """
+    readable = _readable_reports(reports)
+    if len(readable) < 2:
+        return []
+
+    lines = ["## Batch Overview", ""]
+    lines.extend(_episode_status_lines(reports, readable))
+    lines.extend(_topic_health_table_lines(readable))
     return lines
 
 
