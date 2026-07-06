@@ -1,4 +1,4 @@
-"""Tests for mcap-convert's --quality-report / --skip-flagged integration."""
+"""Tests for mcap-convert's --quality-report / --include-flagged integration."""
 
 import json
 import os
@@ -23,42 +23,37 @@ def _write_report(tmp_path, episodes):
 
 
 class TestResolveQualitySkipSet:
-    def test_no_skip_flagged_skips_nothing(self, tmp_path):
-        from mcap_converter.cli.convert import resolve_quality_skip_paths
-
-        report = _write_report(tmp_path, [("/a.mcap", "critical"), ("/b.mcap", "warning")])
-
-        skip_set = resolve_quality_skip_paths(str(report), skip_flagged=None)
-
-        assert skip_set == {}
-
-    def test_bare_skip_flagged_skips_only_critical(self, tmp_path):
+    def test_include_flagged_pass_skips_warning_and_critical(self, tmp_path):
         from mcap_converter.cli.convert import resolve_quality_skip_paths
 
         report = _write_report(tmp_path, [("/a.mcap", "critical"), ("/b.mcap", "warning"), ("/c.mcap", "pass")])
 
-        skip_set = resolve_quality_skip_paths(str(report), skip_flagged="critical")
+        skip_set = resolve_quality_skip_paths(str(report), include_flagged="pass")
+
+        assert set(skip_set.keys()) == {"/a.mcap", "/b.mcap"}
+        assert skip_set["/a.mcap"] == "critical"
+        assert skip_set["/b.mcap"] == "warning"
+
+    def test_include_flagged_warning_skips_only_critical(self, tmp_path):
+        """'warning' is the new CLI default — only critical episodes are skipped."""
+        from mcap_converter.cli.convert import resolve_quality_skip_paths
+
+        report = _write_report(tmp_path, [("/a.mcap", "critical"), ("/b.mcap", "warning"), ("/c.mcap", "pass")])
+
+        skip_set = resolve_quality_skip_paths(str(report), include_flagged="warning")
 
         assert set(skip_set.keys()) == {"/a.mcap"}
         assert skip_set["/a.mcap"] == "critical"
 
-    def test_skip_flagged_warning_skips_both(self, tmp_path):
+    def test_include_flagged_critical_skips_nothing(self, tmp_path):
+        """--include-flagged critical is the explicit escape hatch: even with
+        critical and warning episodes present in the report, nothing should be
+        skipped."""
         from mcap_converter.cli.convert import resolve_quality_skip_paths
 
         report = _write_report(tmp_path, [("/a.mcap", "critical"), ("/b.mcap", "warning"), ("/c.mcap", "pass")])
 
-        skip_set = resolve_quality_skip_paths(str(report), skip_flagged="warning")
-
-        assert set(skip_set.keys()) == {"/a.mcap", "/b.mcap"}
-
-    def test_skip_flagged_none_skips_nothing(self, tmp_path):
-        """--skip-flagged none is the explicit escape hatch: even with critical
-        and warning episodes present in the report, nothing should be skipped."""
-        from mcap_converter.cli.convert import resolve_quality_skip_paths
-
-        report = _write_report(tmp_path, [("/a.mcap", "critical"), ("/b.mcap", "warning")])
-
-        skip_set = resolve_quality_skip_paths(str(report), skip_flagged="none")
+        skip_set = resolve_quality_skip_paths(str(report), include_flagged="critical")
 
         assert skip_set == {}
 
@@ -229,7 +224,7 @@ class TestMandatoryQualityGate:
     """mcap-convert must refuse to run without a mcap-valid quality report,
     exiting before any output-directory mutation. This gate only checks that
     a report FILE exists — it does not validate contents (that's the
-    orthogonal --skip-flagged mechanism, covered by TestResolveQualitySkipSet)."""
+    orthogonal --include-flagged mechanism, covered by TestResolveQualitySkipSet)."""
 
     def _base_argv(self, tmp_path, output_dir):
         return [
@@ -293,10 +288,10 @@ class TestMandatoryQualityGate:
         assert "No mcap-valid quality report found" in captured.out
 
 
-class TestSkipFlaggedDefaultsToCritical:
-    """--skip-flagged now defaults to 'critical' (instead of None), so a
-    critical episode is skipped automatically even without passing the flag
-    at all. 'none' is the explicit escape hatch to convert everything."""
+class TestIncludeFlaggedDefaultsToWarning:
+    """--include-flagged now defaults to 'warning', so a critical episode is
+    skipped automatically even without passing the flag at all. 'critical' is
+    the explicit escape hatch to convert everything."""
 
     def _write_single_camera_yaml_config(self, tmp_path) -> Path:
         config_path = tmp_path / "config.yaml"
@@ -358,7 +353,7 @@ action_feature_mapping:
             "--debug-plot-episodes", "0",
         ]
 
-    def test_no_skip_flagged_arg_skips_critical_episode_by_default(self, tmp_path, capsys):
+    def test_no_include_flagged_arg_skips_critical_episode_by_default(self, tmp_path, capsys):
         from mcap_converter.cli.convert import collect_mcap_files, main
 
         mcap_files = collect_mcap_files(str(FIXTURES_ROOT))[:3]
@@ -372,23 +367,23 @@ action_feature_mapping:
         captured = capsys.readouterr()
         assert f"{mcap_files[1].name}  skipped (quality: critical)" in captured.out, (
             "the critical episode should be skipped automatically even though "
-            "--skip-flagged was never passed on the command line"
+            "--include-flagged was never passed on the command line"
         )
 
-    def test_skip_flagged_none_converts_the_critical_episode_anyway(self, tmp_path, capsys):
+    def test_include_flagged_critical_converts_the_critical_episode_anyway(self, tmp_path, capsys):
         from mcap_converter.cli.convert import collect_mcap_files, main
 
         mcap_files = collect_mcap_files(str(FIXTURES_ROOT))[:3]
         config_path = self._write_single_camera_yaml_config(tmp_path)
         report_path = self._write_report_marking_one_critical(tmp_path, mcap_files, critical_index=1)
 
-        argv = self._base_argv(tmp_path, config_path, report_path) + ["--skip-flagged", "none"]
+        argv = self._base_argv(tmp_path, config_path, report_path) + ["--include-flagged", "critical"]
 
         main(argv)
 
         captured = capsys.readouterr()
         assert "skipped (quality:" not in captured.out, (
-            "--skip-flagged none must override the new default and convert "
-            "every episode, including the one marked critical"
+            "--include-flagged critical must override the new default and "
+            "convert every episode, including the one marked critical"
         )
         assert f"{mcap_files[1].name}" in captured.out

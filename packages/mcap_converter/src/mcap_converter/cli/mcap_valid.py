@@ -325,13 +325,14 @@ def _readiness_verdict_lines(reports, readable) -> List[str]:
     elif n_critical:
         verdict = (
             f"**❌ Not ready to convert** — {n_critical}/{total} episode(s) flagged critical. "
-            "Fix the underlying recordings, or run `mcap-convert --skip-flagged` to exclude them."
+            "Fix the underlying recordings, or note that `mcap-convert` skips them "
+            "automatically by default (pass `--include-flagged critical` to convert them anyway)."
         )
     elif n_warning:
         verdict = (
             f"**⚠️ Ready to convert with warnings** — {n_warning}/{total} episode(s) have "
             "non-blocking issues (see below). Warnings never block `mcap-convert` unless you "
-            "explicitly pass `--skip-flagged warning`."
+            "explicitly pass `--include-flagged pass`."
         )
     else:
         verdict = "**✅ All episodes clean** — ready to convert."

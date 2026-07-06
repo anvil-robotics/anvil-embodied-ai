@@ -93,22 +93,28 @@ def collect_mcap_files(input_dir: str) -> List[Path]:
     return sorted(mcap_paths)
 
 
-def resolve_quality_skip_paths(quality_report_path: str | None, skip_flagged: str | None) -> dict:
+_SEVERITY_ORDER = ["pass", "warning", "critical"]
+
+
+def resolve_quality_skip_paths(quality_report_path: str | None, include_flagged: str) -> dict:
     """
     Read a mcap-valid JSON report and return {resolved_path: severity} for the
-    episodes that should be skipped, based on the --skip-flagged threshold.
+    episodes that fall ABOVE the --include-flagged threshold and should be
+    skipped during conversion.
 
-    Returns {} if quality_report_path is None, skip_flagged is None (direct
-    callers that omit the threshold), or skip_flagged == "none" (the explicit
-    opt-out — convert every episode regardless of severity).
+    include_flagged is an inclusive threshold, not an exclusion list: "pass"
+    converts only pass-severity episodes (skips warning+critical); "warning"
+    (the CLI default) also converts warning episodes, skipping only critical;
+    "critical" converts everything, skipping nothing.
     """
-    if quality_report_path is None or skip_flagged is None or skip_flagged == "none":
+    if quality_report_path is None:
         return {}
 
     with open(quality_report_path) as f:
         payload = json.load(f)
 
-    skip_severities = {"critical"} if skip_flagged == "critical" else {"critical", "warning"}
+    threshold_idx = _SEVERITY_ORDER.index(include_flagged)
+    skip_severities = set(_SEVERITY_ORDER[threshold_idx + 1 :])
     return {
         ep["path"]: ep["severity"]
         for ep in payload.get("episodes", [])
@@ -670,7 +676,8 @@ examples:
   mcap-convert -i data/raw/my-session -o data/datasets --fps 15 --push-to-hub
   mcap-convert -i data/raw/my-session -o data/datasets --max-episodes 5
   mcap-convert -i data/raw/my-session -o data/datasets --resume
-  mcap-convert -i data/raw/my-session -o data/datasets --skip-flagged none  # convert everything, even critical episodes
+  mcap-convert -i data/raw/my-session -o data/datasets  # default: critical episodes skipped automatically
+  mcap-convert -i data/raw/my-session -o data/datasets --include-flagged critical  # convert everything, even critical episodes
 """,
     )
     parser.add_argument(
@@ -756,14 +763,16 @@ examples:
         ),
     )
     parser.add_argument(
-        "--skip-flagged", nargs="?", choices=["critical", "warning", "none"], const="critical",
-        default="critical",
+        "--include-flagged",
+        choices=["pass", "warning", "critical"],
+        default="warning",
         help=(
-            "skip episodes flagged in the quality report (explicit --quality-report or "
-            "auto-discovered default), by severity threshold. Defaults to 'critical' — "
-            "critical episodes are skipped automatically even without passing this flag. "
-            "Pass 'warning' to also skip warning-level episodes. Pass 'none' to disable "
-            "skipping entirely and convert every episode regardless of severity."
+            "highest severity tier to include when converting, per the quality "
+            "report. Inclusive threshold: 'pass' converts only clean episodes "
+            "(skips warning AND critical); 'warning' (default) also converts "
+            "warning-level episodes, skipping only critical ones automatically; "
+            "'critical' converts every episode regardless of severity, skipping "
+            "nothing."
         ),
     )
     parser.add_argument(
@@ -812,9 +821,10 @@ examples:
     # mcap-convert refuses to run without a mcap-valid quality report (explicit
     # --quality-report, or auto-discovered at the default path) so bad
     # recordings are caught before they enter a dataset. This only checks that
-    # a report FILE exists — --skip-flagged (below) is a separate mechanism
-    # that reads the report's *contents* and defaults to skipping critical
-    # episodes automatically; pass --skip-flagged none to opt out entirely.
+    # a report FILE exists — --include-flagged (below) is a separate mechanism
+    # that reads the report's *contents* and defaults to "warning", so only
+    # critical episodes are skipped automatically; pass --include-flagged
+    # critical to opt out entirely and convert everything.
     report_path = args.quality_report
     default_json, _ = default_report_paths(Path(args.input_dir))
     if report_path is None:
@@ -835,7 +845,7 @@ examples:
         )
         exit(1)
 
-    quality_skip_paths = resolve_quality_skip_paths(report_path, args.skip_flagged)
+    quality_skip_paths = resolve_quality_skip_paths(report_path, args.include_flagged)
 
     if args.act_from_obs_n_step is not None:
         config.action_from_observation_n = args.act_from_obs_n_step

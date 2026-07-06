@@ -2,7 +2,7 @@
 """Smoke test for `mcap-valid` and its `mcap-convert` quality-flag integration.
 
 Complements the pytest unit tests for mcap_converter/core/quality.py and the
---skip-flagged / --skip-episode-idx plumbing in mcap_converter/cli/convert.py
+--include-flagged / --skip-episode-idx plumbing in mcap_converter/cli/convert.py
 with real CLI-level coverage — every command below is a real `uv run
 mcap-valid` / `uv run mcap-convert` subprocess invocation against the
 committed fixture at tests/smoke/fixtures/test-session (5 stub MCAPs, single
@@ -28,8 +28,8 @@ actual git working tree as a side effect of this smoke test.
 B  `mcap-convert` quality-flag integration (subprocess, real conversion)
    B1. generate a real mcap-valid JSON report, then build a synthetic variant
        with one episode forced to "critical" and another to "warning"
-   B2. --skip-flagged (bare = critical only) skips the critical episode only
-   B3. --skip-flagged warning skips both critical and warning episodes
+   B2. --include-flagged warning (the default) skips the critical episode only
+   B3. --include-flagged pass skips both critical and warning episodes
    B4. --skip-episode-idx "2:4" uses Python-slice exclusive-end semantics
        (skips episodes 2 and 3, NOT 4) at the CLI level
    B5. --skip-episode-idx with an out-of-range index fails cleanly (no
@@ -296,13 +296,13 @@ def run_section_b() -> None:
             "--robot-type", "anvil_openarm",
         ]
 
-        # B2 — bare --skip-flagged: critical only
-        print("\n  B2. --skip-flagged (bare, default = critical only)")
+        # B2 — --include-flagged warning (the default): critical only skipped
+        print("\n  B2. --include-flagged warning (the default, skips critical only)")
         out1 = tmp / "out1"
         proc = _run(base_convert_cmd + [
             "-o", str(out1),
             "--quality-report", str(synthetic_path),
-            "--skip-flagged",
+            "--include-flagged", "warning",
         ], cwd=tmp)
         _assert("B2 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
         _assert(
@@ -322,13 +322,13 @@ def run_section_b() -> None:
                 f"total_episodes={total1}",
             )
 
-        # B3 — --skip-flagged warning: critical + warning
-        print("\n  B3. --skip-flagged warning (skips critical AND warning)")
+        # B3 — --include-flagged pass: critical + warning both skipped
+        print("\n  B3. --include-flagged pass (skips critical AND warning)")
         out2 = tmp / "out2"
         proc = _run(base_convert_cmd + [
             "-o", str(out2),
             "--quality-report", str(synthetic_path),
-            "--skip-flagged", "warning",
+            "--include-flagged", "pass",
         ], cwd=tmp)
         _assert("B3 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
         _assert(
