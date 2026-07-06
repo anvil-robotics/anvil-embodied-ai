@@ -259,3 +259,24 @@ class TestMandatoryQualityGate:
         assert not os.path.exists(output_dir), "output dir must not be created when the gate rejects the run"
         captured = capsys.readouterr()
         assert "No mcap-valid quality report found" in captured.out
+
+    def test_directory_as_quality_report_blocks_and_exits_1(self, tmp_path, capsys):
+        """A directory satisfies Path.exists() but is not a valid report file.
+        The gate must reject it cleanly instead of letting it through to a raw
+        IsADirectoryError downstream in resolve_quality_skip_paths()."""
+        from mcap_converter.cli.convert import main
+
+        output_dir = tmp_path / "output"
+        report_dir = tmp_path / "fake-report-dir"
+        report_dir.mkdir()
+        argv = self._base_argv(tmp_path, output_dir) + [
+            "--quality-report", str(report_dir),
+        ]
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(argv)
+
+        assert exc_info.value.code == 1
+        assert not os.path.exists(output_dir), "output dir must not be created when the gate rejects the run"
+        captured = capsys.readouterr()
+        assert "No mcap-valid quality report found" in captured.out

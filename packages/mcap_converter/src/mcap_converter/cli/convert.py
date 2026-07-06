@@ -17,6 +17,7 @@ from typing import List
 
 import huggingface_hub
 from rich.console import Console, Group
+from rich.markup import escape
 from rich.padding import Padding
 from rich.panel import Panel
 from rich.progress import (
@@ -809,20 +810,21 @@ examples:
     # a report FILE exists — --skip-flagged (below) is a fully independent,
     # opt-in mechanism that reads the report's *contents*.
     report_path = args.quality_report
+    default_json, _ = default_report_paths(Path(args.input_dir))
     if report_path is None:
-        default_json, _ = default_report_paths(Path(args.input_dir))
-        if default_json.exists():
+        if default_json.is_file():
             report_path = str(default_json)
-    if report_path is None or not Path(report_path).exists():
-        default_json, _ = default_report_paths(Path(args.input_dir))
+    if report_path is None or not Path(report_path).is_file():
+        # escape(): input-dir/report paths are user/data-controlled and could
+        # otherwise be parsed as Rich markup (e.g. a path containing "[red]").
         console.print(
             "\n[bold red]ERROR: No mcap-valid quality report found for this input.[/bold red]\n"
             "mcap-convert requires a quality report to exist before conversion, so bad\n"
             "recordings are caught before they enter a dataset.\n"
             f"Run mcap-valid first:\n"
-            f"  [bold]uv run mcap-valid -i {args.input_dir}[/bold]\n"
+            f"  [bold]uv run mcap-valid -i {escape(args.input_dir)}[/bold]\n"
             f"then re-run this command — the report is auto-discovered at\n"
-            f"  {default_json}\n"
+            f"  {escape(str(default_json))}\n"
             "or pass --quality-report PATH to point at a report elsewhere.\n"
         )
         exit(1)
