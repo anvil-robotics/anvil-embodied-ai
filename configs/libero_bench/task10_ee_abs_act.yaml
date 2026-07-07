@@ -1,0 +1,23 @@
+# =============================================================================
+# LIBERO validation-harness spec — Experiment 2: Anvil act-from-obs absolute pose, calibrated legacy path, ACT (40%)
+# Historical experiment re-expressed as a bench spec (see
+# packages/anvil_sim/README.md for the experiment's full story).
+# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_ee_abs_act.yaml
+# =============================================================================
+
+name: task10-ee-abs-act
+task_index: 10
+env_suite: libero_goal
+env_task_id: 8
+dataset_group: abs
+train:
+  trainer: anvil-trainer
+  action_type: ee_abs
+  policy_type: act
+  steps: 50000
+  batch_size: 16
+  output_dir: model_zoo/ee-space/libero-task10-abs/act
+eval:
+  action_type: ee_abs
+  control_mode: relative
+  n_episodes: 10

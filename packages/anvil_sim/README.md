@@ -24,6 +24,66 @@ a custom gym env, B/C plug into `lerobot_eval.py::rollout()`'s
 `env_preprocessor`/`env_postprocessor` hooks so all three arms share the
 same underlying `LiberoEnv`.
 
+## The validation harness: verify a new treatment in 3 steps
+
+The primary product of this package is a **gated validation pipeline** that
+lets you test any new policy idea / data treatment / action representation
+with minimum effort — and makes it structurally impossible to burn a full
+training run on a config whose eval path is broken (the failure mode that
+cost this project four separate full sweeps before the harness existed).
+
+**Step 1 — write one spec YAML** under `configs/libero_bench/` (see the 14
+existing files there for every supported pattern):
+
+```yaml
+# configs/libero_bench/task10_my_idea_act.yaml
+name: task10-my-idea-act
+task_index: 10
+env_suite: libero_goal
+env_task_id: 8
+dataset_group: goalabs        # or a new group you add to libero_convert.py
+train:
+  trainer: anvil-trainer
+  action_type: ee_abs
+  policy_type: act
+  steps: 50000
+eval:
+  action_type: zerocal_goal_abs
+  control_mode: relative      # illegal pairings are rejected at load time
+```
+
+**Step 2 — (only if your treatment introduces new math)** add the dataset
+construction to `libero_convert.py`, the eval decode to
+`libero_processor.py`, and a real-data identity check to
+`bench_runner._MATH_VALIDATORS`. Unit-test the round trip.
+
+**Step 3 — run it**:
+
+```bash
+uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_my_idea_act.yaml
+```
+
+The pipeline executes eight idempotent stages — `convert → validate-math →
+dataset-validate → gt-replay → smoke → train → eval → record` — where every
+cheap check runs BEFORE training. The `gt-replay` stage is the hard gate
+that catches eval-path bugs unit tests can't see: it replays the dataset's
+own ground-truth actions through your exact eval processor chain
+(`anvil-libero-replay`, no policy involved) and must land within
+`gates.gt_replay_margin` (default 15 pc points) of the native replay
+baseline. If the ground truth can't succeed through your eval path, no
+checkpoint ever will — the run aborts in minutes with a per-step trace to
+diagnose, instead of failing silently after a 35-minute training run.
+
+Results append automatically to `outputs/bench/results.json` and the
+regenerated `outputs/bench/RESULTS.md` — no hand-maintained tables. Check
+`anvil-sim-bench status` any time. Re-running a spec skips already-passed
+stages (`--from-stage` / `--force-stage` to override).
+
+For ad-hoc diagnosis outside the pipeline: `anvil-libero-replay` (GT replay
+of any dataset/action-type/mode combination) and `anvil-eval-libero
+--trace-dir=...` (per-step JSONL of raw policy output vs recovered native
+command vs live state).
+
 ## Status (2026-07-06)
 
 Core goal reached: all three arms (native / ee_abs / ee_rel) train with both

@@ -1,0 +1,22 @@
+# =============================================================================
+# LIBERO validation-harness spec — Experiment 1 gold reference: native delta command, Diffusion (100%)
+# Historical experiment re-expressed as a bench spec (see
+# packages/anvil_sim/README.md for the experiment's full story).
+# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_native_diffusion.yaml
+# =============================================================================
+
+name: task10-native-diffusion
+task_index: 10
+env_suite: libero_goal
+env_task_id: 8
+dataset_group: native
+train:
+  trainer: lerobot-train
+  policy_type: diffusion
+  steps: 30000
+  batch_size: 16
+  output_dir: model_zoo/native/libero-task10-native/diffusion
+eval:
+  action_type: native
+  control_mode: relative
+  n_episodes: 10
