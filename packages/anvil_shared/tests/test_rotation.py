@@ -5,6 +5,10 @@ import numpy as np
 import pytest
 
 from anvil_shared.rotation import (
+    axis_angle_to_matrix,
+    axis_angles_to_matrices,
+    matrices_to_axis_angles,
+    matrix_to_axis_angle,
     matrix_to_quat,
     matrix_to_rot6d,
     quat_to_matrix,
@@ -124,3 +128,78 @@ def test_matrix_to_quat_all_shepperd_branches():
         matrix_to_rot6d(np.eye(2))
     with pytest.raises(ValueError):
         rot6d_to_matrix(np.zeros(5))
+
+
+def _random_axis_angle(rng: np.random.Generator, max_angle: float = np.pi) -> np.ndarray:
+    axis = rng.standard_normal(3)
+    axis = axis / np.linalg.norm(axis)
+    angle = rng.uniform(0, max_angle)
+    return axis * angle
+
+
+def test_axis_angle_matrix_roundtrip():
+    rng = np.random.default_rng(1)
+    for _ in range(32):
+        aa = _random_axis_angle(rng)
+        R = axis_angle_to_matrix(aa)
+        np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
+        np.testing.assert_allclose(np.linalg.det(R), 1.0, atol=1e-10)
+        aa2 = matrix_to_axis_angle(R)
+        # Compare via the reconstructed matrix (angle/axis representation
+        # isn't unique at the boundary), not the raw axis-angle vector.
+        R2 = axis_angle_to_matrix(aa2)
+        np.testing.assert_allclose(R, R2, atol=1e-10)
+
+
+def test_axis_angle_zero_rotation():
+    aa = np.zeros(3)
+    R = axis_angle_to_matrix(aa)
+    np.testing.assert_allclose(R, np.eye(3), atol=1e-12)
+    np.testing.assert_allclose(matrix_to_axis_angle(np.eye(3)), np.zeros(3), atol=1e-12)
+
+
+def test_axis_angle_near_pi_is_numerically_stable():
+    """Regression test for the LIBERO dataset's dominant regime: a downward-
+    facing gripper is a rotation of ~pi radians from identity. The direct
+    Rodrigues matrix<->axis-angle formulas are ill-conditioned here; this
+    guards the quaternion-routed implementation actually used."""
+    real_libero_sample = np.array([3.1407692432403564, 0.0017593271331861615, -0.08994418382644653])
+    R = axis_angle_to_matrix(real_libero_sample)
+    np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
+    aa2 = matrix_to_axis_angle(R)
+    R2 = axis_angle_to_matrix(aa2)
+    np.testing.assert_allclose(R, R2, atol=1e-10)
+
+    exactly_pi = np.array([np.pi, 0.0, 0.0])
+    R_pi = axis_angle_to_matrix(exactly_pi)
+    np.testing.assert_allclose(R_pi, np.diag([1.0, -1.0, -1.0]), atol=1e-10)
+
+
+def test_axis_angle_known_value_90_degrees_z():
+    """90° about Z as axis-angle == same rotation as the quaternion known-value test."""
+    aa = np.array([0.0, 0.0, np.pi / 2])
+    R = axis_angle_to_matrix(aa)
+    expected = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=float)
+    np.testing.assert_allclose(R, expected, atol=1e-10)
+
+
+def test_axis_angles_to_matrices_batch_matches_single():
+    rng = np.random.default_rng(2)
+    aas = np.stack([_random_axis_angle(rng) for _ in range(16)])
+    Rs_batch = axis_angles_to_matrices(aas)
+    for i, aa in enumerate(aas):
+        np.testing.assert_allclose(Rs_batch[i], axis_angle_to_matrix(aa), atol=1e-12)
+
+    aas_back = matrices_to_axis_angles(Rs_batch)
+    Rs_back = axis_angles_to_matrices(aas_back)
+    np.testing.assert_allclose(Rs_batch, Rs_back, atol=1e-10)
+
+
+def test_axis_angles_to_matrices_supports_leading_batch_dims():
+    rng = np.random.default_rng(3)
+    aas = rng.standard_normal((4, 5, 3)) * 0.5
+    Rs = axis_angles_to_matrices(aas)
+    assert Rs.shape == (4, 5, 3, 3)
+    aas_back = matrices_to_axis_angles(Rs)
+    Rs_back = axis_angles_to_matrices(aas_back)
+    np.testing.assert_allclose(Rs, Rs_back, atol=1e-10)

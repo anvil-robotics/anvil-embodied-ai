@@ -15,6 +15,18 @@ This is preferred over Euler / quaternion for regression targets in
 diffusion policies because it has no discontinuities and is easy to
 reconstruct (Gram-Schmidt of the first two columns + cross product for
 the third).
+
+Axis-angle (a.k.a. rotation vector) encodes a rotation as a single 3-vector
+whose direction is the rotation axis and whose norm is the rotation angle
+(radians). This is the convention robosuite/LIBERO use for their
+end-effector orientation state and action. The axis-angle <-> matrix
+functions here are implemented via the quaternion round-trip
+(:func:`matrix_to_quat`/:func:`quat_to_matrix`) rather than the textbook
+Rodrigues formula directly, because the direct matrix<->axis-angle formulas
+have a numerically ill-conditioned branch near angle=pi (exactly the regime
+LIBERO's data lives in — a downward-facing gripper is ~pi rotation from
+identity) which Shepperd's method (already used for quaternions here)
+already handles robustly.
 """
 from __future__ import annotations
 
@@ -239,3 +251,95 @@ def rot6ds_to_matrices(r6ds) -> np.ndarray:
 
     b3 = np.cross(b1, b2)  # (..., 3)
     return np.stack([b1, b2, b3], axis=-1)  # (..., 3, 3)
+
+
+# =============================================================================
+# Axis-angle utilities (robosuite / LIBERO convention)
+# =============================================================================
+
+
+def _quat_to_axis_angle(quat_xyzw) -> np.ndarray:
+    """Quaternion ``[x, y, z, w]`` -> axis-angle 3-vector (angle = norm, radians)."""
+    q = np.asarray(quat_xyzw, dtype=float).reshape(-1)
+    n = np.linalg.norm(q)
+    if n > 0:
+        q = q / n
+    qxyz, qw = q[:3], q[3]
+    # Canonicalize to the qw >= 0 hemisphere so the recovered angle stays in
+    # [0, pi] (a quaternion and its negation represent the same rotation).
+    if qw < 0:
+        qxyz, qw = -qxyz, -qw
+    sin_half = np.linalg.norm(qxyz)
+    angle = 2.0 * np.arctan2(sin_half, qw)
+    if sin_half < 1e-10:
+        return np.zeros(3, dtype=float)
+    return (qxyz / sin_half) * angle
+
+
+def _axis_angle_to_quat(aa) -> np.ndarray:
+    """Axis-angle 3-vector (angle = norm, radians) -> quaternion ``[x, y, z, w]``."""
+    v = np.asarray(aa, dtype=float).reshape(-1)
+    angle = np.linalg.norm(v)
+    if angle < 1e-10:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
+    axis = v / angle
+    half = angle / 2.0
+    return np.array([*(axis * np.sin(half)), np.cos(half)], dtype=float)
+
+
+def matrix_to_axis_angle(R) -> np.ndarray:
+    """Convert a 3×3 rotation matrix to an axis-angle 3-vector.
+
+    Routed through :func:`matrix_to_quat` (Shepperd's method) for numerical
+    stability near angle=pi rather than the direct Rodrigues inverse.
+    """
+    return _quat_to_axis_angle(matrix_to_quat(R))
+
+
+def axis_angle_to_matrix(aa) -> np.ndarray:
+    """Convert an axis-angle 3-vector to a 3×3 rotation matrix."""
+    return quat_to_matrix(_axis_angle_to_quat(aa))
+
+
+def matrices_to_axis_angles(Rs) -> np.ndarray:
+    """Batch counterpart of :func:`matrix_to_axis_angle`. Supports arbitrary leading dims."""
+    Rs = np.asarray(Rs, dtype=float)
+    if Rs.shape[-2:] != (3, 3):
+        raise ValueError(f"matrices_to_axis_angles: last two dims must be (3,3), got {Rs.shape}")
+    quats = matrices_to_quats(Rs)  # (..., 4)
+    return _quats_to_axis_angles(quats)
+
+
+def axis_angles_to_matrices(aas) -> np.ndarray:
+    """Batch counterpart of :func:`axis_angle_to_matrix`. Supports arbitrary leading dims."""
+    return quats_to_matrices(_axis_angles_to_quats(aas))
+
+
+def _quats_to_axis_angles(quats) -> np.ndarray:
+    q = np.asarray(quats, dtype=float)
+    n = np.linalg.norm(q, axis=-1, keepdims=True)
+    q = q / np.where(n > 0, n, 1.0)
+    qxyz, qw = q[..., :3], q[..., 3]
+    flip = qw < 0
+    qxyz = np.where(flip[..., None], -qxyz, qxyz)
+    qw = np.where(flip, -qw, qw)
+    sin_half = np.linalg.norm(qxyz, axis=-1)
+    angle = 2.0 * np.arctan2(sin_half, qw)
+    safe_sin_half = np.where(sin_half > 1e-10, sin_half, 1.0)
+    axis = qxyz / safe_sin_half[..., None]
+    aa = axis * angle[..., None]
+    return np.where((sin_half > 1e-10)[..., None], aa, 0.0)
+
+
+def _axis_angles_to_quats(aas) -> np.ndarray:
+    v = np.asarray(aas, dtype=float)
+    angle = np.linalg.norm(v, axis=-1, keepdims=True)
+    safe_angle = np.where(angle > 1e-10, angle, 1.0)
+    axis = v / safe_angle
+    half = angle / 2.0
+    qxyz = axis * np.sin(half)
+    qw = np.cos(half)
+    quat = np.concatenate([qxyz, qw], axis=-1)
+    identity = np.zeros(quat.shape, dtype=float)
+    identity[..., 3] = 1.0
+    return np.where((angle > 1e-10), quat, identity)

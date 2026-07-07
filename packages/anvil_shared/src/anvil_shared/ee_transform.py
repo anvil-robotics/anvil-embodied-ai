@@ -15,9 +15,15 @@ Bimanual: state (16,), action (20,) — left arm first, right arm second.
 Public API
 ----------
 n_arms_from_dims(state_dim, action_dim)      → int
-ee_rel_forward(action_abs, state)            → np.ndarray   abs → rel action (training)
-ee_rel_inverse(action_rel, state)            → np.ndarray   rel → abs action (inference/eval)
+ee_rel_forward(action_abs, state)            → np.ndarray   abs → rel action (training), UMI body-frame
+ee_rel_inverse(action_rel, state)            → np.ndarray   rel → abs action (inference/eval), UMI body-frame
+ee_rel_world_forward(action_abs, state)      → np.ndarray   abs → rel action, WORLD frame (experimental —
+                                                              not part of the ee_abs/ee_rel contract, see
+                                                              anvil_trainer.transforms.EERelWorldTransform)
+ee_rel_world_inverse(action_rel, state)      → np.ndarray   rel → abs action, WORLD frame (experimental)
 ee_obs_rel_forward(obs_abs, anchor)          → np.ndarray   abs obs (8n) → rel obs (10n)
+ee_obs_rel_world_forward(obs_abs, anchor)    → np.ndarray   abs obs (8n) → rel obs (10n), WORLD frame
+                                                              (experimental, see ee_rel_world_forward)
 ee_obs_abs_forward(obs_abs)                  → np.ndarray   abs obs (8n quat) → abs obs (10n rot6d)
 ee_action_to_poses(action_abs, n_arms)       → list[dict]   for CommandedEEPose
 ee_rot6d_to_quat_layout(actions_10)         → np.ndarray   (T,10n) rot6d → (T,8n) quat
@@ -203,6 +209,184 @@ def ee_rel_inverse(
 
         result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_abs)
         # gripper unchanged
+
+    return result
+
+
+def ee_rel_world_forward(
+    action_abs: np.ndarray,
+    state: np.ndarray,
+) -> np.ndarray:
+    """Convert absolute EE actions to SE(3)-relative representation, WORLD frame.
+
+    Experimental variant of :func:`ee_rel_forward` used to isolate whether
+    UMI's body-frame translation choice (vs a world-frame delta) explains
+    part of ee_rel's closed-loop performance gap in the anvil-sim LIBERO
+    benchmark — NOT part of the ee_abs/ee_rel production contract. Unlike
+    ``ee_rel_forward``, translation is NOT projected into the reference
+    state's frame, and rotation composition order matches the WORLD-frame
+    delta convention used elsewhere for calibration
+    (``R_delta_world = R_target @ R_current.T``), not UMI's body-frame
+    ``R_state.T @ R_action``.
+
+    Per arm:
+        world_delta = act_xyz - state_xyz        (world-frame translation, no projection)
+        delta_rot6d = matrices_to_rot6d(R_action @ R_state.T)
+        gripper     = act_gripper  (passthrough)
+
+    Parameters
+    ----------
+    action_abs, state:
+        Same shapes/conventions as :func:`ee_rel_forward`.
+
+    Returns
+    -------
+    np.ndarray
+        Relative actions with the same shape as ``action_abs``.
+    """
+    action_abs = np.asarray(action_abs, dtype=np.float64)
+    state = np.asarray(state, dtype=np.float64)
+
+    action_dim = action_abs.shape[-1]
+    state_dim = state.shape[-1]
+    n_arms = n_arms_from_dims(state_dim, action_dim)
+
+    result = action_abs.copy()
+    per_sample_state = state.ndim > 1
+
+    for arm in range(n_arms):
+        s0 = arm * EE_STATE_DIM_PER_ARM
+        a0 = arm * EE_ACTION_DIM_PER_ARM
+
+        state_xyz = state[..., s0:s0 + 3]
+        state_quat = state[..., s0 + 3:s0 + 7]
+        world_delta = action_abs[..., a0:a0 + 3] - state_xyz  # (..., 3) -- no frame projection
+
+        act_r6d = action_abs[..., a0 + 3:a0 + 9]
+        Rs_action = rot6ds_to_matrices(act_r6d)
+
+        if per_sample_state:
+            Rs_state = quats_to_matrices(state_quat)
+            Rs_state_T = Rs_state.swapaxes(-2, -1)
+            Rs_rel = Rs_action @ Rs_state_T  # world-frame: R_delta_world = R_target @ R_current.T
+        else:
+            R_state = quat_to_matrix(state_quat)
+            Rs_rel = Rs_action @ R_state.T
+
+        result[..., a0:a0 + 3] = world_delta
+        result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_rel)
+        # gripper unchanged (already copied via .copy())
+
+    return result
+
+
+def ee_rel_world_inverse(
+    action_rel: np.ndarray,
+    state: np.ndarray,
+) -> np.ndarray:
+    """Restore world-frame SE(3)-relative EE actions to absolute representation.
+
+    Exact inverse of :func:`ee_rel_world_forward`.
+
+    Per arm:
+        abs_xyz     = state_xyz + world_delta
+        R_abs       = R_rel @ R_state   (since R_rel = R_target @ R_state.T)
+        abs_rot6d   = matrices_to_rot6d(R_abs)
+        gripper     = rel_gripper  (passthrough)
+
+    Parameters
+    ----------
+    action_rel, state:
+        Same shapes/conventions as :func:`ee_rel_inverse`.
+
+    Returns
+    -------
+    np.ndarray
+        Absolute EE actions (rot6d encoded) with the same shape as ``action_rel``.
+    """
+    action_rel = np.asarray(action_rel, dtype=np.float64)
+    state = np.asarray(state, dtype=np.float64)
+
+    action_dim = action_rel.shape[-1]
+    state_dim = state.shape[-1]
+    n_arms = n_arms_from_dims(state_dim, action_dim)
+
+    result = action_rel.copy()
+    per_sample_state = state.ndim > 1
+
+    for arm in range(n_arms):
+        s0 = arm * EE_STATE_DIM_PER_ARM
+        a0 = arm * EE_ACTION_DIM_PER_ARM
+
+        state_xyz = state[..., s0:s0 + 3]
+        state_quat = state[..., s0 + 3:s0 + 7]
+        world_delta = action_rel[..., a0:a0 + 3]  # already world-frame, no un-projection needed
+
+        rel_r6d = action_rel[..., a0 + 3:a0 + 9]
+        Rs_rel = rot6ds_to_matrices(rel_r6d)
+
+        if per_sample_state:
+            Rs_state = quats_to_matrices(state_quat)
+            Rs_abs = Rs_rel @ Rs_state  # R_abs = R_rel @ R_state
+        else:
+            R_state = quat_to_matrix(state_quat)
+            Rs_abs = Rs_rel @ R_state
+
+        result[..., a0:a0 + 3] = world_delta + state_xyz
+        result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_abs)
+        # gripper unchanged
+
+    return result
+
+
+def ee_obs_rel_world_forward(obs_abs: np.ndarray, anchor: np.ndarray) -> np.ndarray:
+    """World-frame counterpart of :func:`ee_obs_rel_forward`, for the
+    experimental ``ee_rel_world`` action type.
+
+    When ``obs_abs == anchor`` (the self-anchored single-step-observation
+    case used at eval time, see ``anvil_sim.libero_processor.AnvilEEObsProcessorStep``)
+    this is mathematically IDENTICAL to ``ee_obs_rel_forward`` (both reduce to
+    zero translation + identity rotation regardless of frame convention).
+    It only differs from ``ee_obs_rel_forward`` for genuinely distinct
+    obs/anchor pairs — i.e. the multi-step-observation stats computation in
+    ``anvil_trainer.patches`` when ``n_obs_steps > 1`` (Diffusion Policy).
+
+    Per arm:
+        world_delta = obs_xyz - anchor_xyz        (no frame projection)
+        rel_rot6d   = matrices_to_rot6d(R_obs @ R_anchor.T)
+        gripper     = obs_gripper  (kept absolute)
+    """
+    obs_abs = np.asarray(obs_abs, dtype=np.float64)
+    anchor = np.asarray(anchor, dtype=np.float64)
+
+    n_arms = anchor.shape[-1] // EE_STATE_DIM_PER_ARM
+    out_shape = obs_abs.shape[:-1] + (n_arms * EE_ACTION_DIM_PER_ARM,)
+    result = np.empty(out_shape, dtype=np.float64)
+    per_sample_anchor = anchor.ndim > 1
+
+    for arm in range(n_arms):
+        s0 = arm * EE_STATE_DIM_PER_ARM
+        a0 = arm * EE_ACTION_DIM_PER_ARM
+
+        obs_xyz = obs_abs[..., s0:s0 + 3]
+        obs_quat = obs_abs[..., s0 + 3:s0 + 7]
+        obs_grip = obs_abs[..., s0 + 7:s0 + 8]
+        anchor_xyz = anchor[..., s0:s0 + 3]
+        anchor_quat = anchor[..., s0 + 3:s0 + 7]
+
+        Rs_obs = quats_to_matrices(obs_quat)
+        world_delta = obs_xyz - anchor_xyz  # no frame projection
+
+        if per_sample_anchor:
+            Rs_anchor = quats_to_matrices(anchor_quat)
+            Rs_rel = Rs_obs @ Rs_anchor.swapaxes(-2, -1)  # world-frame: R_obs @ R_anchor.T
+        else:
+            R_anchor = quat_to_matrix(anchor_quat)
+            Rs_rel = Rs_obs @ R_anchor.T
+
+        result[..., a0:a0 + 3] = world_delta
+        result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_rel)
+        result[..., a0 + 9:a0 + 10] = obs_grip
 
     return result
 
