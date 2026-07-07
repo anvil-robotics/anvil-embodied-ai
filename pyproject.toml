@@ -46,6 +46,7 @@ members = [
     "packages/anvil_eval",
     "packages/anvil_eval_ros",
     "packages/anvil_shared",
+    "packages/anvil_sim",
 ]
 
 # PyTorch index — required for torch+cu* packages with bundled CUDA libs.
@@ -84,7 +85,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["mcap_converter", "anvil_trainer", "anvil_eval"]
+known-first-party = ["mcap_converter", "anvil_trainer", "anvil_eval", "anvil_sim"]
 
 [tool.pyright]
 pythonVersion = "3.12"
