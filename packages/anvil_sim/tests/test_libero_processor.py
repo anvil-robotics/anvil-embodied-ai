@@ -633,6 +633,81 @@ def test_zero_cal_rejects_invalid_gripper_mode():
         ZeroCalActionProcessorStep(mode="abs", obs_step=obs_step, gripper_mode="bogus")
 
 
+# =============================================================================
+# reset_episode_state -- real bug #5: the chunk-anchor call counter ran on
+# ACROSS episodes while the policy replans from episode-local step 0 after
+# every policy.reset(). Unless an episode's length was a multiple of
+# n_action_steps, every episode after the first reconstructed targets
+# against an anchor captured at the wrong time (initially one from the
+# PREVIOUS episode's scene). Exposed by the GT-replay diagnostic: world-n0
+# replay at n_action_steps=100 scored 20% where the forward/inverse
+# identity predicts parity with abs (80%).
+# =============================================================================
+
+
+def _rel_world_step(n_action_steps):
+    obs_step = AnvilEEObsProcessorStep(action_type="ee_rel")
+    step = ZeroCalActionProcessorStep(
+        mode="rel_world", obs_step=obs_step, n_action_steps=n_action_steps, deliver="absolute"
+    )
+    return obs_step, step
+
+
+def test_bug5_regression_anchor_desync_across_episodes():
+    """Without reset_episode_state, an episode whose length is NOT a
+    multiple of n_action_steps leaves the counter mid-chunk, so the next
+    episode's first action is reconstructed against the PREVIOUS episode's
+    anchor. With the reset, the next episode re-anchors at its own start."""
+    ep1_state = np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.02], dtype=np.float32)
+    ep2_state = np.array([0.7, -0.4, 0.9, 0.0, 0.0, 0.0, 1.0, 0.02], dtype=np.float32)
+    identity_rel = np.concatenate(
+        [np.zeros(3), matrix_to_rot6d(np.eye(3)), [0.02]]
+    ).astype(np.float32)
+
+    # --- WITHOUT the fix: broken behavior (documented) ---
+    obs_step, step = _rel_world_step(n_action_steps=2)
+    obs_step.last_anvil_state = ep1_state
+    step.action(torch.from_numpy(identity_rel))  # ep1 step 0: anchors at ep1_state
+    # episode 1 ends after ONE step (not a multiple of 2); episode 2 begins:
+    obs_step.last_anvil_state = ep2_state
+    native = step.action(torch.from_numpy(identity_rel)).numpy()[0]
+    # counter=1 -> NOT treated as chunk start -> stale ep1 anchor is used:
+    np.testing.assert_allclose(native[:3], ep1_state[:3], atol=1e-6)  # the bug
+
+    # --- WITH the fix ---
+    obs_step, step = _rel_world_step(n_action_steps=2)
+    obs_step.last_anvil_state = ep1_state
+    step.action(torch.from_numpy(identity_rel))
+    step.reset_episode_state()  # what the rollout wrapper now does
+    obs_step.last_anvil_state = ep2_state
+    native = step.action(torch.from_numpy(identity_rel)).numpy()[0]
+    np.testing.assert_allclose(native[:3], ep2_state[:3], atol=1e-6)  # re-anchored
+
+
+def test_bug5_reset_clears_running_target_too():
+    obs_step = AnvilEEObsProcessorStep(action_type="ee_abs")
+    step = ZeroCalActionProcessorStep(
+        mode="rel_world_seq", obs_step=obs_step, n_action_steps=2, deliver="absolute"
+    )
+    obs_step.last_anvil_state = np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.02], dtype=np.float32)
+    delta = np.concatenate([[0.01, 0.0, 0.0], matrix_to_rot6d(np.eye(3)), [0.02]]).astype(np.float32)
+    step.action(torch.from_numpy(delta))
+    assert step._running_target is not None
+    step.reset_episode_state()
+    assert step._running_target is None and step._call_count == 0 and step._chunk_anchor is None
+
+
+def test_bug5_anvil_ee_step_reset():
+    obs_step = AnvilEEObsProcessorStep(action_type="ee_rel")
+    step = AnvilEEActionProcessorStep(action_type="ee_rel", obs_step=obs_step, n_action_steps=2)
+    obs_step.last_anvil_state = np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.02], dtype=np.float32)
+    rel = np.concatenate([np.zeros(3), matrix_to_rot6d(np.eye(3)), [0.02]]).astype(np.float32)
+    step.action(torch.from_numpy(rel))
+    assert step._call_count == 1 and step._chunk_anchor is not None
+    step.reset_episode_state()
+    assert step._call_count == 0 and step._chunk_anchor is None
+
+
 def test_zero_cal_rejects_invalid_deliver():
     obs_step = AnvilEEObsProcessorStep(action_type="ee_abs")
     with pytest.raises(ValueError, match="deliver"):

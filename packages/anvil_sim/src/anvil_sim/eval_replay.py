@@ -214,6 +214,12 @@ def replay(
             provider = GtActionProvider(
                 mode=_provider_mode(action_type), obs_step=obs_step, n_action_steps=n_action_steps
             )
+            # Real bug #5 regression guard: the action step's chunk counter
+            # must re-align at every episode start, exactly like the policy
+            # eval's rollout wrapper does (see eval_libero_ee).
+            for step in env_post.steps:
+                if hasattr(step, "reset_episode_state"):
+                    step.reset_episode_state()
             observation, _ = env.reset(seed=ep)
             success = False
             init_state_pos_err = None

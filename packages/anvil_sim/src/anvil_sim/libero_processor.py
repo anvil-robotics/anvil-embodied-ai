@@ -394,6 +394,19 @@ class AnvilEEActionProcessorStep(ActionProcessorStep):
                 f"action_type must be 'ee_abs', 'ee_rel', or 'ee_delta', got {self.action_type!r}"
             )
 
+    def reset_episode_state(self) -> None:
+        """Re-align chunk tracking with the policy's own replan schedule —
+        MUST be called at every episode start (real bug #5): the policy
+        replans at episode-local step 0 after ``policy.reset()``, but this
+        step's call counter used to run on ACROSS episodes, so unless an
+        episode's length happened to be a multiple of ``n_action_steps``,
+        every episode after the first reconstructed targets against a chunk
+        anchor captured at the WRONG time (initially even one from the
+        previous episode's scene). See ``eval_libero_ee``'s rollout wrapper.
+        """
+        self._call_count = 0
+        self._chunk_anchor = None
+
     def action(self, action: torch.Tensor) -> torch.Tensor:
         if self.obs_step.last_anvil_state is None:
             raise RuntimeError(
@@ -562,6 +575,15 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
             raise ValueError(
                 f"gripper_mode must be 'target_qpos' or 'native_cmd', got {self.gripper_mode!r}"
             )
+
+    def reset_episode_state(self) -> None:
+        """Re-align chunk tracking with the policy's replan schedule at every
+        episode start — see AnvilEEActionProcessorStep.reset_episode_state
+        (real bug #5). Also clears the seq modes' running-target accumulator,
+        which otherwise carried the previous episode's pose into the next."""
+        self._call_count = 0
+        self._chunk_anchor = None
+        self._running_target = None
 
     def action(self, action: torch.Tensor) -> torch.Tensor:
         if self.obs_step.last_anvil_state is None:

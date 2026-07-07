@@ -266,10 +266,46 @@ def _make_anvil_env_pre_post_processors(
     return env_preprocessor, env_postprocessor
 
 
+def _install_episode_reset_hook() -> None:
+    """Wrap ``lerobot_eval.rollout`` so every episode start also resets our
+    stateful env processors — REAL BUG #5: ``rollout()`` calls
+    ``policy.reset()`` (the policy replans from episode-local step 0) but
+    never resets the env pre/post processors, whose chunk-anchor call
+    counters therefore ran on ACROSS episodes. Unless an episode's length
+    happened to be a multiple of ``n_action_steps``, every episode after
+    the first reconstructed targets against an anchor captured at the wrong
+    time — initially one from the PREVIOUS episode's scene. All
+    chunk-anchored conditions (ee_rel, zerocal rel modes, goal n-0/seq
+    modes) measured before this fix understate their true success from
+    episode 2 onward. Exposed by the GT-replay diagnostic: world-n0 replay
+    at n_action_steps=100 scored 20% where the forward/inverse identity
+    predicts parity with the abs condition (80%).
+
+    Idempotent; patches the module global so ``eval_policy`` (same module)
+    picks it up.
+    """
+    import lerobot.scripts.lerobot_eval as _le
+
+    if getattr(_le.rollout, "_anvil_episode_reset_hook", False):
+        return
+    _orig_rollout = _le.rollout
+
+    def _rollout_with_processor_reset(env, policy, env_preprocessor, env_postprocessor, *args, **kwargs):
+        for pipeline in (env_preprocessor, env_postprocessor):
+            for step in getattr(pipeline, "steps", []):
+                if hasattr(step, "reset_episode_state"):
+                    step.reset_episode_state()
+        return _orig_rollout(env, policy, env_preprocessor, env_postprocessor, *args, **kwargs)
+
+    _rollout_with_processor_reset._anvil_episode_reset_hook = True
+    _le.rollout = _rollout_with_processor_reset
+
+
 @parser.wrap()
 def eval_main(cfg: EvalPipelineConfig, action_type: str, trace_dir: Path | None = None) -> None:
     logging.info(pformat(asdict(cfg)))
     logging.info("action_type=%s trace_dir=%s", action_type, trace_dir)
+    _install_episode_reset_hook()
 
     device = get_safe_torch_device(cfg.policy.device, log=True)
     torch.backends.cudnn.benchmark = True
