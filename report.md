@@ -2,6 +2,19 @@
 
 _Anvil embodied-AI · worktree `ee-libero-benchmark` · task TASK-006_
 
+> **MAJOR CORRECTION (Experiment 8, same day).** §4's "negative result" was
+> WRONG. A new GT-replay diagnostic tool caught a 4th real eval-path bug
+> (gripper semantics: the `goalabs` family stores LIBERO's native ±1 gripper
+> COMMAND, but the bang-bang comparator expected qpos-scale targets — the
+> gripper never closed, forcing 0% regardless of policy quality). With the
+> fix, the SAME checkpoints re-evaluated: `goal-abs` 0%→**100%** (the best
+> ACT result in the whole benchmark, above native's 80%), `world-n0` 0%→40%,
+> `hand-n0` 0%→30%. The formal `state+native_delta` target with
+> recovered-delta relative delivery is not unlearnable — it is the strongest
+> formulation tested so far. §4/§5/§6 below are kept as originally written
+> for the reasoning trail; read them together with this correction and
+> `packages/anvil_sim/README.md`'s "Experiment 8" section.
+
 ## 1. What this effort is
 
 Validate Anvil's end-effector (EE) space training + closed-loop inference pipeline
@@ -28,7 +41,8 @@ untouched **native** LIBERO format as the gold reference.
 | 4 | `ee_delta` | world-frame consecutive delta, rot6d, calibrated | 10% | — |
 | 5 | `native_rot6d` | native scale, rotation re-encoded axis-angle→rot6d, zero-cal | 60% | 100%* |
 | 6 | zero-cal re-run | act-from-obs targets, `control_mode="absolute"`, no calibration | abs 20% / world-n0 20% / hand-n0† 10% / world-seq 10% | (not run) |
-| 7 | `goal` family | formal `state+native_delta` targets (see §4) | abs 0% / world-n0 0% / hand-n0 0% / world-seq 10% / hand-seq 10% | (not run) |
+| 7 | `goal` family | formal `state+native_delta` targets (see §4) | ~~abs 0% / world-n0 0% / hand-n0 0%~~ / world-seq 10% / hand-seq 10% | (not run) |
+| 8 | `goal` family, eval fixed | same checkpoints, gripper-semantics bug #4 fixed (see correction banner) | **abs 100%** / world-n0 40% / hand-n0 30% | (not run) |
 
 \* native_rot6d Diffusion reached 100% in a follow-up run.
 † Exp-6 naming used `Rel-rot6d-*`; mapped here to the world/hand + n-0/n-(n-1) grid.

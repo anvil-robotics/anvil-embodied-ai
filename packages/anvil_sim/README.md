@@ -259,25 +259,81 @@ out: it clamps rot6d dims to their already-natural `[-1,1]` range
 regardless of whether the underlying rotation is near-identity, so it
 behaves the same for `ee_abs`'s original targets and this experiment's).
 
-**Core negative finding**: the 3 conditions built on the FORMAL
-`state[t]+native_delta[t]` composition all get exactly 0%, while the 2
-conditions built on REAL achieved-state deltas (`ee_delta`'s own
-convention, already used successfully since Experiment 4) keep their
-established non-zero numbers. This is the opposite of what motivated this
-experiment — the act-from-obs "target ≠ achieved" mismatch flagged in
-Experiment 6 turns out NOT to be the dominant problem; **the formal
+~~**Core negative finding**: the 3 conditions built on the FORMAL
+`state[t]+native_delta[t]` composition all get exactly 0% ... **the formal
 composite goal itself is a target a network struggles to fit well enough
-to close the loop**, plausibly because it jumps around by the raw per-step
-command magnitude each frame (not a smooth physical trajectory like
-`state[t+1]`), so small regression errors get amplified when the current
-real state is subtracted back out to recover a usable delta. This
-**invalidates the premise this experiment set out to fix** — act-from-obs's
-`state[t+1]` (already used by `ee_abs`/`ee_rel`/`ee_delta`) remains the only
-target definition that has produced non-zero closed-loop success across
-every experiment run so far. Not yet investigated further (e.g. inspecting
-eval videos for the `goalabs` conditions, or checking per-step recovered
-action magnitudes against a live rollout) — flagged as a possible follow-up,
-not resolved here.
+to close the loop**~~ — **THIS CONCLUSION WAS WRONG. See Experiment 8.**
+The 0% had a mechanical eval-path cause (real bug #4, gripper semantics),
+not a learnability cause. Kept struck-through rather than deleted so the
+reasoning trail stays honest.
+
+### Experiment 8: GT-replay diagnostic — bug #4 found, Experiment 7 conclusion REVERSED
+
+To stop diagnosing surprising closed-loop numbers by guesswork, a new tool
+was added: `anvil-libero-replay` (`eval_replay.py`) replays the DATASET'S
+OWN ground-truth actions through the exact eval processor chain — no policy
+involved. If the ground truth itself cannot succeed through a treatment's
+eval path, no checkpoint ever will. (`LiberoEnv` resets to fixed per-task
+init states tied to the reset index, so dataset episode k replays against a
+near-matched initial condition — measured `init_state_pos_err` ~1–3 cm.)
+
+On its FIRST run the tool caught **real bug #4**: the `goalabs` family
+stores the gripper as LIBERO's native ±1 COMMAND (`native_delta_to_goal`
+passes `native_delta7[6]` through), while `abs`/`rel`/`delta` store a
+qpos-scale TARGET (~0.002–0.04). The delivery functions' bang-bang
+comparator `abs(target) < abs(current_qpos)` is only meaningful for the
+qpos convention — fed ±1 it is ALWAYS False, so **the gripper never closed
+and every goalabs rollout failed at exactly 0% regardless of policy
+quality.** All the float-precision offline validation missed it because it
+compared only dims 0–8 (pos+rot), never the gripper against realistic qpos
+values. Fix: `gripper_mode="native_cmd"` on the delivery functions /
+`ZeroCalActionProcessorStep`, wired via the `zerocal_goal_{abs,world_n0,
+hand_n0}` registry entries.
+
+**GT-replay validation** (10 episodes, task_index=10):
+
+| Replay path | pc_success |
+|---|---|
+| `native` (baseline ceiling for open-loop replay) | 60% |
+| `goalabs` via relative delivery, BEFORE fix | 0% |
+| `goalabs` via relative delivery, AFTER fix | **80%** |
+| `goalabs` world-n0, AFTER fix | **80%** |
+
+Replay after the fix exceeds the native baseline — expected: the recovery
+step subtracts the LIVE state, giving GT replay a built-in drift correction
+toward the demo trajectory that pure open-loop native replay lacks.
+
+**Corrected Experiment 7 results** — the same checkpoints (training was
+always correct; the bug was eval-only), re-evaluated in minutes with the
+fixed path:
+
+| Condition | Broken eval | Fixed eval |
+|---|---|---|
+| `abs` (formal goal, relative delivery) | 0% | **100%** |
+| `world-n0` | 0% | **40%** |
+| `hand-n0` | 0% | **30%** |
+
+**`goal-abs` at 100% is the best ACT result in this entire benchmark —
+above native's 80%.** The formal `state[t]+native_delta[t]` target with
+recovered-delta relative-mode delivery is not merely learnable; it is (on
+this task, n=10) the strongest formulation tested. Note the framing against
+the action-space literature: this condition is an ABSOLUTE representation
+with DELTA execution — the "delta beats absolute" comparisons conflate
+representation with delivery, and this hybrid takes the best of both
+(drift-correcting absolute target, controller-native delta command).
+
+Two secondary replay findings, same session:
+
+- The absolute-mode "undershoot" hypothesis from Experiment 6 is REFUTED:
+  trace analysis of `delta`-family replay through `control_mode="absolute"`
+  shows the arm moving 1.48x MORE than the demo per step (1.27 m vs 0.86 m
+  path length) yet ending 0.675 m off-course — absolute delivery DIVERGES
+  in open loop rather than lagging. Absolute-mode delivery is dynamically
+  not equivalent to relative-mode delivery even with mathematically exact
+  per-step targets; the controller-level mechanism remains open.
+- `n-0` relativized variants (40%/30%) clearly underperform the plain
+  absolute target (100%) once the eval path is correct — anchor-relative
+  re-encoding costs, not helps, on this task.
 
 ### Real bug #1 (fixed): `ee_rel` chunk-anchor mismatch
 
