@@ -1,0 +1,25 @@
+# =============================================================================
+# LIBERO validation-harness spec — gold reference on the rotation-heavy task
+# Phase 3c contrast task: task_index=11 "put the wine bottle on the rack"
+# (libero_goal task_id=9) is the most ROTATION-HEAVY task in the suite
+# (rot_rms 0.0258 rad/step = 3.1x task 10's 0.0082, and the LOWEST pos_rms
+# 0.0059) — the deliberate contrast to rotation-light task 10, to test
+# whether the task-10 ranking (goal-abs > native > native_rot6d) holds when
+# rotation dominates.
+# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task11_native_act.yaml
+# =============================================================================
+
+name: task11-native-act
+task_index: 11
+env_suite: libero_goal
+env_task_id: 9
+dataset_group: native
+train:
+  trainer: lerobot-train
+  policy_type: act
+  steps: 50000
+  batch_size: 16
+eval:
+  action_type: native
+  control_mode: relative
+  n_episodes: 10
