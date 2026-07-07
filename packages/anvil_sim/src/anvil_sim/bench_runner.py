@@ -462,6 +462,18 @@ _STAGE_FNS = {
 # --------------------------------------------------------------------------- #
 
 
+def _clear_stage_cache(stage: str, spec: BenchSpec) -> None:
+    """Drop a stage's cached artifact so ``--force-stage`` actually re-runs it.
+
+    Several stages short-circuit on an existing artifact for the normal
+    idempotent path — ``stage_eval`` reuses ``eval_info.json`` if present. That
+    optimization silently defeats ``--force-stage eval`` (the stage function
+    reruns but returns the stale number), so when a stage is explicitly forced
+    we remove its cache first."""
+    if stage == "eval" and spec.eval_output_dir.exists():
+        shutil.rmtree(spec.eval_output_dir)
+
+
 def run_spec(spec: BenchSpec, from_stage: str | None = None, dry_run: bool = False,
              force_stages: list[str] | None = None) -> dict:
     status = _load_status(spec)
@@ -481,6 +493,8 @@ def run_spec(spec: BenchSpec, from_stage: str | None = None, dry_run: bool = Fal
         if dry_run:
             log.info("[%s] %s: DRY-RUN (not executed)", spec.name, stage)
             continue
+        if stage in force:
+            _clear_stage_cache(stage, spec)
         try:
             info = _STAGE_FNS[stage](spec)
         except Exception as exc:

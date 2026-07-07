@@ -107,6 +107,35 @@ def test_dry_run_executes_nothing(fake_stages):
     assert calls == []
 
 
+def test_force_stage_clears_eval_cache_so_it_reruns(fake_stages):
+    """--force-stage eval must drop the cached eval_info.json; otherwise
+    stage_eval reuses the stale number and the "rerun" is a silent no-op."""
+    calls, _, _ = fake_stages
+    spec = _spec()
+    run_spec(spec)  # first pass marks eval passed
+    stale = spec.eval_output_dir / "eval_info.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(json.dumps({"overall": {"pc_success": 10.0}}))
+    calls.clear()
+
+    run_spec(spec, from_stage="eval", force_stages=["eval"])
+    assert calls == ["eval", "record"]  # eval actually re-ran
+    assert not stale.exists()  # stale cache was cleared before the rerun
+
+
+def test_clear_stage_cache_only_touches_forced_eval(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    spec = _spec()
+    spec.eval_output_dir.mkdir(parents=True)
+    (spec.eval_output_dir / "eval_info.json").write_text("{}")
+
+    bench_runner._clear_stage_cache("train", spec)  # non-eval: no-op
+    assert spec.eval_output_dir.exists()
+
+    bench_runner._clear_stage_cache("eval", spec)  # eval: removed
+    assert not spec.eval_output_dir.exists()
+
+
 def test_record_upserts_ledger_and_regenerates_md(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     spec = _spec()
