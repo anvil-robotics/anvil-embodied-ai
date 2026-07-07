@@ -61,6 +61,7 @@ from lerobot.envs.factory import make_env
 from lerobot.envs.utils import close_envs
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 from lerobot.processor import PolicyProcessorPipeline
+from lerobot.processor.pipeline import ActionProcessorStep
 from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.device_utils import get_safe_torch_device
 from lerobot.utils.import_utils import register_third_party_plugins
@@ -77,13 +78,18 @@ from anvil_sim.libero_processor import (
 # absolute_native_action_from_target) of the 4 control-variable conditions —
 # NOT the same code path as the original scaled-delta ee_abs/ee_rel/ee_delta
 # (those remain available, unchanged, under their original --action-type
-# values for backward comparison against the pre-fix numbers). Maps each
-# CLI value to (obs_action_type, ZeroCalActionProcessorStep mode, deliver).
+# values for backward comparison against the pre-fix numbers). Maps each CLI
+# value to (obs_action_type, ZeroCalActionProcessorStep mode, deliver,
+# gripper_mode) — gripper_mode is "target_qpos" for datasets whose action
+# gripper is a qpos-scale target (abs/rel/delta families) and "native_cmd"
+# for the goalabs family, whose gripper is LIBERO's own +/-1 command (see
+# recovered_delta_native_action's docstring for the real bug this split
+# fixes).
 _ZERO_CAL_ACTION_TYPES = {
-    "zerocal_abs": ("ee_abs", "abs", "absolute"),
-    "zerocal_rel_world": ("ee_rel", "rel_world", "absolute"),
-    "zerocal_rel_hand": ("ee_rel", "rel_hand", "absolute"),
-    "zerocal_rel_world_seq": ("ee_abs", "rel_world_seq", "absolute"),
+    "zerocal_abs": ("ee_abs", "abs", "absolute", "target_qpos"),
+    "zerocal_rel_world": ("ee_rel", "rel_world", "absolute", "target_qpos"),
+    "zerocal_rel_hand": ("ee_rel", "rel_hand", "absolute", "target_qpos"),
+    "zerocal_rel_world_seq": ("ee_abs", "rel_world_seq", "absolute", "target_qpos"),
 }
 
 # 7th-round "goal" target family (see anvil_sim.libero_convert's module
@@ -109,11 +115,13 @@ _ZERO_CAL_ACTION_TYPES = {
 #   works above. world-seq REUSES the existing ee_delta checkpoint
 #   unchanged (no new dataset/training needed for it).
 _ZERO_CAL_GOAL_ACTION_TYPES = {
-    "zerocal_goal_abs": ("ee_abs", "abs", "relative"),
-    "zerocal_goal_world_n0": ("ee_rel", "rel_world", "relative"),
-    "zerocal_goal_hand_n0": ("ee_rel", "rel_hand", "relative"),
-    "zerocal_goal_world_seq": ("ee_abs", "rel_world_seq", "absolute"),
-    "zerocal_goal_hand_seq": ("ee_abs", "rel_hand_seq", "absolute"),
+    # goalabs family: gripper stored as native +/-1 command -> "native_cmd".
+    "zerocal_goal_abs": ("ee_abs", "abs", "relative", "native_cmd"),
+    "zerocal_goal_world_n0": ("ee_rel", "rel_world", "relative", "native_cmd"),
+    "zerocal_goal_hand_n0": ("ee_rel", "rel_hand", "relative", "native_cmd"),
+    # delta/delta-hand family: gripper stored as qpos-scale target.
+    "zerocal_goal_world_seq": ("ee_abs", "rel_world_seq", "absolute", "target_qpos"),
+    "zerocal_goal_hand_seq": ("ee_abs", "rel_hand_seq", "absolute", "target_qpos"),
 }
 _ZERO_CAL_ACTION_TYPES = {**_ZERO_CAL_ACTION_TYPES, **_ZERO_CAL_GOAL_ACTION_TYPES}
 
@@ -166,27 +174,102 @@ def _pop_action_type() -> str:
     raise ValueError(f"Missing required --action-type=<one of {_ALL_ACTION_TYPES}>")
 
 
-def _make_anvil_env_pre_post_processors(action_type: str, n_action_steps: int):
+def _pop_trace_dir() -> Path | None:
+    """Extract the optional --trace-dir=<path> from sys.argv (same custom-flag
+    convention as --action-type). When given, every rollout step appends one
+    JSONL record — {step, act_raw (policy output), native_cmd (what actually
+    went to the env), current_state8} — to <trace-dir>/trace.jsonl, so a
+    surprising closed-loop result can be diagnosed mechanically (e.g. compare
+    recovered native command magnitudes against the dataset's own action
+    distribution) instead of guessed at. Default off; zero behavior change."""
+    prefix = "--trace-dir="
+    for arg in list(sys.argv):
+        if arg.startswith(prefix):
+            sys.argv.remove(arg)
+            return Path(arg.split("=", 1)[1])
+    return None
+
+
+class _TraceTapStep(ActionProcessorStep):
+    """Two pipeline taps sharing one writer: the "raw" tap (before the Anvil
+    action step) buffers the policy's raw output; the "native" tap (after)
+    writes the paired JSONL record. Pure passthrough for the action itself."""
+
+    def __init__(self, writer: "_TraceWriter", role: str):
+        self._writer = writer
+        self._role = role
+
+    def action(self, action):
+        self._writer.record(self._role, action)
+        return action
+
+    def transform_features(self, features):
+        return features
+
+
+class _TraceWriter:
+    def __init__(self, trace_dir: Path, obs_step: AnvilEEObsProcessorStep):
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        self._f = open(trace_dir / "trace.jsonl", "w")
+        self._obs_step = obs_step
+        self._step = 0
+        self._pending_raw: list | None = None
+
+    def record(self, role: str, action) -> None:
+        arr = (action[0] if action.dim() > 1 else action).detach().cpu().numpy().tolist()
+        if role == "raw":
+            self._pending_raw = arr
+            return
+        state = self._obs_step.last_anvil_state
+        self._f.write(
+            json.dumps(
+                {
+                    "step": self._step,
+                    "act_raw": self._pending_raw,
+                    "native_cmd": arr,
+                    "current_state8": state.tolist() if state is not None else None,
+                }
+            )
+            + "\n"
+        )
+        self._step += 1
+        self._pending_raw = None
+
+    def close(self) -> None:
+        self._f.close()
+
+
+def _make_anvil_env_pre_post_processors(
+    action_type: str, n_action_steps: int, trace_dir: Path | None = None
+):
     if action_type in _ZERO_CAL_ACTION_TYPES:
-        obs_action_type, zero_cal_mode, deliver = _ZERO_CAL_ACTION_TYPES[action_type]
+        obs_action_type, zero_cal_mode, deliver, gripper_mode = _ZERO_CAL_ACTION_TYPES[action_type]
         obs_step = AnvilEEObsProcessorStep(action_type=obs_action_type)
         action_step = ZeroCalActionProcessorStep(
-            mode=zero_cal_mode, obs_step=obs_step, n_action_steps=n_action_steps, deliver=deliver
+            mode=zero_cal_mode,
+            obs_step=obs_step,
+            n_action_steps=n_action_steps,
+            deliver=deliver,
+            gripper_mode=gripper_mode,
         )
     else:
         obs_step = AnvilEEObsProcessorStep(action_type=action_type)
         action_step = AnvilEEActionProcessorStep(
             action_type=action_type, obs_step=obs_step, n_action_steps=n_action_steps
         )
+    post_steps: list = [action_step]
+    if trace_dir is not None:
+        writer = _TraceWriter(trace_dir, obs_step)
+        post_steps = [_TraceTapStep(writer, "raw"), action_step, _TraceTapStep(writer, "native")]
     env_preprocessor = PolicyProcessorPipeline(steps=[obs_step])
-    env_postprocessor = PolicyProcessorPipeline(steps=[action_step])
+    env_postprocessor = PolicyProcessorPipeline(steps=post_steps)
     return env_preprocessor, env_postprocessor
 
 
 @parser.wrap()
-def eval_main(cfg: EvalPipelineConfig, action_type: str) -> None:
+def eval_main(cfg: EvalPipelineConfig, action_type: str, trace_dir: Path | None = None) -> None:
     logging.info(pformat(asdict(cfg)))
-    logging.info("action_type=%s", action_type)
+    logging.info("action_type=%s trace_dir=%s", action_type, trace_dir)
 
     device = get_safe_torch_device(cfg.policy.device, log=True)
     torch.backends.cudnn.benchmark = True
@@ -218,7 +301,7 @@ def eval_main(cfg: EvalPipelineConfig, action_type: str) -> None:
     # The one line that differs from stock lerobot-eval: our own format
     # converters instead of the stock LiberoProcessorStep.
     env_preprocessor, env_postprocessor = _make_anvil_env_pre_post_processors(
-        action_type, n_action_steps=policy.config.n_action_steps
+        action_type, n_action_steps=policy.config.n_action_steps, trace_dir=trace_dir
     )
 
     with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
@@ -251,7 +334,8 @@ def main() -> None:
     init_logging()
     register_third_party_plugins()
     action_type = _pop_action_type()
-    eval_main(action_type=action_type)
+    trace_dir = _pop_trace_dir()
+    eval_main(action_type=action_type, trace_dir=trace_dir)
 
 
 if __name__ == "__main__":

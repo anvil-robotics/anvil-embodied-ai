@@ -128,6 +128,7 @@ def absolute_native_action_from_target(
     target_rot6d: np.ndarray,
     target_gripper: float,
     current_gripper: float,
+    gripper_mode: str = "target_qpos",
 ) -> np.ndarray:
     """Convert an absolute Anvil EE target directly into LIBERO's native
     7-dim action for ``env.control_mode="absolute"`` — ZERO calibration.
@@ -143,11 +144,23 @@ def absolute_native_action_from_target(
     R²=0.49) for the zero-calibration re-run of the ee_abs/ee_rel/ee_delta
     ablations — see ``ZeroCalActionProcessorStep``.
 
+    ``gripper_mode``: see :func:`recovered_delta_native_action` — the same
+    qpos-target vs native-command semantics split applies here (the
+    ``goalabs`` family stores +/-1 native commands, everything else stores
+    qpos-scale targets).
+
     Pure function (no torch/env dependency) so it can be unit-tested directly.
     """
     native_pos = target_pos  # metres, absolute mode takes it directly, no scale
     native_rot = matrix_to_axis_angle(rot6d_to_matrix(target_rot6d))  # radians, no scale
-    native_gripper = GRIPPER_CLOSE_CMD if abs(target_gripper) < abs(current_gripper) else GRIPPER_OPEN_CMD
+    if gripper_mode == "native_cmd":
+        native_gripper = float(np.clip(target_gripper, -1.0, 1.0))
+    elif gripper_mode == "target_qpos":
+        native_gripper = (
+            GRIPPER_CLOSE_CMD if abs(target_gripper) < abs(current_gripper) else GRIPPER_OPEN_CMD
+        )
+    else:
+        raise ValueError(f"gripper_mode must be 'target_qpos' or 'native_cmd', got {gripper_mode!r}")
     return np.concatenate([native_pos, native_rot, [native_gripper]]).astype(np.float32)
 
 
@@ -157,6 +170,7 @@ def recovered_delta_native_action(
     reconstructed_gripper: float,
     current_state: np.ndarray,
     current_gripper: float,
+    gripper_mode: str = "target_qpos",
 ) -> np.ndarray:
     """Recover a native-command-scale delta from a FORMAL "state + native
     delta" reconstruction (see ``anvil_sim.libero_convert.native_delta_to_goal``),
@@ -190,6 +204,22 @@ def recovered_delta_native_action(
     advanced past the first step of a chunk) is exactly the self-correction
     that makes n-0 anchoring closed-loop.
 
+    ``gripper_mode`` selects how ``reconstructed_gripper`` is interpreted —
+    a REAL BUG (the 4th of this benchmark, found by the GT-replay tool on
+    its first run) hid here: the ``goalabs`` dataset family stores the
+    gripper as LIBERO's native +/-1 COMMAND (``native_delta_to_goal``
+    passes ``native_delta7[6]`` through), while ``abs``/``rel``/``delta``
+    store a qpos-scale TARGET (~0.002-0.04). The original bang-bang
+    comparator ``abs(target) < abs(current_qpos)`` is only meaningful for
+    the qpos-scale convention; fed a +/-1 command it is ALWAYS False, so
+    the gripper never closes and every goalabs rollout fails at 0%
+    regardless of policy quality.
+
+    - ``"target_qpos"`` (default, original behavior): bang-bang against the
+      current gripper qpos — for abs/rel/delta-family targets.
+    - ``"native_cmd"``: the value already IS the native command; clip to
+      [-1, 1] and pass through — for goalabs-family targets.
+
     Pure function (no torch/env dependency) so it can be unit-tested directly.
     """
     current_pos = current_state[:3]
@@ -200,9 +230,14 @@ def recovered_delta_native_action(
     native_delta_rot = np.clip(
         matrix_to_axis_angle(reconstructed_R @ current_R.T), -1.0, 1.0
     )
-    native_gripper = (
-        GRIPPER_CLOSE_CMD if abs(reconstructed_gripper) < abs(current_gripper) else GRIPPER_OPEN_CMD
-    )
+    if gripper_mode == "native_cmd":
+        native_gripper = float(np.clip(reconstructed_gripper, -1.0, 1.0))
+    elif gripper_mode == "target_qpos":
+        native_gripper = (
+            GRIPPER_CLOSE_CMD if abs(reconstructed_gripper) < abs(current_gripper) else GRIPPER_OPEN_CMD
+        )
+    else:
+        raise ValueError(f"gripper_mode must be 'target_qpos' or 'native_cmd', got {gripper_mode!r}")
     return np.concatenate([native_delta_pos, native_delta_rot, [native_gripper]]).astype(np.float32)
 
 
@@ -510,6 +545,7 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
     obs_step: AnvilEEObsProcessorStep
     n_action_steps: int = 1
     deliver: str = "absolute"
+    gripper_mode: str = "target_qpos"  # "native_cmd" for the goalabs family — see recovered_delta_native_action
 
     _call_count: int = field(default=0, init=False, repr=False)
     _chunk_anchor: np.ndarray | None = field(default=None, init=False, repr=False)
@@ -522,6 +558,10 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
             raise ValueError(f"mode must be one of {_ZERO_CAL_MODES}, got {self.mode!r}")
         if self.deliver not in ("absolute", "relative"):
             raise ValueError(f"deliver must be 'absolute' or 'relative', got {self.deliver!r}")
+        if self.gripper_mode not in ("target_qpos", "native_cmd"):
+            raise ValueError(
+                f"gripper_mode must be 'target_qpos' or 'native_cmd', got {self.gripper_mode!r}"
+            )
 
     def action(self, action: torch.Tensor) -> torch.Tensor:
         if self.obs_step.last_anvil_state is None:
@@ -571,6 +611,7 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
                 target_rot6d=target_rot6d,
                 target_gripper=target_gripper,
                 current_gripper=float(current_state[7]),
+                gripper_mode=self.gripper_mode,
             )
         else:  # "relative"
             native = recovered_delta_native_action(
@@ -579,6 +620,7 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
                 reconstructed_gripper=target_gripper,
                 current_state=current_state,
                 current_gripper=float(current_state[7]),
+                gripper_mode=self.gripper_mode,
             )
         return torch.from_numpy(native).unsqueeze(0)
 

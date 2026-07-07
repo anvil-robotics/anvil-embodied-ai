@@ -571,6 +571,68 @@ def test_zero_cal_deliver_defaults_to_absolute():
     assert step.deliver == "absolute"
 
 
+# =============================================================================
+# gripper_mode="native_cmd" -- the 4th real bug, found by the GT-replay tool
+# on its first run: the goalabs dataset family stores the gripper as LIBERO's
+# native +/-1 COMMAND, but the bang-bang comparator abs(target)<abs(qpos) is
+# only meaningful for qpos-scale targets -- fed +/-1 it is ALWAYS False, the
+# gripper never closes, and every goalabs rollout fails at exactly 0%
+# regardless of policy quality.
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("native_cmd_gripper", "expected"),
+    [
+        (1.0, 1.0),    # open command passes through
+        (-1.0, -1.0),  # close command passes through -- the case the old comparator broke
+        (2.5, 1.0),    # out-of-range clipped
+    ],
+)
+def test_recovered_delta_gripper_native_cmd_passes_through(native_cmd_gripper, expected):
+    action = recovered_delta_native_action(
+        reconstructed_pos=np.zeros(3),
+        reconstructed_rot6d=matrix_to_rot6d(np.eye(3)),
+        reconstructed_gripper=native_cmd_gripper,
+        current_state=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.02], dtype=np.float32),
+        current_gripper=0.02,
+        gripper_mode="native_cmd",
+    )
+    assert action[6] == expected
+
+
+def test_qpos_comparator_always_opens_for_native_cmd_targets():
+    """Regression documentation of the bug itself: a +/-1 native command fed
+    through the DEFAULT qpos comparator always yields OPEN — including for
+    the CLOSE command — which is why every goalabs rollout scored 0%."""
+    for cmd in (1.0, -1.0):
+        action = recovered_delta_native_action(
+            reconstructed_pos=np.zeros(3),
+            reconstructed_rot6d=matrix_to_rot6d(np.eye(3)),
+            reconstructed_gripper=cmd,
+            current_state=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.02], dtype=np.float32),
+            current_gripper=0.02,
+        )
+        assert action[6] == GRIPPER_OPEN_CMD  # even for the close command -- the bug
+
+
+def test_absolute_native_action_gripper_native_cmd_passes_through():
+    action = absolute_native_action_from_target(
+        target_pos=np.zeros(3),
+        target_rot6d=matrix_to_rot6d(np.eye(3)),
+        target_gripper=-1.0,
+        current_gripper=0.02,
+        gripper_mode="native_cmd",
+    )
+    assert action[6] == -1.0
+
+
+def test_zero_cal_rejects_invalid_gripper_mode():
+    obs_step = AnvilEEObsProcessorStep(action_type="ee_abs")
+    with pytest.raises(ValueError, match="gripper_mode"):
+        ZeroCalActionProcessorStep(mode="abs", obs_step=obs_step, gripper_mode="bogus")
+
+
 def test_zero_cal_rejects_invalid_deliver():
     obs_step = AnvilEEObsProcessorStep(action_type="ee_abs")
     with pytest.raises(ValueError, match="deliver"):

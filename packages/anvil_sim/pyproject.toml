@@ -44,6 +44,7 @@ dev = [
 anvil-libero-convert = "anvil_sim.libero_convert:main"
 anvil-eval-libero = "anvil_sim.eval_libero_ee:main"
 anvil-eval-native-rot6d = "anvil_sim.eval_native_rot6d:main"
+anvil-libero-replay = "anvil_sim.eval_replay:main"
 
 [project.urls]
 Homepage = "https://github.com/anvil-robotics/anvil-embodied-ai"
