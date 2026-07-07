@@ -68,7 +68,7 @@ def _parse_names(info: dict, feat_key: str) -> list[str]:
     return names
 
 
-_VALID_ACTION_TYPES = {"joint_abs", "ee_abs", "ee_rel"}
+_VALID_ACTION_TYPES = {"joint_abs", "ee_abs", "ee_rel", "ee_rel_world"}
 
 # Suffix components that appear in EE datasets but not joint datasets.
 # Feature names may be bare ("qx") or arm-prefixed ("right_qx", "left_r0").
@@ -102,7 +102,7 @@ class TrainingConfig:
             Use the key suffix after "observation." — supports both image and non-image keys:
             e.g. ["images.chest", "images.wrist_l", "velocity", "effort"]
         task_override: Override task string for all samples (for SmolVLA)
-        action_type: One of "joint_abs", "ee_abs", "ee_rel".
+        action_type: One of "joint_abs", "ee_abs", "ee_rel", "ee_rel_world".
         dataset_root: Path to local dataset (for validation)
         note: Free-text note attached to this run (stored in anvil_config.json and wandb)
         note_append: Text to append to the existing note when resuming a run
@@ -111,9 +111,15 @@ class TrainingConfig:
     exclude_observs: list[str] | None = None
     task_override: str | None = None
     # action_type values:
-    #   "joint_abs" — joint absolute positions (default)
-    #   "ee_abs"    — EE Cartesian rot6d, absolute
-    #   "ee_rel"    — EE Cartesian rot6d, SE(3) relative (delta xyz + relative rotation)
+    #   "joint_abs"    — joint absolute positions (default)
+    #   "ee_abs"       — EE Cartesian rot6d, absolute
+    #   "ee_rel"       — EE Cartesian rot6d, SE(3) relative (UMI body-frame translation)
+    #   "ee_rel_world" — EXPERIMENTAL: EE Cartesian rot6d, SE(3) relative but with
+    #                    WORLD-frame translation/rotation composition instead of
+    #                    UMI's body-frame convention — added to isolate whether the
+    #                    body-frame choice itself explains ee_rel's lower closed-loop
+    #                    performance in the anvil-sim LIBERO benchmark. Not (yet) part
+    #                    of the stable ee_abs/ee_rel contract.
     action_type: str = "joint_abs"
     dataset_root: str | None = None
     output_dir: str | None = None
@@ -141,11 +147,15 @@ class TrainingConfig:
 
     @property
     def is_ee(self) -> bool:
-        return self.action_type in ("ee_abs", "ee_rel")
+        return self.action_type in ("ee_abs", "ee_rel", "ee_rel_world")
 
     @property
     def is_ee_rel(self) -> bool:
         return self.action_type == "ee_rel"
+
+    @property
+    def is_ee_rel_world(self) -> bool:
+        return self.action_type == "ee_rel_world"
 
     @property
     def is_ee_abs(self) -> bool:
@@ -302,7 +312,7 @@ class TrainingConfig:
             # Resolve output_dir for NEW job:
             #   model_zoo/{data_space}-space/{dataset_name}/{run_name}
             # ee_abs/ee_rel → ee-space/; joint_abs → joint-space/
-            data_space = "ee" if action_type in ("ee_abs", "ee_rel") else "joint"
+            data_space = "ee" if action_type in ("ee_abs", "ee_rel", "ee_rel_world") else "joint"
 
             # Extract job_name if provided (passed through to lerobot as-is)
             job_name = None
@@ -502,7 +512,7 @@ class TrainingConfig:
         has_ee_action = _has_ee_markers(action_names, _EE_ACTION_MARKER_SUFFIXES)
         is_ee_dataset = has_ee_state and has_ee_action
 
-        if self.action_type in ("ee_abs", "ee_rel"):
+        if self.action_type in ("ee_abs", "ee_rel", "ee_rel_world"):
             if not is_ee_dataset:
                 raise DataIntegrityError(
                     f"[validate_action_space] --action-type={self.action_type!r} requires an EE-space "

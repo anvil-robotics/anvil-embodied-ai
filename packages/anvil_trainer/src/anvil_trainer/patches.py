@@ -41,6 +41,7 @@ from anvil_trainer.transforms import (
     DataIntegrityError,
     EEAbsTransform,
     EERelTransform,
+    EERelWorldTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
     Transform,
@@ -147,6 +148,7 @@ class TransformRunner:
             TaskOverrideTransform(),
             EEAbsTransform(),
             EERelTransform(),
+            EERelWorldTransform(),
         ]
         self.active_transforms = [t for t in transforms if t.is_enabled(config)]
         self._val_dataloader = None   # set by apply_val_loss_patch when make_dataset is called
@@ -282,18 +284,48 @@ class TransformRunner:
             return f"'{self.config.task_override}'"
         elif isinstance(transform, EERelTransform):
             return "SE(3) relative: delta_xyz + R_state.T @ R_action"
+        elif isinstance(transform, EERelWorldTransform):
+            return "SE(3) relative (WORLD frame, experimental): delta_xyz + R_action @ R_state.T"
         return "enabled"
 
     def _compute_ee_rel_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
-        """Compute EE relative action AND obs stats for ``ee_rel`` training.
+        """Compute EE relative action AND obs stats for ``ee_rel`` training (UMI body frame)."""
+        if not self.config.is_ee_rel:
+            return None
+        from anvil_shared.ee_transform import ee_obs_rel_forward, ee_rel_forward
+
+        return self._compute_ee_rel_stats_generic(
+            full_dataset, cfg, action_forward=ee_rel_forward, obs_forward=ee_obs_rel_forward,
+            log_tag="ee_rel_stats",
+        )
+
+    def _compute_ee_rel_world_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
+        """Compute EE relative action AND obs stats for the experimental
+        ``ee_rel_world`` training (WORLD frame — see :func:`ee_rel_world_forward`)."""
+        if not self.config.is_ee_rel_world:
+            return None
+        from anvil_shared.ee_transform import ee_obs_rel_world_forward, ee_rel_world_forward
+
+        return self._compute_ee_rel_stats_generic(
+            full_dataset, cfg, action_forward=ee_rel_world_forward, obs_forward=ee_obs_rel_world_forward,
+            log_tag="ee_rel_world_stats",
+        )
+
+    def _compute_ee_rel_stats_generic(
+        self, full_dataset: Any, cfg: Any, *, action_forward: Any, obs_forward: Any, log_tag: str,
+    ) -> dict | None:
+        """Shared implementation behind :meth:`_compute_ee_rel_stats` and
+        :meth:`_compute_ee_rel_world_stats` — identical logic, only the SE(3)
+        relativisation functions differ (UMI body frame vs experimental world
+        frame). Kept as one implementation so a future stats-computation fix
+        can't accidentally be applied to only one of the two frame conventions.
 
         Both observation.state and action are transformed to SE(3)-relative with the
-        SAME anchor (current EE pose), matching UMI.  Stats are computed from the
-        actual training distributions so normalization is valid.
+        SAME anchor (current EE pose).  Stats are computed from the actual training
+        distributions so normalization is valid.
 
         Action target at horizon step k (anchored to state[t]):
-            body_delta[k]  = R_state[t].T @ (act_xyz[t+k] - state_xyz[t])
-            delta_rot6d[k] = matrices_to_rot6d(R_state[t].T @ R_act[t+k])
+            delta[k]       = action_forward(act_xyz[t+k], R_act[t+k]; anchor=state[t])
             gripper[k]     = action_gripper[t+k]   (absolute, stats restored)
 
         Obs target at obs step j (anchored to state[t], j = 0..n_obs_steps-1):
@@ -303,17 +335,9 @@ class TransformRunner:
         Returns a dict ``{"action": stats, "observation.state": obs_stats}``,
         or ``None`` on failure.
         """
-        if not self.config.is_ee_rel:
-            return None
-
         import numpy as np
         try:
-            from anvil_shared.ee_transform import (
-                ee_obs_rel_forward,
-                ee_rel_forward,
-                n_arms_from_dims,
-                EE_ACTION_DIM_PER_ARM,
-            )
+            from anvil_shared.ee_transform import EE_ACTION_DIM_PER_ARM, n_arms_from_dims
 
             hf = full_dataset.hf_dataset
             actions_np = np.array(hf["action"], dtype=np.float64)       # (N, 10*n_arms)
@@ -339,7 +363,7 @@ class TransformRunner:
                 action_delta_indices = [0]
             N = len(actions_np)
 
-            def _ee_rel_action_for_delta(d: int) -> np.ndarray:
+            def _rel_action_for_delta(d: int) -> np.ndarray:
                 """Return SE(3) relative array for action offset d (may be negative), episode-bounded."""
                 if d == 0:
                     act, sta, mask = actions_np, states_np, np.ones(N, dtype=bool)
@@ -352,10 +376,10 @@ class TransformRunner:
                     act = actions_np[:-k]
                     sta = states_np[k:]
                     mask = episode_idx_np[:-k] == episode_idx_np[k:]
-                return ee_rel_forward(act, sta)[mask]
+                return action_forward(act, sta)[mask]
 
             all_deltas = np.concatenate(
-                [_ee_rel_action_for_delta(d) for d in action_delta_indices], axis=0
+                [_rel_action_for_delta(d) for d in action_delta_indices], axis=0
             )  # (N_valid_pairs, 10*n_arms)
 
             orig_action = full_dataset.meta.stats.get("action", {})
@@ -402,7 +426,7 @@ class TransformRunner:
 
             obs_rel_samples = []
             # Identity steps — all N frames (obs relative to itself)
-            identity = ee_obs_rel_forward(states_np, states_np)  # zeros+[1,0,0,0,1,0]+grip
+            identity = obs_forward(states_np, states_np)  # zeros+[1,0,0,0,1,0]+grip
             obs_rel_samples.append(identity)
 
             # Prior steps — obs[t-j] relative to obs[t], episode-bounded
@@ -410,7 +434,7 @@ class TransformRunner:
                 past = states_np[:-j]
                 anchor = states_np[j:]
                 mask = episode_idx_np[:-j] == episode_idx_np[j:]
-                rel = ee_obs_rel_forward(past, anchor)
+                rel = obs_forward(past, anchor)
                 obs_rel_samples.append(rel[mask])
 
             all_obs_rel = np.concatenate(obs_rel_samples, axis=0)  # (N_total, 10*n_arms)
@@ -433,15 +457,15 @@ class TransformRunner:
             full_dataset.meta.stats["observation.state"] = obs_patched_stats
 
             log.info(
-                "[ee_rel_stats] action: %d samples (n_delta_steps=%d); obs: %d samples "
+                "[%s] action: %d samples (n_delta_steps=%d); obs: %d samples "
                 "(n_obs_steps=%d); %d arm(s)",
-                len(all_deltas), len(action_delta_indices), len(all_obs_rel), n_obs_steps, n_arms,
+                log_tag, len(all_deltas), len(action_delta_indices), len(all_obs_rel), n_obs_steps, n_arms,
             )
             return {"action": action_patched_stats, "observation.state": obs_patched_stats}
         except DataIntegrityError:
             raise
         except Exception as e:
-            log.warning("[ee_rel_stats] Failed: %s — falling back to absolute stats", e)
+            log.warning("[%s] Failed: %s — falling back to absolute stats", log_tag, e)
             return None
 
     def _compute_ee_abs_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
@@ -622,6 +646,8 @@ class TransformRunner:
             # joint_abs: use dataset stats as-is (no patching needed).
             if val_state.config.is_ee_rel:
                 _patched_ee_stats = val_state._compute_ee_rel_stats(full_dataset, cfg)
+            elif val_state.config.is_ee_rel_world:
+                _patched_ee_stats = val_state._compute_ee_rel_world_stats(full_dataset, cfg)
             elif val_state.config.is_ee_abs:
                 _patched_ee_stats = val_state._compute_ee_abs_stats(full_dataset, cfg)
             else:
@@ -707,7 +733,7 @@ class TransformRunner:
             if _patched_ee_stats is not None:
                 train_dataset.meta.stats["action"] = _patched_ee_stats["action"]
                 train_dataset.meta.stats["observation.state"] = _patched_ee_stats["observation.state"]
-                log.info("[ee_rel_stats] Patched train_dataset.meta.stats [action + observation.state]")
+                log.info("[anvil_trainer] Patched train_dataset.meta.stats [action + observation.state]")
             log.info("[split] train=%d ep (randomly selected)", len(train_ep))
             return train_dataset
 
@@ -742,6 +768,7 @@ class TransformRunner:
             "action_type": self.config.action_type,
             "is_ee": self.config.is_ee,
             "is_ee_rel": self.config.is_ee_rel,
+            "is_ee_rel_world": self.config.is_ee_rel_world,
             **git_provenance(),
         }
         if self.config.task_override:

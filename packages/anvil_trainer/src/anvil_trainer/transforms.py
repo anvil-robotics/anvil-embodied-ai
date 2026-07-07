@@ -352,3 +352,97 @@ class EERelTransform(Transform):
             return
         _patch_obs_state_shape_8n_to_10n(config, runner)
         log.info("[ee_rel] patched dataset_to_policy_features: obs.state 8n→10n/arm")
+
+
+# =============================================================================
+# EERelWorldTransform — EXPERIMENTAL: SE(3) relative EE actions, WORLD frame
+# =============================================================================
+
+
+class EERelWorldTransform(Transform):
+    """EXPERIMENTAL variant of :class:`EERelTransform` using WORLD-frame
+    translation/rotation composition instead of UMI's body frame.
+
+    Added to isolate whether ``ee_rel``'s body-frame translation choice
+    (``body_delta = R_state.T @ world_delta``) itself explains its lower
+    closed-loop success rate vs native/ee_abs in the anvil-sim LIBERO
+    benchmark — NOT (yet) part of the stable ee_abs/ee_rel contract. If this
+    setting proves better, promoting it to a first-class option (e.g. a
+    ``rel_frame`` parameter on ``ee_rel`` itself) is a follow-up decision,
+    not assumed here.
+
+    Both observation.state and action are anchored to the SAME current EE
+    pose (last obs step), same as ``EERelTransform``, but relativised via
+    ``anvil_shared.ee_transform.ee_rel_world_forward``/``ee_obs_rel_world_forward``:
+        world_delta = pose_xyz - anchor_xyz            (no frame projection)
+        rel_rot6d   = matrices_to_rot6d(R_pose @ R_anchor.T)
+
+    obs: 8 dims/arm (quat layout) → 10 dims/arm (rot6d layout), relative to anchor
+    action: 10 dims/arm (rot6d layout), unchanged dim, relative to anchor
+    """
+
+    def __init__(self):
+        self._first_apply: bool = True
+
+    @property
+    def name(self) -> str:
+        return "ee_rel_world"
+
+    def is_enabled(self, config: TrainingConfig) -> bool:
+        return config.is_ee_rel_world
+
+    def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
+        import torch
+        from anvil_shared.ee_transform import (
+            ee_obs_rel_world_forward,
+            ee_rel_world_forward,
+            n_arms_from_dims,
+        )
+
+        if "action" not in item or "observation.state" not in item:
+            return item
+
+        action = item["action"]
+        obs_full = item["observation.state"]
+
+        if obs_full.dim() > 1:
+            anchor_tensor = obs_full[-1]
+        else:
+            anchor_tensor = obs_full
+
+        anchor_np = anchor_tensor.detach().cpu().numpy().astype("float64")
+        obs_np = obs_full.detach().cpu().numpy().astype("float64")
+        action_np = action.detach().cpu().numpy().astype("float64")
+
+        try:
+            n_arms = n_arms_from_dims(anchor_np.shape[-1], action_np.shape[-1])
+        except ValueError as exc:
+            raise DataIntegrityError(str(exc)) from exc
+
+        obs_rel_np = ee_obs_rel_world_forward(obs_np, anchor_np)
+
+        single = action_np.ndim == 1
+        if single:
+            action_np = action_np[None, :]
+        delta_np = ee_rel_world_forward(action_np, anchor_np)
+        if single:
+            delta_np = delta_np[0]
+
+        item["observation.state"] = torch.tensor(obs_rel_np, dtype=torch.float32)
+        item["action"] = torch.tensor(delta_np, dtype=action.dtype)
+
+        if self._first_apply:
+            log.info(
+                "[ee_rel_world] active — %d arm(s), obs (8n abs) → (10n rel), "
+                "action (abs rot6d) → SE(3) relative (WORLD frame, experimental)",
+                n_arms,
+            )
+            self._first_apply = False
+
+        return item
+
+    def patch_metadata(self, config: TrainingConfig, runner: Any = None) -> None:
+        if not config.is_ee_rel_world:
+            return
+        _patch_obs_state_shape_8n_to_10n(config, runner)
+        log.info("[ee_rel_world] patched dataset_to_policy_features: obs.state 8n→10n/arm")
