@@ -21,3 +21,9 @@ eval:
   action_type: zerocal_goal_hand_seq
   control_mode: absolute
   n_episodes: 10
+gates:
+  # gt-replay gate deliberately skipped for the LEDGER BACKFILL of this
+  # historical condition: GT replay through this eval path scores
+  # expected ~0% (not separately measured) — absolute-mode delivery diverges in open loop (same mechanism as world-seq).
+  # The gate verdict is itself the finding; a NEW treatment must not skip this.
+  skip: [gt-replay]

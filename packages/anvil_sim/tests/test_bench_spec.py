@@ -88,6 +88,27 @@ def test_unknown_dataset_group_rejected(tmp_path):
         load_spec(_write_spec(tmp_path, bad))
 
 
+@pytest.mark.parametrize(
+    ("group", "expected_dir"),
+    [
+        ("goalabs", "libero-task10-goalabs"),
+        ("delta_hand", "libero-task10-delta-hand"),   # underscore group -> hyphen dir
+        ("native_rot6d", "libero-task10-native-rot6d"),
+    ],
+)
+def test_dataset_root_uses_hyphenated_dir_suffix(group, expected_dir):
+    """Regression: group names use underscores but libero_convert writes
+    hyphenated directory names — the mismatch made the convert stage try to
+    re-create an existing dataset (and fail) for delta_hand/native_rot6d."""
+    spec = BenchSpec(
+        name="x", task_index=10, env_suite="libero_goal", env_task_id=8,
+        dataset_group=group,
+        train=TrainSpec(action_type="ee_abs"),
+        eval=EvalSpec(action_type="ee_abs", control_mode="relative"),
+    )
+    assert spec.dataset_root.name == expected_dir
+
+
 def test_reuse_checkpoint_overrides_checkpoint_path():
     spec = BenchSpec(
         name="x", task_index=10, env_suite="libero_goal", env_task_id=8,

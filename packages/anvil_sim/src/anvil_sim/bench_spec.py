@@ -108,7 +108,10 @@ class BenchSpec:
     # ------------------------------------------------------------------ #
     @property
     def dataset_root(self) -> Path:
-        return Path(f"data/datasets/ee-space/libero-task{self.task_index}-{self.dataset_group}")
+        # Directory suffixes are hyphenated (libero_convert.py convention:
+        # delta_hand -> libero-taskN-delta-hand, native_rot6d -> ...-native-rot6d).
+        suffix = self.dataset_group.replace("_", "-")
+        return Path(f"data/datasets/ee-space/libero-task{self.task_index}-{suffix}")
 
     @property
     def output_dir(self) -> Path:

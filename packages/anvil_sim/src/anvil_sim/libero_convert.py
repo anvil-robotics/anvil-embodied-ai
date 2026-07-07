@@ -104,6 +104,9 @@ log = logging.getLogger(__name__)
 
 SOURCE_REPO_ID = "lerobot/libero"
 TASK_INDEX = 10
+# Task text for the DEFAULT task_index above. convert() resolves the actual
+# text for whatever --task-index it is given from the source dataset's task
+# metadata (see task_text_for_index) — this constant is documentation only.
 TASK_TEXT = "put the bowl on the plate"
 # lerobot/libero's global task_index is NOT the same numbering LIBERO's own
 # benchmark/env uses internally — confirmed by querying
@@ -131,6 +134,18 @@ def task_episode_indices(ds: LeRobotDataset, task_index: int) -> list[int]:
     hf = ds.hf_dataset.select_columns(["episode_index", "task_index"]).with_format(None)
     pairs = zip(hf["episode_index"], hf["task_index"], strict=True)
     return sorted({int(e) for e, t in pairs if int(t) == task_index})
+
+
+def task_text_for_index(ds: LeRobotDataset, task_index: int) -> str:
+    """Resolve the language-instruction string for ``task_index`` from the
+    source dataset's task metadata — the derived datasets' per-frame
+    ``task`` field must carry the RIGHT instruction for whatever task is
+    being converted (the old module-level ``TASK_TEXT`` constant silently
+    wrote task 10's text for every task)."""
+    for text, row in ds.meta.tasks.iterrows():
+        if int(row["task_index"]) == task_index:
+            return str(text)
+    raise ValueError(f"task_index {task_index} not found in {SOURCE_REPO_ID} task metadata")
 
 
 def raw_state_to_anvil(state8: np.ndarray) -> np.ndarray:
@@ -508,11 +523,12 @@ def convert(
     episodes = task_episode_indices(ds_probe, task_index)
     if max_episodes is not None:
         episodes = episodes[:max_episodes]
-    log.info("task_index=%d (%r): %d episodes, writing groups=%s", task_index, TASK_TEXT, len(episodes), groups)
+    task_text = task_text_for_index(ds_probe, task_index)
+    log.info("task_index=%d (%r): %d episodes, writing groups=%s", task_index, task_text, len(episodes), groups)
 
     episodes_manifest = output_root / f"libero-task{task_index}-episodes.json"
     with open(episodes_manifest, "w") as f:
-        json.dump({"task_index": task_index, "task": TASK_TEXT, "episodes": episodes}, f, indent=2)
+        json.dump({"task_index": task_index, "task": task_text, "episodes": episodes}, f, indent=2)
 
     ds = LeRobotDataset(SOURCE_REPO_ID, episodes=episodes)
 
@@ -599,31 +615,31 @@ def convert(
             frame_native = {
                 "observation.state": raw_states[t],
                 "action": item["action"].numpy(),
-                "task": TASK_TEXT,
+                "task": task_text,
                 **images_native,
             }
             frame_native_rot6d = {
                 "observation.state": raw_states[t],
                 "action": native_action_to_rot6d(item["action"].numpy()),
-                "task": TASK_TEXT,
+                "task": task_text,
                 **images_native,
             }
             frame_abs = {
                 "observation.state": anvil_states[t],
                 "action": action_abs[t],
-                "task": TASK_TEXT,
+                "task": task_text,
                 **images,
             }
             frame_rel = {
                 "observation.state": anvil_states[t],
                 "action": action_abs[t],
-                "task": TASK_TEXT,
+                "task": task_text,
                 **images,
             }
             frame_delta = {
                 "observation.state": anvil_states[t],
                 "action": action_delta[t],
-                "task": TASK_TEXT,
+                "task": task_text,
                 **images,
             }
             # Experiment 7: observation.state is still the ACTUAL observed
@@ -636,13 +652,13 @@ def convert(
             frame_goalabs = {
                 "observation.state": anvil_states[t],
                 "action": action_goal_abs[t],
-                "task": TASK_TEXT,
+                "task": task_text,
                 **images,
             }
             frame_delta_hand = {
                 "observation.state": anvil_states[t],
                 "action": action_delta_hand[t],
-                "task": TASK_TEXT,
+                "task": task_text,
                 **images,
             }
             if dataset_native is not None:
@@ -698,7 +714,7 @@ def convert(
     }
     return {
         "task_index": task_index,
-        "task": TASK_TEXT,
+        "task": task_text,
         "num_episodes": len(episodes),
         "num_frames": total_frames,
         **{f"{group}_dataset": str(dir_by_group[group]) for group in groups},
