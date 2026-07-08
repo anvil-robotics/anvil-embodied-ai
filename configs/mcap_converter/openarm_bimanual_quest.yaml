@@ -90,9 +90,9 @@ image_resolution: [640, 480]
 # What to extract from observation joints (follower)
 observation_feature_mapping:
   state: "position"      # Primary feature -> observation.state
-  others:                # Additional features
-    - "velocity"         # -> observation.velocity
-    - "effort"           # -> observation.effort
+  others: []             # Additional features (uncomment below to enable)
+    # - "velocity"        # -> observation.velocity
+    # - "effort"          # -> observation.effort
 
 # What to extract from action commands
 # Note: Float64MultiArray only contains position commands,
