@@ -71,6 +71,8 @@ from lerobot.utils.utils import init_logging
 from anvil_sim.libero_processor import (
     AnvilEEActionProcessorStep,
     AnvilEEObsProcessorStep,
+    NativeHandActionProcessorStep,
+    NativeHandObsProcessorStep,
     ZeroCalActionProcessorStep,
 )
 
@@ -122,6 +124,16 @@ _ZERO_CAL_GOAL_ACTION_TYPES = {
     # delta/delta-hand family: gripper stored as qpos-scale target.
     "zerocal_goal_world_seq": ("ee_abs", "rel_world_seq", "absolute", "target_qpos"),
     "zerocal_goal_hand_seq": ("ee_abs", "rel_hand_seq", "absolute", "target_qpos"),
+    # Experiment E-framegap: SAME consecutive-delta (n-(n-1)) targets and
+    # checkpoints as the two seq entries above, but delivered via
+    # recovered-delta "relative" (like the n-0 goal family) instead of
+    # "absolute". Isolates delivery (relative vs absolute) at the n-(n-1)
+    # horizon, and — as a matched re-encoded pair — isolates frame (world vs
+    # hand) at n-(n-1) under relative delivery, completing the cube whose only
+    # world/n-(n-1)/relative cell was previously `native` (a raw command, not
+    # re-encoded, hence confounded for a frame comparison).
+    "zerocal_goal_world_seq_rel": ("ee_abs", "rel_world_seq", "relative", "target_qpos"),
+    "zerocal_goal_hand_seq_rel": ("ee_abs", "rel_hand_seq", "relative", "target_qpos"),
 }
 _ZERO_CAL_ACTION_TYPES = {**_ZERO_CAL_ACTION_TYPES, **_ZERO_CAL_GOAL_ACTION_TYPES}
 
@@ -147,7 +159,13 @@ def _load_policy_from_checkpoint(cfg: PreTrainedConfig):
 
 
 _LEGACY_ACTION_TYPES = ("ee_abs", "ee_rel", "ee_delta")
-_ALL_ACTION_TYPES = _LEGACY_ACTION_TYPES + tuple(_ZERO_CAL_ACTION_TYPES)
+# Native-command arms whose action column is the raw LIBERO 7-dim command
+# re-expressed in a different FRAME (currently only the EE body/hand frame),
+# reconstructed to world at eval time and delivered via
+# env.control_mode="relative" exactly like `native`. Isolates the frame
+# factor with the native representation — see native_action_to_hand.
+_NATIVE_FRAME_ACTION_TYPES = ("native_hand",)
+_ALL_ACTION_TYPES = _LEGACY_ACTION_TYPES + _NATIVE_FRAME_ACTION_TYPES + tuple(_ZERO_CAL_ACTION_TYPES)
 
 
 def _pop_action_type() -> str:
@@ -242,7 +260,10 @@ class _TraceWriter:
 def _make_anvil_env_pre_post_processors(
     action_type: str, n_action_steps: int, trace_dir: Path | None = None
 ):
-    if action_type in _ZERO_CAL_ACTION_TYPES:
+    if action_type in _NATIVE_FRAME_ACTION_TYPES:
+        obs_step = NativeHandObsProcessorStep()
+        action_step = NativeHandActionProcessorStep(obs_step=obs_step)
+    elif action_type in _ZERO_CAL_ACTION_TYPES:
         obs_action_type, zero_cal_mode, deliver, gripper_mode = _ZERO_CAL_ACTION_TYPES[action_type]
         obs_step = AnvilEEObsProcessorStep(action_type=obs_action_type)
         action_step = ZeroCalActionProcessorStep(

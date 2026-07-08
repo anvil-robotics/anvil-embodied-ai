@@ -33,6 +33,7 @@ from anvil_shared.ee_transform import (
     ee_rel_world_inverse,
 )
 from anvil_shared.rotation import (
+    axis_angle_to_matrix,
     matrix_to_axis_angle,
     matrix_to_quat,
     matrix_to_rot6d,
@@ -259,6 +260,33 @@ def rot6d_action_to_native(rot6d_action10: np.ndarray) -> np.ndarray:
     return np.concatenate([pos, native_rot, [gripper]]).astype(np.float32)
 
 
+def hand_action_to_native(hand_action7: np.ndarray, ee_axis_angle3: np.ndarray) -> np.ndarray:
+    """Exact inverse of
+    :func:`anvil_sim.libero_convert.native_action_to_hand`: rotate a
+    HAND-frame native command back to the WORLD frame using the CURRENT obs
+    EE orientation, for ``env.control_mode="relative"`` delivery exactly like
+    ``native``.
+
+    Used only by the ``native_hand`` arm — the missing "hand-frame +
+    n-(n-1) + relative-delivery" cell that isolates the FRAME factor (world
+    vs hand) with the NATIVE command representation. Because the rotation
+    here (``R_ee @``) is the exact inverse of the convert-time rotation
+    (``R_ee.T @``) with the SAME per-step EE orientation, replaying the
+    dataset's own hand-frame actions through this reconstructs native's
+    world-frame command exactly (the benchmark's GT-replay oracle). Position
+    and rotation are the linear/angular parts of one spatial command,
+    rotated by ``R_ee = axis_angle_to_matrix(ee_axis_angle3)``; gripper is a
+    frame-invariant open/close command, passed through unchanged (already a
+    native +/-1 command — no bang-bang, unlike the goalabs family).
+
+    Pure function (no torch/env dependency) so it can be unit-tested directly.
+    """
+    R_ee = axis_angle_to_matrix(ee_axis_angle3)
+    pos_world = R_ee @ hand_action7[:3]
+    rot_world = R_ee @ hand_action7[3:6]
+    return np.concatenate([pos_world, rot_world, [hand_action7[6]]]).astype(np.float32)
+
+
 def _extract_robot_state(observation: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Pull (eef_pos, eef_quat_xyzw, gripper_qpos) out of LIBERO's nested robot_state obs.
 
@@ -479,6 +507,84 @@ class NativeRot6dActionProcessorStep(ActionProcessorStep):
     def action(self, action: torch.Tensor) -> torch.Tensor:
         act10 = (action[0] if action.dim() > 1 else action).detach().cpu().numpy()
         native = rot6d_action_to_native(act10)
+        return torch.from_numpy(native).unsqueeze(0)
+
+    def transform_features(self, features):
+        new_features = {ft: feats.copy() for ft, feats in features.items() if ft != FeatureType.ACTION}
+        new_features[FeatureType.ACTION] = {"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))}
+        return new_features
+
+
+@dataclass
+class NativeHandObsProcessorStep(ObservationProcessorStep):
+    """``env_preprocessor`` for the ``native_hand`` arm: produces the SAME
+    8-dim ``observation.state`` (``[eef_pos(3), eef_axis-angle(3),
+    gripper_qpos(2)]``) and original ``image``/``image2`` camera keys that
+    ``native`` trains and evals on — by COMPOSING lerobot's own stock
+    :class:`~lerobot.processor.env_processor.LiberoProcessorStep` (so the obs
+    encoding is byte-identical to ``native``'s, not re-derived) — and
+    additionally caches the EE world-frame orientation (axis-angle,
+    ``state[3:6]``) so the paired :class:`NativeHandActionProcessorStep` can
+    rotate the policy's hand-frame command back to the world frame.
+
+    Unlike :class:`AnvilEEObsProcessorStep`, it does NOT rename cameras to
+    ``agentview``/``wrist`` nor re-encode the state to 10-dim rot6d — the
+    ``native_hand`` policy is a plain ``lerobot-train`` policy over native's
+    own observation schema (only the ACTION column was rotated at
+    dataset-write time).
+
+    ``last_anvil_state`` (Anvil 8-dim ``[pos, quat, gripper]``) is also
+    cached so the optional ``--trace-dir`` writer works unchanged.
+    """
+
+    last_ee_axis_angle: np.ndarray | None = field(default=None, init=False, repr=False)
+    last_anvil_state: np.ndarray | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        from lerobot.processor.env_processor import LiberoProcessorStep
+
+        self._inner = LiberoProcessorStep()
+
+    def observation(self, observation: dict) -> dict:
+        processed = self._inner.observation(observation)
+        state = processed[OBS_STATE]
+        state_np = (state[0] if state.dim() > 1 else state).detach().cpu().numpy().astype(np.float64)
+        axis_angle = state_np[3:6]
+        self.last_ee_axis_angle = axis_angle.astype(np.float32)
+        quat = matrix_to_quat(axis_angle_to_matrix(axis_angle))
+        self.last_anvil_state = np.concatenate(
+            [state_np[:3], quat, [state_np[6]]]
+        ).astype(np.float32)
+        return processed
+
+    def transform_features(self, features):
+        return self._inner.transform_features(features)
+
+
+@dataclass
+class NativeHandActionProcessorStep(ActionProcessorStep):
+    """``env_postprocessor`` for the ``native_hand`` arm: rotate the policy's
+    predicted 7-dim HAND-frame native command back to the WORLD frame (via
+    :func:`hand_action_to_native`, using the current obs EE orientation
+    cached by the paired :class:`NativeHandObsProcessorStep`), then deliver
+    the 7-dim world-frame native command via ``env.control_mode="relative"``
+    exactly like ``native``.
+
+    Per-step and stateless: the native command is a per-step delta, so there
+    is no chunk anchor / running target (hence no ``reset_episode_state``
+    needed), matching how ``native``/``ee_delta`` are replayed "direct".
+    """
+
+    obs_step: NativeHandObsProcessorStep
+
+    def action(self, action: torch.Tensor) -> torch.Tensor:
+        if self.obs_step.last_ee_axis_angle is None:
+            raise RuntimeError(
+                "NativeHandActionProcessorStep needs an observation processed by its "
+                "paired NativeHandObsProcessorStep before the first action."
+            )
+        act7 = (action[0] if action.dim() > 1 else action).detach().cpu().numpy()
+        native = hand_action_to_native(act7, self.obs_step.last_ee_axis_angle)
         return torch.from_numpy(native).unsqueeze(0)
 
     def transform_features(self, features):

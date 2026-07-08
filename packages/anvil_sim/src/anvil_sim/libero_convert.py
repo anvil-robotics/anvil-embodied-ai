@@ -367,6 +367,55 @@ def native_action_to_rot6d(native_action7: np.ndarray) -> np.ndarray:
     return np.concatenate([pos, rot6d, [gripper]]).astype(np.float32)
 
 
+def native_action_to_hand(native_action7: np.ndarray, ee_axis_angle3: np.ndarray) -> np.ndarray:
+    """Rotate LIBERO's native WORLD-frame command into the EE BODY (hand)
+    frame — the ONE genuinely new transform for the ``native_hand`` group,
+    which isolates the FRAME factor (world vs hand) using the NATIVE command
+    representation, changing ONLY the frame vs :func:`_make_native_dataset`'s
+    ``native``.
+
+    ``native_action7`` is ``[Δpos(3, world/base), Δaxis-angle(3, world),
+    gripper]`` (see ``NATIVE_ACTION_DIM``). Its position and rotation
+    components are the linear and angular parts of one spatial command;
+    expressing them in the body frame is a pure change of basis by
+    ``R_ee.T`` where ``R_ee = axis_angle_to_matrix(ee_axis_angle3)`` is the
+    EE's world-frame orientation at this step (from
+    ``observation.state[3:6]``). This is the SAME body-frame convention
+    ``ee_rel`` uses for translation (``body_delta = R_state.T @ world_delta``,
+    see ``anvil_sim.libero_processor``'s calibration note); for the rotation
+    command the linear map ``R_ee.T @ aa`` equals the conjugation
+    ``axis_angle(R_ee.T @ axis_angle_to_matrix(aa) @ R_ee)`` because
+    axis-angle = axis*angle scales linearly and these deltas are well within
+    the round-trip range. Gripper is a frame-invariant open/close command,
+    passed through.
+
+    Exactly invertible by
+    :func:`anvil_sim.libero_processor.hand_action_to_native` with the same
+    EE orientation — that inverse, applied at eval time against the CURRENT
+    obs EE orientation, reconstructs the world-frame native command for
+    ``env.control_mode="relative"`` delivery (identical to ``native``).
+    """
+    R_ee = axis_angle_to_matrix(ee_axis_angle3)
+    pos_hand = R_ee.T @ native_action7[:3]
+    rot_hand = R_ee.T @ native_action7[3:6]
+    return np.concatenate([pos_hand, rot_hand, [native_action7[6]]]).astype(np.float32)
+
+
+def convert_episode_native_hand_actions(
+    raw_states: np.ndarray, native_actions: np.ndarray
+) -> np.ndarray:
+    """Rotate every native command in one episode into the hand frame using
+    that step's EE orientation (raw LIBERO ``observation.state[3:6]``
+    axis-angle) — see :func:`native_action_to_hand`. ``raw_states`` and
+    ``native_actions`` are the source ``observation.state`` (8-dim) and
+    ``action`` (7-dim) columns, unchanged from ``native``.
+    """
+    n = raw_states.shape[0]
+    return np.stack(
+        [native_action_to_hand(native_actions[t], raw_states[t][3:6]) for t in range(n)]
+    ).astype(np.float32)
+
+
 def convert_episode_actions(anvil_states: np.ndarray) -> np.ndarray:
     """Derive the absolute EE action for one episode from its Anvil state trajectory.
 
@@ -475,7 +524,7 @@ def _make_writer(output_dir: Path, repo_id: str) -> LeRobotWriter:
 
 
 ALL_DATASET_GROUPS = frozenset(
-    {"native", "native_rot6d", "abs", "rel", "delta", "goalabs", "delta_hand"}
+    {"native", "native_hand", "native_rot6d", "abs", "rel", "delta", "goalabs", "delta_hand"}
 )
 """All dataset groups :func:`convert` can write. See its ``only`` parameter.
 
@@ -533,6 +582,7 @@ def convert(
     ds = LeRobotDataset(SOURCE_REPO_ID, episodes=episodes)
 
     native_dir = output_root / f"libero-task{task_index}-native"
+    native_hand_dir = output_root / f"libero-task{task_index}-native-hand"
     abs_dir = output_root / f"libero-task{task_index}-abs"
     rel_dir = output_root / f"libero-task{task_index}-rel"
     delta_dir = output_root / f"libero-task{task_index}-delta"
@@ -543,6 +593,15 @@ def convert(
     dataset_native = (
         _make_native_dataset(native_dir, f"anvil/libero-task{task_index}-native")
         if "native" in groups
+        else None
+    )
+    # native_hand shares native's exact schema (8-dim axis-angle state, 7-dim
+    # action, original image/image2 camera keys) — only the action VALUES
+    # differ (world command rotated into the hand frame), so it reuses
+    # _make_native_dataset unchanged.
+    dataset_native_hand = (
+        _make_native_dataset(native_hand_dir, f"anvil/libero-task{task_index}-native-hand")
+        if "native_hand" in groups
         else None
     )
     dataset_native_rot6d = (
@@ -596,6 +655,8 @@ def convert(
         raw_states = np.stack([item["observation.state"].numpy() for item in ep_items])
         native_actions = np.stack([item["action"].numpy() for item in ep_items])
         anvil_states = np.stack([raw_state_to_anvil(s) for s in raw_states])
+        # native_hand: native's own command rotated into the per-step hand frame.
+        action_native_hand = convert_episode_native_hand_actions(raw_states, native_actions)
         action_abs = convert_episode_actions(anvil_states)
         action_delta = convert_episode_delta_actions(anvil_states)
 
@@ -615,6 +676,12 @@ def convert(
             frame_native = {
                 "observation.state": raw_states[t],
                 "action": item["action"].numpy(),
+                "task": task_text,
+                **images_native,
+            }
+            frame_native_hand = {
+                "observation.state": raw_states[t],
+                "action": action_native_hand[t],
                 "task": task_text,
                 **images_native,
             }
@@ -663,6 +730,8 @@ def convert(
             }
             if dataset_native is not None:
                 dataset_native.add_frame(frame_native)
+            if dataset_native_hand is not None:
+                dataset_native_hand.add_frame(frame_native_hand)
             if dataset_native_rot6d is not None:
                 dataset_native_rot6d.add_frame(frame_native_rot6d)
             if dataset_abs is not None:
@@ -677,8 +746,8 @@ def convert(
                 dataset_delta_hand.add_frame(frame_delta_hand)
 
         for dataset in (
-            dataset_native, dataset_native_rot6d, dataset_abs, dataset_rel,
-            dataset_delta, dataset_goalabs, dataset_delta_hand,
+            dataset_native, dataset_native_hand, dataset_native_rot6d, dataset_abs,
+            dataset_rel, dataset_delta, dataset_goalabs, dataset_delta_hand,
         ):
             if dataset is not None:
                 dataset.save_episode()
@@ -690,6 +759,8 @@ def convert(
 
     if dataset_native is not None:
         dataset_native.finalize()
+    if dataset_native_hand is not None:
+        dataset_native_hand.finalize()
     if dataset_native_rot6d is not None:
         dataset_native_rot6d.finalize()
     if writer_abs is not None:
@@ -705,6 +776,7 @@ def convert(
 
     dir_by_group = {
         "native": native_dir,
+        "native_hand": native_hand_dir,
         "native_rot6d": native_rot6d_dir,
         "abs": abs_dir,
         "rel": rel_dir,

@@ -67,6 +67,7 @@ from lerobot.utils.constants import ACTION
 
 from anvil_sim.eval_libero_ee import (
     _LEGACY_ACTION_TYPES,
+    _NATIVE_FRAME_ACTION_TYPES,
     _ZERO_CAL_ACTION_TYPES,
     _make_anvil_env_pre_post_processors,
 )
@@ -93,6 +94,11 @@ def _provider_mode(action_type: str) -> str:
       action processor uses.
     """
     if action_type in _EXTRA_ACTION_TYPES:
+        return "direct"
+    if action_type in _NATIVE_FRAME_ACTION_TYPES:
+        # native_hand stores the per-step native command (rotated into the
+        # hand frame) — a perfect policy outputs it as-is; the eval action
+        # step rotates it back to world against the live obs EE orientation.
         return "direct"
     if action_type in _ZERO_CAL_ACTION_TYPES:
         mode = _ZERO_CAL_ACTION_TYPES[action_type][1]
@@ -306,7 +312,12 @@ def replay(
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    all_types = _EXTRA_ACTION_TYPES + _LEGACY_ACTION_TYPES + tuple(_ZERO_CAL_ACTION_TYPES)
+    all_types = (
+        _EXTRA_ACTION_TYPES
+        + _LEGACY_ACTION_TYPES
+        + _NATIVE_FRAME_ACTION_TYPES
+        + tuple(_ZERO_CAL_ACTION_TYPES)
+    )
     parser.add_argument("--action-type", required=True, choices=sorted(all_types))
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--control-mode", required=True, choices=["relative", "absolute"])

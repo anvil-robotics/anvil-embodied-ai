@@ -24,10 +24,12 @@ from anvil_sim.libero_convert import (
     convert_episode_delta_hand_actions,
     convert_episode_goal_abs_actions,
     convert_episode_goal_states,
+    convert_episode_native_hand_actions,
+    native_action_to_hand,
     native_action_to_rot6d,
     native_delta_to_goal,
 )
-from anvil_sim.libero_processor import rot6d_action_to_native
+from anvil_sim.libero_processor import hand_action_to_native, rot6d_action_to_native
 
 
 def test_convert_episode_actions_returns_absolute_not_relative():
@@ -223,3 +225,47 @@ def test_goalabs_action_column_roundtrips_through_ee_rel_world_transform():
     recovered = ee_rel_world_inverse(action_rel, anchor)
 
     np.testing.assert_allclose(recovered, action_goal_abs, atol=1e-5)
+
+
+def test_convert_episode_native_hand_actions_roundtrips_to_native_command():
+    """The native_hand dataset column, rotated back to world per-step against
+    each frame's OWN EE orientation (raw observation.state[3:6] axis-angle),
+    must exactly reconstruct the source native command -- this is the eval
+    rotate-back applied to the stored data, i.e. the GT-replay oracle at the
+    data level. Uses raw LIBERO 8-dim states ([pos(3), axis-angle(3),
+    gripper_qpos(2)]) with a clearly non-identity orientation so a wrong
+    frame convention would fail."""
+    raw_states = np.array(
+        [
+            [0.1, 0.2, 0.3, 0.2, -0.5, 0.3, 0.02, -0.02],
+            [0.15, 0.18, 0.31, 0.4, 0.1, -0.2, 0.03, -0.03],
+        ],
+        dtype=np.float32,
+    )
+    native_actions = np.array(
+        [
+            [0.4, -0.2, 0.6, 0.3, -0.1, 0.2, -1.0],
+            [-0.3, 0.5, 0.1, -0.2, 0.15, -0.05, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+    hand_actions = convert_episode_native_hand_actions(raw_states, native_actions)
+
+    # native_hand must NOT be a no-op copy of native (frame genuinely applied).
+    assert not np.allclose(hand_actions[:, :6], native_actions[:, :6], atol=1e-3)
+
+    for t in range(len(native_actions)):
+        recovered = hand_action_to_native(hand_actions[t], raw_states[t][3:6])
+        np.testing.assert_allclose(recovered, native_actions[t], atol=1e-5)
+
+
+def test_native_action_to_hand_matches_episode_helper():
+    """The per-episode helper is just the pure transform applied per step."""
+    raw_state = np.array([0.1, 0.2, 0.3, 0.2, -0.5, 0.3, 0.02, -0.02], dtype=np.float32)
+    native = np.array([0.4, -0.2, 0.6, 0.3, -0.1, 0.2, -1.0], dtype=np.float32)
+    per_step = native_action_to_hand(native, raw_state[3:6])
+    episode = convert_episode_native_hand_actions(
+        raw_state.reshape(1, 8), native.reshape(1, 7)
+    )[0]
+    np.testing.assert_allclose(episode, per_step, atol=1e-7)

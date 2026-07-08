@@ -20,7 +20,11 @@ from anvil_shared.rotation import (
     quat_to_matrix,
 )
 
-from anvil_sim.libero_convert import native_action_to_rot6d, native_delta_to_goal
+from anvil_sim.libero_convert import (
+    native_action_to_hand,
+    native_action_to_rot6d,
+    native_delta_to_goal,
+)
 from anvil_sim.libero_processor import (
     GRIPPER_CLOSE_CMD,
     GRIPPER_OPEN_CMD,
@@ -28,9 +32,12 @@ from anvil_sim.libero_processor import (
     NATIVE_ROT_SCALE,
     AnvilEEActionProcessorStep,
     AnvilEEObsProcessorStep,
+    NativeHandActionProcessorStep,
+    NativeHandObsProcessorStep,
     NativeRot6dActionProcessorStep,
     ZeroCalActionProcessorStep,
     absolute_native_action_from_target,
+    hand_action_to_native,
     native_action_from_targets,
     native_action_from_world_delta,
     recovered_delta_native_action,
@@ -712,3 +719,79 @@ def test_zero_cal_rejects_invalid_deliver():
     obs_step = AnvilEEObsProcessorStep(action_type="ee_abs")
     with pytest.raises(ValueError, match="deliver"):
         ZeroCalActionProcessorStep(mode="abs", obs_step=obs_step, deliver="bogus")
+
+
+# =============================================================================
+# native_hand -- the FRAME factor (world vs hand) isolated with the NATIVE
+# command representation. Convert rotates the world command into the EE body
+# frame (native_action_to_hand); eval rotates it back to world
+# (hand_action_to_native). The eval rotate-back MUST be the exact inverse of
+# the convert rotation with the same per-step EE orientation, or the GT-replay
+# oracle collapses -- so the round-trip is the hard math gate for this arm.
+# =============================================================================
+
+
+def test_native_hand_roundtrip_reconstructs_world_command_exactly():
+    """world -> hand -> world with the SAME EE orientation must recover the
+    original native command to float precision (the correctness oracle's
+    data-level identity) -- for an arbitrary, clearly-non-identity EE
+    orientation so a dropped rotation would show."""
+    ee_axis_angle = np.array([0.3, -0.7, 0.4])  # world-frame EE orientation
+    native = np.array([0.42, -0.18, 0.33, 0.21, -0.44, 0.16, -1.0], dtype=np.float32)
+
+    hand = native_action_to_hand(native, ee_axis_angle)
+    recovered = hand_action_to_native(hand, ee_axis_angle)
+
+    np.testing.assert_allclose(recovered, native, atol=1e-6)
+
+
+def test_native_hand_identity_orientation_is_a_noop():
+    """With identity EE orientation, the hand frame IS the world frame, so
+    the command must be unchanged -- guards against an accidental extra
+    transpose/scale creeping in."""
+    native = np.array([0.42, -0.18, 0.33, 0.21, -0.44, 0.16, 1.0], dtype=np.float32)
+    hand = native_action_to_hand(native, np.zeros(3))
+    np.testing.assert_allclose(hand, native, atol=1e-7)
+
+
+def test_native_hand_rotates_translation_into_body_frame():
+    """A concrete frame check: a pure +x world translation command, with the
+    EE yawed +90deg about z, must become a -y command in the body frame
+    (R_ee.T @ world), NOT stay +x (which is what a world-frame arm would
+    store) -- this is the whole point of the frame factor."""
+    native = np.array([0.5, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], dtype=np.float32)
+    ee_yaw90 = np.array([0.0, 0.0, np.pi / 2])
+    hand = native_action_to_hand(native, ee_yaw90)
+    np.testing.assert_allclose(hand[:3], [0.0, -0.5, 0.0], atol=1e-6)
+
+
+def test_native_hand_gripper_passes_through_unchanged():
+    for g in (-1.0, 1.0, 0.5):
+        native = np.array([0.1, 0.2, 0.3, 0.05, -0.02, 0.01, g], dtype=np.float32)
+        hand = native_action_to_hand(native, np.array([0.2, 0.1, -0.3]))
+        assert hand[6] == np.float32(g)
+        recovered = hand_action_to_native(hand, np.array([0.2, 0.1, -0.3]))
+        assert recovered[6] == np.float32(g)
+
+
+def test_native_hand_action_processor_matches_pure_function():
+    """The processor step must rotate the policy's hand-frame output back to
+    world via hand_action_to_native, using the EE orientation cached by its
+    paired obs step (state[3:6] axis-angle)."""
+    ee_axis_angle = np.array([0.15, -0.25, 0.35], dtype=np.float32)
+    obs_step = NativeHandObsProcessorStep()
+    obs_step.last_ee_axis_angle = ee_axis_angle
+    action_step = NativeHandActionProcessorStep(obs_step=obs_step)
+
+    hand_cmd = np.array([0.02, -0.03, 0.04, 0.1, -0.05, 0.02, -1.0], dtype=np.float32)
+    result = action_step.action(torch.from_numpy(hand_cmd).unsqueeze(0)).numpy()[0]
+
+    expected = hand_action_to_native(hand_cmd, ee_axis_angle)
+    np.testing.assert_allclose(result, expected, atol=1e-6)
+
+
+def test_native_hand_action_processor_requires_observation_first():
+    obs_step = NativeHandObsProcessorStep()
+    action_step = NativeHandActionProcessorStep(obs_step=obs_step)
+    with pytest.raises(RuntimeError, match="paired NativeHandObsProcessorStep"):
+        action_step.action(torch.zeros(1, 7))
