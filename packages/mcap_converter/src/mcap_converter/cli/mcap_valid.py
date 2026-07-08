@@ -5,9 +5,10 @@ from each topic's ROS2 message type (see core/quality.classify_topic) — no con
 config is needed or accepted.
 
 By default (no flags needed), a JSON report and a comprehensive Markdown
-report covering every episode and topic are always written to
-./mcap_valid_reports/<name>/report.{json,md}, in addition to whatever --format /
---output produce.
+report covering every episode and topic are always written inside the input
+itself, at <input>/mcap_valid_reports/report.{json,md} (or
+<input's-parent>/mcap_valid_reports/<stem>/report.{json,md} for a single
+file), in addition to whatever --format / --output produce.
 
 `--topic`/`--max-samples` fold in the old standalone `mcap-inspect` tool's deep
 per-message field-structure dump for a single topic (opt-in, off by default).
@@ -160,14 +161,25 @@ def default_report_paths(input_path: Path) -> tuple[Path, Path]:
     """
     Compute the default (JSON, Markdown) report paths for an input path.
 
-    Reports are always written to ./mcap_valid_reports/<name>/report.{json,md}
-    (relative to the current working directory), grouped in a per-session
-    subfolder named after the input: a directory's own name, or a single
-    file's stem (extension stripped).
+    Reports always live inside the input's own location, never relative to
+    the current working directory — this is what lets a session directory
+    carry its own report and lets `mcap-convert`'s auto-discovery find it
+    regardless of where either command was invoked from.
+
+    - Directory input (the normal case, a session directory): reports go to
+      <resolved_input_dir>/mcap_valid_reports/report.{json,md}. No extra
+      per-name subfolder is needed here — the directory itself is already
+      the namespace.
+    - Single-file input: reports go to
+      <file's_parent_dir>/mcap_valid_reports/<file_stem>/report.{json,md} —
+      the per-file subfolder is kept because multiple files can share the
+      same parent directory and would otherwise collide.
     """
     resolved = input_path.resolve()
-    name = resolved.stem if resolved.is_file() else resolved.name
-    report_dir = Path.cwd() / "mcap_valid_reports" / name
+    if resolved.is_file():
+        report_dir = resolved.parent / "mcap_valid_reports" / resolved.stem
+    else:
+        report_dir = resolved / "mcap_valid_reports"
     return report_dir / "report.json", report_dir / "report.md"
 
 
@@ -435,7 +447,8 @@ examples:
   mcap-valid -i data/raw/my-session --fail-on-critical   # CI gate, exit 1 on any critical episode
   mcap-valid -i recording.mcap --topic /joint_states     # deep field-structure dump for one topic
 
-  (by default, a JSON + Markdown report is always written to ./mcap_valid_reports/<name>/report.{json,md})
+  (by default, a JSON + Markdown report is always written inside the input, at
+   <input>/mcap_valid_reports/report.{json,md})
 """,
     )
     parser.add_argument(
@@ -447,7 +460,7 @@ examples:
         default=None,
         help=(
             "also write the report to this file, IN ADDITION to the default "
-            "./mcap_valid_reports/<name>/report.{json,md} report files that are always written"
+            "<input>/mcap_valid_reports/report.{json,md} report files that are always written"
         ),
     )
     parser.add_argument("--stream-gap-factor", type=float, default=5.0)

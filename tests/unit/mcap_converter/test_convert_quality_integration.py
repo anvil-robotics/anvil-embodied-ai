@@ -253,7 +253,9 @@ class TestMandatoryQualityGate:
     def test_no_quality_report_and_no_default_blocks_and_exits_1(self, tmp_path, monkeypatch, capsys):
         from mcap_converter.cli.convert import main
 
-        # cwd with guaranteed no ./mcap_valid_reports/ — so auto-discovery finds nothing.
+        # input_dir ("fake-input-dir") never exists/gets created, so
+        # <input_dir>/mcap_valid_reports/ can never exist either — auto-discovery
+        # is guaranteed to find nothing regardless of cwd.
         monkeypatch.chdir(tmp_path)
         output_dir = tmp_path / "output"
         argv = self._base_argv(tmp_path, output_dir)

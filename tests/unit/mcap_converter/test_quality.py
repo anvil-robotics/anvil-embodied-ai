@@ -10,6 +10,7 @@ Verifies:
 """
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,30 @@ from mcap_converter.core.quality import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _STUB_MCAP = _REPO_ROOT / "tests/smoke/fixtures/test-session/0001/0001_0.mcap"
+
+
+@pytest.fixture
+def stub_mcap_copy(tmp_path):
+    """Copy the single committed stub mcap fixture into an isolated tmp_path.
+
+    default_report_paths() now writes inside the input's own location (not
+    cwd), so pointing `-i` straight at the real committed fixture file would
+    write mcap_valid_reports/ into the tracked fixture tree on every test
+    run. CLI tests that need a single-file input use this copy instead.
+    """
+    dest = tmp_path / _STUB_MCAP.name
+    shutil.copy(_STUB_MCAP, dest)
+    return dest
+
+
+@pytest.fixture
+def stub_session_copy(tmp_path):
+    """Copy the whole committed 5-episode stub session directory into
+    tmp_path, for the same repo-pollution reason as stub_mcap_copy above but
+    for directory-input tests."""
+    dest = tmp_path / "test-session"
+    shutil.copytree(_STUB_MCAP.parent.parent, dest)
+    return dest
 
 
 class TestWorstSeverity:
@@ -781,18 +806,24 @@ class TestScanEpisodeIntegration:
 
 
 class TestMcapValidCli:
-    # NOTE: mcap-valid now *always* writes ./mcap_valid_reports/<name>/report.{json,md}
-    # relative to the current working directory (see TestDefaultReportPaths /
-    # TestDefaultReportWriting below). Every test in this class chdirs into
-    # tmp_path first so that unconditional default-report writing never lands
-    # inside the real repo working tree while running the test suite.
+    # NOTE: mcap-valid now *always* writes <input>/mcap_valid_reports/report.{json,md}
+    # inside the input's own resolved location (see TestDefaultReportPaths
+    # below) — no longer relative to the current working directory. Every
+    # test in this class that exercises a single-file/directory input still
+    # chdirs into tmp_path (harmless, kept for isolation of any other
+    # cwd-relative behavior) but MUST point `-i` at a tmp_path COPY of the
+    # committed fixture (via the stub_mcap_copy / stub_session_copy fixtures)
+    # rather than the real fixture path directly — otherwise the unconditional
+    # default-report write would land inside the tracked repo fixture tree.
 
-    def test_json_output_is_valid_and_exit_code_zero_without_critical(self, tmp_path, monkeypatch, capsys):
+    def test_json_output_is_valid_and_exit_code_zero_without_critical(
+        self, tmp_path, monkeypatch, capsys, stub_mcap_copy
+    ):
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
         exit_code = main([
-            "-i", str(_STUB_MCAP),
+            "-i", str(stub_mcap_copy),
             "--format", "json",
             "--fail-on-critical",
         ])
@@ -822,13 +853,13 @@ class TestMcapValidCli:
 
         assert exit_code == 1
 
-    def test_output_file_is_written(self, tmp_path, monkeypatch):
+    def test_output_file_is_written(self, tmp_path, monkeypatch, stub_mcap_copy):
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
         out_file = tmp_path / "report.json"
         main([
-            "-i", str(_STUB_MCAP),
+            "-i", str(stub_mcap_copy),
             "--format", "json", "--output", str(out_file),
         ])
 
@@ -867,16 +898,17 @@ class TestMcapValidCli:
         # this is the regression the plan revision was written to catch.
         assert "InvalidMagic" in captured.out or "not a valid" in captured.out.lower() or "Errno" in captured.out
 
-    def test_directory_scan_covers_all_episodes_and_runs_batch_fps_check(self, tmp_path, monkeypatch, capsys):
+    def test_directory_scan_covers_all_episodes_and_runs_batch_fps_check(
+        self, tmp_path, monkeypatch, capsys, stub_session_copy
+    ):
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
-        # tests/smoke/fixtures/test-session/ contains 5 numbered episode
-        # subdirectories (0001-0005), each with one .mcap file.
-        stub_session_dir = _STUB_MCAP.parent.parent
-
+        # stub_session_copy is a tmp_path copy of tests/smoke/fixtures/test-session/,
+        # which contains 5 numbered episode subdirectories (0001-0005), each
+        # with one .mcap file.
         exit_code = main([
-            "-i", str(stub_session_dir),
+            "-i", str(stub_session_copy),
             "--format", "json",
         ])
 
@@ -890,13 +922,15 @@ class TestMcapValidCli:
         assert "Scanning episodes" in captured.err
         assert "Scanning episodes" not in captured.out
 
-    def test_single_file_scan_shows_no_progress_bar(self, tmp_path, monkeypatch, capsys):
+    def test_single_file_scan_shows_no_progress_bar(
+        self, tmp_path, monkeypatch, capsys, stub_mcap_copy
+    ):
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
 
         exit_code = main([
-            "-i", str(_STUB_MCAP),
+            "-i", str(stub_mcap_copy),
             "--format", "json",
         ])
 
@@ -906,13 +940,15 @@ class TestMcapValidCli:
         # uselessly, so it's gated on len(mcap_files) > 1 and must not appear here.
         assert "Scanning episodes" not in captured.err
 
-    def test_table_format_with_output_still_writes_json_file(self, tmp_path, monkeypatch, capsys):
+    def test_table_format_with_output_still_writes_json_file(
+        self, tmp_path, monkeypatch, capsys, stub_mcap_copy
+    ):
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
         out_file = tmp_path / "report.json"
         main([
-            "-i", str(_STUB_MCAP),
+            "-i", str(stub_mcap_copy),
             "--output", str(out_file),  # no --format flag -> defaults to table
         ])
 
@@ -924,19 +960,22 @@ class TestMcapValidCli:
         assert "episodes" in payload
         assert len(payload["episodes"]) == 1
 
-    def test_default_output_writes_json_and_md_without_any_flags(self, tmp_path, monkeypatch):
+    def test_default_output_writes_json_and_md_without_any_flags(
+        self, tmp_path, monkeypatch, stub_session_copy
+    ):
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
-        stub_session_dir = _STUB_MCAP.parent.parent  # tests/smoke/fixtures/test-session (5 episodes)
 
         exit_code = main([
-            "-i", str(stub_session_dir),
+            "-i", str(stub_session_copy),
         ])
 
         assert exit_code == 0
-        default_json = tmp_path / "mcap_valid_reports" / "test-session" / "report.json"
-        default_md = tmp_path / "mcap_valid_reports" / "test-session" / "report.md"
+        # New convention: report lives inside the session dir itself
+        # (<session_dir>/mcap_valid_reports/report.*), not under cwd.
+        default_json = stub_session_copy / "mcap_valid_reports" / "report.json"
+        default_md = stub_session_copy / "mcap_valid_reports" / "report.md"
         assert default_json.exists()
         assert default_md.exists()
 
@@ -946,37 +985,45 @@ class TestMcapValidCli:
         md_text = default_md.read_text()
         assert md_text.count("### ") >= 5
 
-    def test_explicit_output_flag_still_works_alongside_default_files(self, tmp_path, monkeypatch):
+    def test_explicit_output_flag_still_works_alongside_default_files(
+        self, tmp_path, monkeypatch, stub_session_copy
+    ):
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
-        stub_session_dir = _STUB_MCAP.parent.parent
         custom_output = tmp_path / "custom.json"
 
         exit_code = main([
-            "-i", str(stub_session_dir),
+            "-i", str(stub_session_copy),
             "--format", "json",
             "--output", str(custom_output),
         ])
 
         assert exit_code == 0
-        assert (tmp_path / "mcap_valid_reports" / "test-session" / "report.json").exists()
-        assert (tmp_path / "mcap_valid_reports" / "test-session" / "report.md").exists()
+        assert (stub_session_copy / "mcap_valid_reports" / "report.json").exists()
+        assert (stub_session_copy / "mcap_valid_reports" / "report.md").exists()
         assert custom_output.exists()
 
     def test_nonexistent_input_path_errors_without_writing_reports(self, tmp_path, monkeypatch):
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
+        nonexistent = tmp_path / "does-not-exist"
 
         exit_code = main([
-            "-i", str(tmp_path / "does-not-exist"),
+            "-i", str(nonexistent),
         ])
 
         assert exit_code != 0
+        # main() bails out before ever computing default_report_paths() for a
+        # missing input, so no mcap_valid_reports/ should appear either under
+        # the (nonexistent) input location or under cwd.
+        assert not (nonexistent / "mcap_valid_reports").exists()
         assert not (tmp_path / "mcap_valid_reports").exists()
 
-    def test_verbose_table_shows_full_action_label_not_swallowed_by_rich_markup(self, tmp_path, monkeypatch, capsys):
+    def test_verbose_table_shows_full_action_label_not_swallowed_by_rich_markup(
+        self, tmp_path, monkeypatch, capsys, stub_mcap_copy
+    ):
         # Regression test for Rich markup swallowing "[left]"/"[right]" out of
         # "action[left]"/"action[right]" labels when embedded unescaped in a
         # markup f-string. Config-free classification can no longer force a
@@ -993,7 +1040,7 @@ class TestMcapValidCli:
 
         monkeypatch.chdir(tmp_path)
         exit_code = main([
-            "-i", str(_STUB_MCAP),
+            "-i", str(stub_mcap_copy),
             "--verbose",
         ])
 
@@ -1001,14 +1048,16 @@ class TestMcapValidCli:
         assert exit_code == 0
         assert "action[right]" in captured.out
 
-    def test_topic_flag_dumps_field_structure_in_table_mode(self, tmp_path, monkeypatch, capsys):
+    def test_topic_flag_dumps_field_structure_in_table_mode(
+        self, tmp_path, monkeypatch, capsys, stub_mcap_copy
+    ):
         # Folds in the old standalone `mcap-inspect` tool: --topic triggers a deep
         # per-message field-structure dump for that one topic.
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
         exit_code = main([
-            "-i", str(_STUB_MCAP),
+            "-i", str(stub_mcap_copy),
             "--topic", "/joint_states",
         ])
 
@@ -1022,13 +1071,13 @@ class TestMcapValidCli:
         assert "List[float]" in captured.out
 
     def test_topic_flag_with_json_format_includes_topic_structure_alongside_episodes(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, stub_mcap_copy
     ):
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
         exit_code = main([
-            "-i", str(_STUB_MCAP),
+            "-i", str(stub_mcap_copy),
             "--format", "json",
             "--topic", "/joint_states",
         ])
@@ -1041,14 +1090,16 @@ class TestMcapValidCli:
         assert "/joint_states" in payload["topic_structure"]
         assert "position" in payload["topic_structure"]["/joint_states"]["fields"]
 
-    def test_json_format_without_topic_flag_has_no_topic_structure_key(self, tmp_path, monkeypatch, capsys):
+    def test_json_format_without_topic_flag_has_no_topic_structure_key(
+        self, tmp_path, monkeypatch, capsys, stub_mcap_copy
+    ):
         # The --topic addition must not change existing --format json behavior
         # when --topic isn't given.
         from mcap_converter.cli.mcap_valid import main
 
         monkeypatch.chdir(tmp_path)
         exit_code = main([
-            "-i", str(_STUB_MCAP),
+            "-i", str(stub_mcap_copy),
             "--format", "json",
         ])
 
@@ -1057,7 +1108,9 @@ class TestMcapValidCli:
         assert exit_code == 0
         assert "topic_structure" not in payload
 
-    def test_topics_baseline_table_lists_all_fixture_topics_with_types(self, tmp_path, monkeypatch, capsys):
+    def test_topics_baseline_table_lists_all_fixture_topics_with_types(
+        self, tmp_path, monkeypatch, capsys, stub_mcap_copy
+    ):
         # New "what's in this file" table (folded in from the old mcap-inspect
         # topic summary): every topic in a representative episode, regardless
         # of severity, with its message type and role.
@@ -1074,7 +1127,7 @@ class TestMcapValidCli:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("COLUMNS", "200")
         exit_code = main([
-            "-i", str(_STUB_MCAP),
+            "-i", str(stub_mcap_copy),
         ])
 
         captured = capsys.readouterr()
@@ -1089,7 +1142,9 @@ class TestMcapValidCli:
         assert "sensor_msgs/CompressedImage" in captured.out
         assert "std_msgs/Float64MultiArray" in captured.out
 
-    def test_topics_baseline_table_respects_narrow_terminal_width(self, tmp_path, monkeypatch, capsys):
+    def test_topics_baseline_table_respects_narrow_terminal_width(
+        self, tmp_path, monkeypatch, capsys, stub_mcap_copy
+    ):
         # Regression test for the fixed Console(width=200) that used to back this
         # table: it always rendered at exactly 200 columns regardless of the real
         # terminal width, causing a jarring width mismatch against every other
@@ -1101,7 +1156,7 @@ class TestMcapValidCli:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("COLUMNS", "60")
         exit_code = main([
-            "-i", str(_STUB_MCAP),
+            "-i", str(stub_mcap_copy),
         ])
 
         captured = capsys.readouterr()
@@ -1282,7 +1337,7 @@ class TestRenderTableReasonColumn:
 
 
 class TestDefaultReportPaths:
-    def test_directory_input_uses_directory_name(self, tmp_path):
+    def test_directory_input_writes_inside_the_session_dir(self, tmp_path):
         from mcap_converter.cli.mcap_valid import default_report_paths
 
         session_dir = tmp_path / "my-session"
@@ -1292,10 +1347,13 @@ class TestDefaultReportPaths:
 
         assert json_path.name == "report.json"
         assert md_path.name == "report.md"
-        assert json_path.parent.name == "my-session"
-        assert md_path.parent.name == "my-session"
-        assert json_path.parent.parent.name == "mcap_valid_reports"
-        assert md_path.parent.parent.name == "mcap_valid_reports"
+        # No more per-name subfolder for a directory input — the directory
+        # itself is already the namespace, so the report sits directly under
+        # <session_dir>/mcap_valid_reports/.
+        assert json_path.parent.name == "mcap_valid_reports"
+        assert md_path.parent.name == "mcap_valid_reports"
+        assert json_path.parent.parent == session_dir
+        assert md_path.parent.parent == session_dir
 
     def test_file_input_uses_stem_without_extension(self, tmp_path):
         from mcap_converter.cli.mcap_valid import default_report_paths
@@ -1309,8 +1367,15 @@ class TestDefaultReportPaths:
         assert md_path.name == "report.md"
         assert json_path.parent.name == "recording"
         assert md_path.parent.name == "recording"
+        # Per-file subfolder still lives under mcap_valid_reports/, and that
+        # in turn lives under the file's own parent directory (tmp_path here),
+        # never cwd.
+        assert json_path.parent.parent.name == "mcap_valid_reports"
+        assert md_path.parent.parent.name == "mcap_valid_reports"
+        assert json_path.parent.parent.parent == tmp_path
+        assert md_path.parent.parent.parent == tmp_path
 
-    def test_uses_cwd_not_input_parent(self, tmp_path, monkeypatch):
+    def test_uses_input_location_not_cwd(self, tmp_path, monkeypatch):
         from mcap_converter.cli.mcap_valid import default_report_paths
 
         # Input lives under a directory that is NOT the cwd we chdir into.
@@ -1325,10 +1390,13 @@ class TestDefaultReportPaths:
 
         json_path, md_path = default_report_paths(session_dir)
 
-        # mcap_valid_reports/ is created relative to cwd, not relative to
-        # the input path's own parent directory.
-        assert json_path.parent.parent.parent == cwd_dir
-        assert md_path.parent.parent.parent == cwd_dir
+        # mcap_valid_reports/ is created inside the input's own resolved
+        # location, never relative to cwd_dir — cwd_dir must not appear
+        # anywhere in the resulting path at all.
+        assert json_path.parent.parent == session_dir
+        assert md_path.parent.parent == session_dir
+        assert cwd_dir not in json_path.parents
+        assert cwd_dir not in md_path.parents
 
 
 class TestRenderMarkdownReport:

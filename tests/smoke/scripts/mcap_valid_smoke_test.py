@@ -17,13 +17,17 @@ A  `mcap-valid` basic CLI behavior (fast, no mutation)
    A4. --fail-on-critical exits 0 on the healthy fixture
    A5. --fail-on-critical exits 1 when the input file itself is unreadable
    A6. default behavior (no flags) always writes a JSON + Markdown report to
-       ./mcap_valid_reports/<name>/report.{json,md} relative to cwd
+       <input>/mcap_valid_reports/report.{json,md}, inside the input itself
 
-Note: every `mcap-valid` subprocess below runs with `cwd` pointed at an
-isolated temp directory (NOT the repo root) — since Task 10, mcap-valid
-unconditionally writes ./mcap_valid_reports/<name>/report.{json,md} relative to its
-cwd, and running with cwd=REPO would leave that directory behind in the
-actual git working tree as a side effect of this smoke test.
+Note: mcap-valid unconditionally writes <input>/mcap_valid_reports/report.{json,md}
+inside the `-i` input's own resolved location — not relative to cwd. So every
+`mcap-valid` subprocess below that needs the default (non---output) report
+path runs against a temp COPY of the committed test-session fixture (see
+`_copy_session_into`) rather than the real committed `MCAP_ROOT` directly;
+pointing `-i` at MCAP_ROOT would otherwise leave mcap_valid_reports/ behind
+inside the tracked fixture tree as a side effect of this smoke test. `cwd` is
+still pointed at an isolated temp directory too, both to host that fixture
+copy and to keep any other cwd-relative side effects out of the repo.
 
 B  `mcap-convert` quality-flag integration (subprocess, real conversion)
    B1. generate a real mcap-valid JSON report, then build a synthetic variant
@@ -47,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -86,17 +91,33 @@ def _skip(name: str, reason: str) -> None:
 def _run(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     """Run a `uv run <cli>` subprocess with an explicit, isolated `cwd`.
 
-    Since Task 10, `mcap-valid` unconditionally writes
-    ./mcap_valid_reports/<name>/report.{json,md} relative to its cwd, so every call
-    here must run with cwd pointed at a temp directory rather than REPO — a
-    cwd=REPO invocation would leave that report directory behind in the real
-    git working tree. `--project REPO` is injected so `uv run` still finds
-    the project regardless of cwd.
+    `mcap-valid` unconditionally writes <input>/mcap_valid_reports/report.{json,md}
+    inside its `-i` input's own resolved location (not relative to cwd), so
+    callers that exercise the default report path must pass `-i` pointed at a
+    temp COPY of the fixture (see `_copy_session_into`), never the real
+    committed `MCAP_ROOT` directly — otherwise the write would land inside
+    the tracked fixture tree. `cwd` is still isolated here too, both to host
+    that fixture copy and to keep any other cwd-relative output (e.g.
+    --output PATH targets) out of the repo. `--project REPO` is injected so
+    `uv run` still finds the project regardless of cwd.
     """
     if cmd[:2] == ["uv", "run"]:
         cmd = cmd[:2] + ["--project", str(REPO)] + cmd[2:]
     print(f"  $ (cwd={cwd}) {' '.join(cmd)}", flush=True)
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+
+def _copy_session_into(dest_root: Path) -> Path:
+    """Copy the real committed test-session fixture into an isolated temp
+    directory and return the copy's path.
+
+    mcap-valid's default report now writes inside `-i`'s own resolved
+    location, not cwd — pointing `-i` at MCAP_ROOT directly would write
+    mcap_valid_reports/ into the tracked fixture tree on every smoke test run.
+    """
+    dest = dest_root / "test-session"
+    shutil.copytree(MCAP_ROOT, dest)
+    return dest
 
 
 def _assert_episode_shape(name: str, payload: dict) -> bool:
@@ -128,13 +149,13 @@ def run_section_a() -> None:
     print("  SECTION A — mcap-valid CLI behavior (no mutation)")
     print(f"{'═'*70}")
 
-    base_cmd = [
-        "uv", "run", "mcap-valid",
-        "-i", str(MCAP_ROOT),
-    ]
-
     with tempfile.TemporaryDirectory() as base_tmpdir:
         base_cwd = Path(base_tmpdir)
+        session_copy = _copy_session_into(base_cwd)
+        base_cmd = [
+            "uv", "run", "mcap-valid",
+            "-i", str(session_copy),
+        ]
 
         # A1 — table format runs cleanly
         print("\n  A1. table format")
@@ -171,8 +192,10 @@ def run_section_a() -> None:
     print("\n  A3. --output PATH (table format)")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
+        a3_session = _copy_session_into(tmp)
+        a3_cmd = ["uv", "run", "mcap-valid", "-i", str(a3_session)]
         out_path = tmp / "report.json"
-        proc = _run(base_cmd + ["--output", str(out_path)], cwd=tmp)
+        proc = _run(a3_cmd + ["--output", str(out_path)], cwd=tmp)
         _assert("A3 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
         _assert("A3 output file created", out_path.exists(), str(out_path))
         if out_path.exists():
@@ -205,11 +228,15 @@ def run_section_a() -> None:
     print("\n  A6. default report files (no flags needed)")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-        proc = _run(base_cmd, cwd=tmp)
+        a6_session = _copy_session_into(tmp)
+        a6_cmd = ["uv", "run", "mcap-valid", "-i", str(a6_session)]
+        proc = _run(a6_cmd, cwd=tmp)
         _assert("A6 exit code 0", proc.returncode == 0, f"exit {proc.returncode}")
 
-        default_json = tmp / "mcap_valid_reports" / "test-session" / "report.json"
-        default_md = tmp / "mcap_valid_reports" / "test-session" / "report.md"
+        # Report now lives inside the input's own location (session dir),
+        # not under cwd: <session_copy>/mcap_valid_reports/report.{json,md}.
+        default_json = a6_session / "mcap_valid_reports" / "report.json"
+        default_md = a6_session / "mcap_valid_reports" / "report.md"
         _assert(
             "A6 default JSON report written and non-empty",
             default_json.exists() and default_json.stat().st_size > 0,
@@ -251,13 +278,19 @@ def run_section_b() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
+        # A temp copy of the fixture, not MCAP_ROOT directly: mcap-valid's
+        # unconditional default report write would otherwise land inside the
+        # tracked fixture tree. mcap-convert below is also pointed at this
+        # same copy (not MCAP_ROOT) so its episode paths match the ones
+        # baked into the quality report generated from it.
+        session_copy = _copy_session_into(tmp)
 
         # B1 — generate a real report, then build a synthetic critical+warning variant
         print("\n  B1. generate real quality report, synthesize critical+warning variant")
         report_path = tmp / "report.json"
         proc = _run([
             "uv", "run", "mcap-valid",
-            "-i", str(MCAP_ROOT),
+            "-i", str(session_copy),
             "--format", "json",
             "--output", str(report_path),
         ], cwd=tmp)
@@ -291,7 +324,7 @@ def run_section_b() -> None:
 
         base_convert_cmd = [
             "uv", "run", "mcap-convert",
-            "-i", str(MCAP_ROOT),
+            "-i", str(session_copy),
             "--config", str(CONFIG),
             "--robot-type", "anvil_openarm",
         ]

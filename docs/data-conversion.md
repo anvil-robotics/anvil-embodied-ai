@@ -2,15 +2,47 @@
 
 # Data Conversion
 
-Convert MCAP recordings into LeRobot v3.0 datasets.
+Convert a **recorded session** into a LeRobot v3.0 dataset.
 
-**The usual flow:** `mcap-valid` (scan raw recordings for problems) → `mcap-convert` (convert) → `dataset-valid` (sanity-check the result). The other tools below (`mcap-to-video`, `merge-datasets`, `hf-upload`) are used as needed, not part of every conversion.
+A session is a directory of raw MCAP files (e.g. `data/raw/my-session/`) — one `.mcap` file per episode, all from the same recording run. Every tool below targets that same session directory, from the initial quality scan through to the finished dataset.
+
+**The usual flow:** `mcap-valid` (scan the target session for problems) → `mcap-convert` (convert that session into a dataset) → `dataset-valid` (sanity-check the result). The other tools below (`mcap-to-video`, `merge-datasets`, `hf-upload`) are used as needed, not part of every conversion.
+
+```
+┌─────────────────┐
+│ target session  │  data/raw/<session>/ — one *.mcap file per episode
+└─────────────────┘
+      │
+      ▼
+┌─────────────────┐
+│   mcap-valid    │  scan every episode in the session for quality issues
+│                 │  - severity per episode: critical / warning / pass
+│                 │  - writes <session>/mcap_valid_reports/report.{json,md}
+└─────────────────┘
+      │
+      ▼
+┌─────────────────┐
+│  mcap-convert   │  convert the whole session → one LeRobot v3.0 dataset
+│                 │  - required: refuses to run without the report above
+│                 │  - skips critical episodes by default (--include-flagged to override)
+└─────────────────┘
+      │
+      ▼
+┌─────────────────┐
+│  dataset-valid  │  sanity-check the converted dataset
+└─────────────────┘
+
+Used as needed, not part of every conversion:
+  mcap-to-video   — MCAP camera topics → MP4
+  merge-datasets  — combine multiple LeRobot datasets
+  hf-upload       — push a dataset to HuggingFace Hub
+```
 
 ---
 
 ## mcap-valid
 
-Scan **raw** MCAP recordings for quality issues before conversion — dropped frames, silent topics, cross-episode fps degradation. Run this against `data/raw/...`, not a converted dataset: converted datasets have gap-filled timestamps that hide the original drops.
+Scan a **raw session** — the same `data/raw/<session>/` directory you're about to convert — for quality issues before conversion: dropped frames, silent topics, cross-episode fps degradation. Point `-i` at the raw session, not a converted dataset: converted datasets have gap-filled timestamps that hide the original drops.
 
 No config needed — topic roles (joint-state stream, camera stream, action command) are inferred entirely from each topic's own ROS2 message type. Every topic present in the file appears in the output; message types outside the 3 known roles show up as `unclassified` (informational only, never affects severity).
 
@@ -21,7 +53,7 @@ uv run mcap-valid -i data/raw/my-session --fail-on-critical   # CI gate, exit 1 
 uv run mcap-valid -i data/raw/my-session --topic /joint_states  # deep field-structure dump for one topic
 ```
 
-A JSON report and a comprehensive Markdown report are **always** written to `./mcap_valid_reports/<input-dir-name>/report.{json,md}`, in addition to the terminal table — no flags required. **`mcap-convert` refuses to run without this report** (see below) — running `mcap-valid` first is a required step, not optional.
+A JSON report and a comprehensive Markdown report are **always** written to `<session>/mcap_valid_reports/report.{json,md}` — inside the session directory itself, not relative to wherever you happened to run the command from — in addition to the terminal table, no flags required. **`mcap-convert` refuses to run without this report** (see below) — running `mcap-valid` first is a required step, not optional.
 
 Every run also prints a baseline table of every topic found in the file (`Topic | Type | Messages | Role`), regardless of severity — this replaces the old standalone `mcap-inspect` tool's topic listing. Pass `--topic TOPIC` for a deeper per-message field-structure dump of one topic (also folded in from the old `mcap-inspect`).
 
@@ -39,7 +71,7 @@ An episode's overall status is its single worst topic's severity. `--fail-on-cri
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-i / --input PATH` | _(required)_ | MCAP file, or a directory scanned recursively for `*.mcap` |
+| `-i / --input PATH` | _(required)_ | A single MCAP file, or a session directory scanned recursively for `*.mcap` episode files |
 | `--format` | `table` | `table` · `json` |
 | `--output PATH` | — | Additionally write the report here (independent of the always-on `mcap_valid_reports/` output) |
 | `--fail-on-critical` | — | Exit 1 if any episode has a critical issue — for CI gating |
@@ -55,9 +87,11 @@ An episode's overall status is its single worst topic's severity. `--fail-on-cri
 
 ## mcap-convert
 
-**Requires a `mcap-valid` quality report to exist first** — either auto-discovered at the default `./mcap_valid_reports/<input-dir-name>/report.json` (written automatically by `mcap-valid`, see above), or pointed at explicitly with `--quality-report PATH`. If neither is found, `mcap-convert` exits with an error telling you to run `mcap-valid` first — it does not fall back to converting without one. This gate only checks that a report *file* exists — but `mcap-convert` also acts on its *contents* automatically: `--include-flagged` defaults to `warning`, so `pass` and `warning` episodes convert normally while `critical` episodes (e.g. a camera with zero messages) are skipped without you having to pass anything. `--include-flagged pass` is the stricter override — it also skips warning-level episodes, converting only fully-clean ones. `--include-flagged critical` is the looser override — it converts every episode regardless of severity.
+Converts every episode in a target session (`--input-dir`) into one LeRobot v3.0 dataset — this is the core, required step of the whole pipeline; everything else here supports or follows it.
 
-Pick the config that matches your recording setup:
+**Requires a `mcap-valid` quality report for that same session to exist first** — either auto-discovered at the default `<input-dir>/mcap_valid_reports/report.json` (written automatically by `mcap-valid`, see above, inside the session directory itself), or pointed at explicitly with `--quality-report PATH`. If neither is found, `mcap-convert` exits with an error telling you to run `mcap-valid` first — it does not fall back to converting without one. This gate only checks that a report *file* exists — but `mcap-convert` also acts on its *contents* automatically: `--include-flagged` defaults to `warning`, so `pass` and `warning` episodes convert normally while `critical` episodes (e.g. a camera with zero messages) are skipped without you having to pass anything. `--include-flagged pass` is the stricter override — it also skips warning-level episodes, converting only fully-clean ones. `--include-flagged critical` is the looser override — it converts every episode regardless of severity.
+
+Pick the config that matches your recording setup. `--config` is technically optional — omitting it falls back to a bare default `DataConfig()` that doesn't match any real robot's topic layout — so in practice always pass one of these:
 
 | Config | Teleop mode | Arms | Action source |
 |--------|-------------|------|---------------|
@@ -87,19 +121,26 @@ uv run mcap-convert \
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--input-dir PATH` | _(required)_ | Directory containing MCAP session folders |
-| `--config PATH` | _(required)_ | Conversion config YAML (see table above) |
-| `--output-dir PATH` | `data/datasets` | Base output directory — dataset lands at `<output-dir>/<input-dir-name>/` |
+| `-i / --input-dir PATH` | _(required)_ | The target session directory — walked recursively for `*.mcap` episode files |
+| `--config PATH` | bare `DataConfig()` | Conversion config YAML (see table above) — always pass one in practice |
+| `-o / --output-dir PATH` | `data/datasets` | Base output directory — dataset lands at `<output-dir>/<input-dir-name>/` |
 | `--output-path PATH` | — | Full output path override — bypasses auto-naming |
 | `--resume` | — | Skip already-converted episodes — safe to re-run after interruption |
 | `--max-episodes N` | all | Convert only the first N episodes |
 | `--fps N` | auto | Override output FPS (must not exceed source FPS) |
+| `--tolerance-s N` | `0.001` | Timestamp sync tolerance in seconds |
+| `--task NAME` | `manipulation` | Task name recorded into the dataset |
+| `--buffer-seconds N` | `5.0` | Buffer window for time alignment, in seconds |
+| `--debug-plot-episodes N` | `5` | Number of episodes to include in debug plots |
 | `--vcodec` | `h264` | `h264` · `hevc` · `libsvtav1` |
 | `--robot-type` | `anvil_openarm` | `anvil_openarm` · `anvil_yam` |
 | `--act-from-obs-n-step N` | config value | Override `action_from_observation_n` at runtime: `action[t] = observation[t+N]` |
-| `--quality-report PATH` | auto-discovered | Path to a mcap-valid JSON report — mcap-convert requires one to exist; if omitted, the default `./mcap_valid_reports/<input-dir-name>/report.json` is used |
+| `--quality-report PATH` | auto-discovered | Path to a mcap-valid JSON report — mcap-convert requires one to exist; if omitted, the default `<input-dir>/mcap_valid_reports/report.json` is used |
 | `--include-flagged [pass\|warning\|critical]` | `warning` | Highest severity tier to include when converting (inclusive threshold). `warning` (default) converts `pass` and `warning` episodes, skipping only `critical` ones automatically. `pass` is stricter — it also skips `warning` episodes. `critical` is the "convert everything" escape hatch — nothing is skipped. Works against whichever report the mandatory gate resolved (explicit or auto-discovered) |
 | `--skip-episode-idx SPEC` | — | Manually skip episodes by 1-based index (see below) |
+| `--push-to-hub` | — | Upload to HuggingFace Hub after conversion |
+| `--hf-user NAME` | auto-detect | HuggingFace username, used when `--push-to-hub` is set |
+| `--hf-repo NAME` | output dir name | HuggingFace dataset repo name, used when `--push-to-hub` is set |
 
 **Skipping flagged or known-bad episodes** — two independent mechanisms, usable together:
 
@@ -130,13 +171,18 @@ uv run mcap-convert -i data/raw/my-session --config ... --skip-episode-idx "1,5:
 
 ## dataset-valid
 
-Validate a converted dataset — runs 5 structural checks.
+Validate a converted dataset — loads it and runs 5 checks (load, inspect features, read first frame, batch-read, print stats).
 
 ```bash
 uv run dataset-valid --root data/datasets/my-sessions
 ```
 
 Expected: 5 checks all showing `[OK]`.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--root PATH` | `output_dataset` | Dataset root directory to validate |
+| `--repo-id ID` | `anvil_robot/manipulation_v1` | Dataset repository ID passed to `LeRobotDataset` |
 
 ---
 
