@@ -1,0 +1,27 @@
+# =============================================================================
+# LIBERO validation-harness spec — FRAME factor (hand vs world) isolated with
+# the NATIVE command representation. Mirrors task10_native_act.yaml EXACTLY
+# except the action column is LIBERO's own per-step command rotated into the
+# EE body (hand) frame at convert time (native_action_to_hand) and rotated
+# back to world at eval time (hand_action_to_native) before the identical
+# env.control_mode="relative" delivery. ONLY the frame differs vs `native`.
+# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_native_hand_act.yaml
+# =============================================================================
+
+name: task10-native-hand-act
+task_index: 10
+env_suite: libero_goal
+env_task_id: 8
+dataset_group: native_hand
+train:
+  trainer: lerobot-train
+  policy_type: act
+  steps: 50000
+  batch_size: 16
+  output_dir: model_zoo/native_hand/libero-task10-native-hand/act
+eval:
+  action_type: native_hand
+  control_mode: relative
+  n_episodes: 50
+gates:
+  gt_replay_margin: 15.0

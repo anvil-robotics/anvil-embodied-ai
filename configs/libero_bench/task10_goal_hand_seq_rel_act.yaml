@@ -1,0 +1,32 @@
+# =============================================================================
+# LIBERO validation-harness spec — Experiment E-framegap: HAND-frame
+# consecutive (n-(n-1)) target, RELATIVE (recovered-delta) delivery, ACT.
+# DOCUMENTED NEGATIVE RESULT — the gt-replay gate correctly REJECTS this
+# (GT replay 0% vs native 60%). Why: seq targets are consecutive-state deltas
+# already in PHYSICAL units (metres/radians); recovered-delta RELATIVE
+# delivery then hands them to robosuite's scale_action, which re-scales by
+# ~0.05 → double-scaled, robot barely moves → 0%. This is the same
+# double-scaling failure mode as Exp7 bug #2, and is WHY seq targets must be
+# delivered ABSOLUTE (see task10-goal-hand-seq-act). So the cube cell
+# "hand-frame + n-(n-1) + relative" is not mathematically valid with the
+# recovered-delta machinery; frame (world vs hand) at n-(n-1) is comparable
+# only under absolute delivery. Kept as a documented negative; gate stays ON.
+# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_goal_hand_seq_rel_act.yaml
+# =============================================================================
+
+name: task10-goal-hand-seq-rel-act
+task_index: 10
+env_suite: libero_goal
+env_task_id: 8
+dataset_group: delta_hand
+train:
+  trainer: anvil-trainer
+  action_type: ee_abs
+  policy_type: act
+  steps: 50000
+  batch_size: 16
+  reuse_checkpoint: model_zoo/ee-space/libero-task10-delta-hand/goal2deltahand-act/checkpoints/last/pretrained_model
+eval:
+  action_type: zerocal_goal_hand_seq_rel
+  control_mode: relative
+  n_episodes: 50

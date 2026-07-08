@@ -1,0 +1,25 @@
+# =============================================================================
+# LIBERO validation-harness spec — the task-10 champion (goal-abs) on the
+# MEDIUM-rotation task. Experiment E3 third robustness point: task_index=14
+# "put the wine bottle on top of the cabinet" (libero_goal task_id=2),
+# rot_rms 0.0125 rad/step — midway between task 10 (0.0082) and task 11
+# (0.0258). Tests whether goal-abs's task-10 lead over native decays
+# monotonically as rotation increases (task10 goal-abs>native, task11 goal-abs<native).
+# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task14_goal_abs_act.yaml
+# =============================================================================
+
+name: task14-goal-abs-act
+task_index: 14
+env_suite: libero_goal
+env_task_id: 2
+dataset_group: goalabs
+train:
+  trainer: anvil-trainer
+  action_type: ee_abs
+  policy_type: act
+  steps: 50000
+  batch_size: 16
+eval:
+  action_type: zerocal_goal_abs
+  control_mode: relative
+  n_episodes: 50

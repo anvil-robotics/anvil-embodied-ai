@@ -20,4 +20,4 @@ train:
 eval:
   action_type: zerocal_goal_world_n0
   control_mode: relative
-  n_episodes: 10
+  n_episodes: 50

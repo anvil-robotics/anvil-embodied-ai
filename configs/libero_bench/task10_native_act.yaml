@@ -19,4 +19,4 @@ train:
 eval:
   action_type: native
   control_mode: relative
-  n_episodes: 10
+  n_episodes: 50

@@ -22,4 +22,4 @@ train:
 eval:
   action_type: native_rot6d
   control_mode: relative
-  n_episodes: 10
+  n_episodes: 50
