@@ -43,6 +43,12 @@ holding the observation (8-dim native state) AND the trainer (`lerobot-train` ra
    is 98–100 on Diffusion; the ACT penalties (frame, encoding, abs/rel) largely vanish.
 7. **The harness earned its keep:** its GT-replay gate caught **5 real eval-path bugs**, every one
    invisible to training loss and to synthetic-value unit tests.
+8. **The recipe generalizes and the collapse mechanism is pinned down (§3.6–3.7).** Per-frame
+   relative holds on the rotation-heavy task11 on Diffusion (`native_n0` 98 ≈ `native` 96) — not a
+   task10 artifact (G1). And the chunk-anchor collapse is **Diffusion mode collapse** (G2): the
+   trained collapsed policy's delivered commands shrink to ~⅓ magnitude / ~½ spread of the
+   demonstrations, while target *magnitude* is a checked-and-refuted non-cause. ACT survives by
+   regressing the conditional mean; a distributional generator degrades to the attenuated marginal.
 
 **Recipe for EE relative-position training** (this branch's deliverable, validated on ACT +
 Diffusion): **world frame + per-frame anchor (relative to the current state, NOT chunk-start n-0) +
@@ -142,6 +148,21 @@ extended the harness / a representation · `[insight]` conclusion or reversal.
   world frame + per-frame anchor + relative delivery works on both architectures; production's
   `ee_rel` (body-frame + chunk-anchor n-0) picked the two worst choices, and chunk-anchor is exactly
   its Diffusion failure mode.**
+- `[exp]` **G1 — recipe generalization.** Ran the per-frame-relative recipe (`native_n0`) on the
+  rotation-heavy **task11** (rot_rms 3.1× task10) on both ACT + Diffusion, plus a `native`
+  Diffusion reference. `[result]` `native_n0` Diffusion **98** ≈ `native` **96**; ACT 76 vs 80.
+  gt-replay 61% (≈ baseline 60). `[insight]` the recipe is **not a task10 artifact** — per-frame
+  relative survives Diffusion on the hardest-rotation task too.
+- `[exp]` **G2 — collapse mechanism.** Two probes into *why* chunk-anchor breaks Diffusion but not
+  ACT. `[result]` **Negative result:** reconstructing all three constructions off one `goalabs`
+  trajectory shows the position target does NOT ramp within a horizon-16 chunk (dynamic range ≈1.0)
+  — the "target grows large" intuition is **refuted**; magnitude is not the cause. `[insight]`
+  **Load-bearing:** action-trace tap (`--trace-dir`) on the trained collapsed vs robust diffusion
+  policies shows the collapse is **Diffusion mode collapse** — the chunk-anchor policy's delivered
+  commands shrink to ~⅓ magnitude / ~½ per-axis spread of both the robust policy and the demos
+  (attenuated marginal), with ~3× longer episodes; the robust policy reproduces the demo
+  distribution. ACT survives by regressing the conditional mean. New analysis module
+  `studies/libero_ee/analysis/mechanism_analysis.py`; artifacts under `outputs/bench/analysis/`.
 
 ---
 
@@ -302,6 +323,59 @@ Two findings:
    (native_rot6d 100), so the collapse is the anchor/re-encoding, not the encoding. → **per-frame
    relative is Diffusion-safe; chunk-anchored (n-0) relative is not.** This resolves the tension
    from §3.5 and directly explains a production failure mode (see §8, the recipe).
+3. **The recipe generalizes — it is not task10-only (G1).** Re-running the per-frame-relative recipe
+   on the **rotation-heavy task11** (rot_rms 3.1× task10) on Diffusion holds up: `native_n0` **98**,
+   essentially tied with the `native` reference ceiling (**96**) and well clear of collapse. The
+   task11 2×2 mirrors task10:
+
+   | task11 (n=50) | ACT | Diffusion |
+   |---|---|---|
+   | `native` (reference) | 80 | 96 |
+   | `native_n0` (recipe, per-frame relative) | 76 | 98 |
+
+   So per-frame relative survives Diffusion on the hardest-rotation task too; the recipe's robustness
+   is not an artifact of task10 being easy.
+
+### 3.7 Mechanism — why chunk-anchor collapses on Diffusion (G2)
+
+*Why* does chunk-anchor (n-0) re-encoding specifically break a Diffusion policy while ACT tolerates
+it (world-n0: ACT 82 / Diffusion 16)? Two probes, reported honestly including a dead end.
+
+**Negative result — it is NOT target magnitude.** Reconstructing all three target constructions off
+the *same* absolute goal trajectory (`goalabs`) and measuring the within-chunk profile at the
+Diffusion horizon (16) shows the position target does **not** ramp: chunk-anchor, per-frame and
+absolute all have a within-chunk dynamic range ≈ 1.0 (chunk-anchor pos head 0.76 → tail 0.76). The
+intuitive "chunk-anchor makes the target grow large across the chunk" story is refuted at the
+horizon the policy actually uses. (Only the rotation channel ramps mildly — ~2× — and task10 is
+rotation-light, so that alone cannot explain a 98→16 collapse.) See `outputs/bench/analysis/mechanism.{json,png}`.
+
+**Load-bearing evidence — it is Diffusion mode collapse.** Running the *trained* collapsed policy
+(`goal-world-n0` diffusion) and the robust one (`native_n0` diffusion) with an action-trace tap
+(`--trace-dir`) and comparing the **delivered** world command (`native_cmd`, the common 7-dim space
+both emit) is decisive:
+
+| delivered command (raw) | collapse (world-n0, closed-loop 16/33%) | robust (`native_n0`, 98/100%) | GT demos |
+|---|---|---|---|
+| mean \|\|pos\|\| | **0.26** | 0.79 | 0.75 |
+| per-axis pos std | [0.22, 0.06, 0.19] | [0.50, 0.13, 0.58] | [0.49, 0.14, 0.55] |
+| steps / episode | ~232 (times out) | ~76 (completes) | — |
+
+The robust policy reproduces the demonstration command distribution almost exactly; the chunk-anchor
+policy emits commands **~⅓ the magnitude and ~½ the per-axis spread** of both the robust policy and
+the ground truth — the textbook Diffusion **mode-collapse** signature (it samples the low-magnitude,
+low-diversity marginal instead of committing to an obs-conditioned mode), so the arm under-actuates
+and its episodes run ~3× longer until they time out. ACT survives the identical target (82) because
+it *regresses* the per-element conditional mean deterministically; a *distributional* generator
+degrades to the attenuated marginal. See `outputs/bench/analysis/collapse.png` /
+`closed_loop_collapse.json`, reproducible via `python -m
+anvil_sim.studies.libero_ee.analysis.mechanism_analysis`.
+
+**Honest scope.** The cleanly isolated variable is the whole *world-n0 relativization scheme*
+(obs + action chunk both anchored to the current pose, reconstructed against a chunk-start anchor) —
+`goal-world-n0` differs from `goal-abs`/`native_n0` in the target construction, not a single atomic
+"anchor" knob (§3.4). What is proven: this scheme mode-collapses Diffusion, and per-frame relative
+(`native_n0`) does not; the mechanism is how a distributional model fits the target, not the
+target's magnitude.
 
 ### Bottom line
 - **Frame dominates: world ≫ hand (−24).** Keep world-frame actions; body-frame is harder to learn
@@ -318,6 +392,12 @@ Two findings:
   all flips); the ONE Diffusion-killer is **chunk-anchor (n-0) re-encoding** (world-n0 → 16). This
   is the crux of the production recipe (§8): true per-frame relative works on both ACT and
   Diffusion; chunk-anchored relative does not.
+- **Generalization (§3.6, G1): the recipe is not task10-only** — per-frame relative holds on the
+  rotation-heavy task11 on Diffusion (`native_n0` 98 ≈ `native` 96).
+- **Mechanism (§3.7, G2): the collapse is Diffusion mode collapse** — the chunk-anchor policy's
+  delivered commands shrink to ~⅓ magnitude / ~½ spread of the demos (attenuated marginal), while
+  target *magnitude* is NOT the cause (a checked-and-refuted dead end). ACT survives by regressing
+  the conditional mean.
 - **Standing caveat:** task10 primary (task11/14 for robustness); task10 is near-ceiling for
   Diffusion so its Diffusion cells don't discriminate — the discriminating Diffusion signal is the
   world-n0 collapse vs the native family.
@@ -428,26 +508,30 @@ training so it SUCCEEDS on both ACT and Diffusion** — because the production `
 failed (Diffusion outputting garbage). A working recipe follows from the single-flip matrix (§3.0)
 and the Diffusion coverage (§3.6).
 
-**The recipe (validated on ACT + Diffusion, task10):**
+**The recipe (validated on ACT + Diffusion, task10 + rotation-heavy task11):**
 
 | choice | use | evidence |
 |---|---|---|
 | **Frame** | **world**, not body/hand | ACT: world ≫ hand (−24); Diffusion neutral (both 98) |
-| **Anchor** | **per-frame** (relative to the CURRENT state each step), NOT chunk-start (n-0) | per-frame `native_n0`: ACT 86 / **Diffusion 98**; chunk-anchor `world-n0`: ACT 82 / **Diffusion 16 (collapse)** |
-| **Representation** | **relative** works (per-frame); it is NOT diffusion-hard | `native_n0` 86/98 — relative-position is viable on both architectures |
+| **Anchor** | **per-frame** (relative to the CURRENT state each step), NOT chunk-start (n-0) | per-frame `native_n0`: ACT 86 / **Diffusion 98** (task11: 76 / **98**); chunk-anchor `world-n0`: ACT 82 / **Diffusion 16 (collapse)** |
+| **Representation** | **relative** works (per-frame); it is NOT diffusion-hard | `native_n0` 86/98 (task11 76/98) — relative-position is viable on both architectures and both tasks |
 | **Rotation encoding** | rot6d is fine | −12 for ACT, neutral for Diffusion (native_rot6d 100) |
 | **Delivery** | recovered-delta **relative** (subtract the live state, deliver a per-step delta) | native / native_n0 use it; physical-unit absolute-delivery seq is the weakest (§3.5) |
 
 **Why production's current `ee_rel` fails — it made the two worst choices.** From the production
 map, its `ee_rel` is **body-frame + chunk-start (n-0) anchor + rot6d**, delivered as absolute pose.
 Body frame is the −24 ACT loser, and **chunk-anchor (n-0) is exactly the Diffusion-killer** (world-n0
-→ 16) that matches the reported "Diffusion garbage" failure. The fix is not "abandon relative" — it
-is **switch to world-frame + per-frame anchor**. A rebuild that does so should train a working
-relative-position policy on both ACT and Diffusion.
+→ 16) that matches the reported "Diffusion garbage" failure. The mechanism is **Diffusion mode
+collapse** (§3.7): the chunk-anchor policy emits attenuated, low-diversity commands (~⅓ the demo
+magnitude), so the arm under-actuates. The fix is not "abandon relative" — it is **switch to
+world-frame + per-frame anchor**. A rebuild that does so should train a working relative-position
+policy on both ACT and Diffusion.
 
 **What is validated vs not:**
 - Validated: the frame / anchor / encoding / delivery directions above, on task10 (ACT n=50,
-  Diffusion n=50), with the GT-replay gate confirming every eval path is correct.
+  Diffusion n=50) **and the rotation-heavy task11 (G1: `native_n0` Diffusion 98 ≈ `native` 96)**,
+  with the GT-replay gate confirming every eval path is correct; the collapse mechanism is
+  documented directly (§3.7, G2).
 - **Caveats:** task10 is near-ceiling for Diffusion, so the native-family Diffusion cells don't
   discriminate — the load-bearing Diffusion signal is the `world-n0` collapse vs the native family.
   n=50, `libero_goal` tasks only. The per-frame anchor was reached in sim by baking per-frame
@@ -461,8 +545,10 @@ relative-position policy on both ACT and Diffusion.
 - **Controller delivery** — whether the real controller wants a per-step incremental command or an
   absolute pose. Sim's `control_mode="absolute"` diverges open-loop (E5, not run) but that is
   robosuite-OSC-specific; answer it on the real controller, not LIBERO.
-- **Discriminating Diffusion signal on a harder task** — task10 saturates; a rotation-heavy task
-  would show whether the frame/anchor effects persist under Diffusion.
+- **Discriminating Diffusion signal on a harder task** — partly answered (G1): per-frame relative
+  still holds on rotation-heavy task11 under Diffusion (`native_n0` 98). Both task10 and task11
+  remain near-ceiling for the *robust* conditions, so a harder suite is still needed to see whether
+  the per-condition *margins* (not just pass/collapse) persist under Diffusion.
 - **Larger task set / non-`libero_goal` suites** to confirm world>hand and per-frame-relative
   robustness generalize.
 
