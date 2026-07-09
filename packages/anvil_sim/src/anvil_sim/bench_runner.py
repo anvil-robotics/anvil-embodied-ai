@@ -164,6 +164,113 @@ def _validate_goalabs(spec: BenchSpec) -> dict:
     return {"identity": "goalabs->native command", "frames": n, "max_err": max_err}
 
 
+def _validate_goalabs_aa(spec: BenchSpec) -> dict:
+    """goalabs_aa family identity (axis-angle counterpart of _validate_goalabs):
+    decoding the stored 7-dim axis-angle goal back to rot6d and recovering a
+    native-delta against the SAME state must reproduce the native dataset's
+    own command to float precision — the round-trip identity for native_abs /
+    native_n0. If this fails, the axis-angle goal construction / decode is
+    wrong and no training will help."""
+    from anvil_sim.libero_processor import (
+        axis_angle_action_to_rot6d,
+        recovered_delta_native_action,
+    )
+
+    goal = _load_local_episode(spec.dataset_root)
+    native = _load_local_episode(_native_dataset_root(spec))
+    n = min(len(goal["action"]), len(native["action"]))
+    max_err = 0.0
+    for t in range(n):
+        act7, state8 = goal["action"][t], goal["state"][t]
+        rot6d10 = axis_angle_action_to_rot6d(act7)
+        recovered = recovered_delta_native_action(
+            reconstructed_pos=rot6d10[:3],
+            reconstructed_rot6d=rot6d10[3:9],
+            reconstructed_gripper=float(rot6d10[9]),
+            current_state=state8.astype(np.float32),
+            current_gripper=float(state8[7]),
+            gripper_mode="native_cmd",
+        )
+        expected = np.clip(native["action"][t], -1.0, 1.0)
+        max_err = max(max_err, float(np.abs(recovered - expected).max()))
+    if max_err > _MATH_TOLERANCE:
+        raise RuntimeError(f"goalabs_aa identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
+    return {"identity": "axis-angle goalabs->native command", "frames": n, "max_err": max_err}
+
+
+def _validate_native_abs(spec: BenchSpec) -> dict:
+    """native_abs identity (NATIVE-family axis-angle absolute goal): decoding
+    the stored 7-dim axis-angle goal back to rot6d and recovering a native
+    delta against the frame's OWN state (converted native->quat, since the obs
+    column is now native 8-dim axis-angle) must reproduce the native dataset's
+    own command to float precision. Same round-trip guarantee as
+    _validate_goalabs_aa, but for the native-family observation."""
+    from anvil_sim.libero_convert import raw_state_to_anvil
+    from anvil_sim.libero_processor import (
+        axis_angle_action_to_rot6d,
+        recovered_delta_native_action,
+    )
+
+    goal = _load_local_episode(spec.dataset_root)
+    native = _load_local_episode(_native_dataset_root(spec))
+    n = min(len(goal["action"]), len(native["action"]))
+    max_err = 0.0
+    for t in range(n):
+        anvil8 = raw_state_to_anvil(goal["state"][t].astype(np.float32))
+        rot6d10 = axis_angle_action_to_rot6d(goal["action"][t])
+        recovered = recovered_delta_native_action(
+            reconstructed_pos=rot6d10[:3],
+            reconstructed_rot6d=rot6d10[3:9],
+            reconstructed_gripper=float(rot6d10[9]),
+            current_state=anvil8,
+            current_gripper=float(anvil8[7]),
+            gripper_mode="native_cmd",
+        )
+        expected = np.clip(native["action"][t], -1.0, 1.0)
+        max_err = max(max_err, float(np.abs(recovered - expected).max()))
+    if max_err > _MATH_TOLERANCE:
+        raise RuntimeError(f"native_abs identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
+    return {"identity": "native_abs goal -> native command", "frames": n, "max_err": max_err}
+
+
+def _validate_native_n0(spec: BenchSpec) -> dict:
+    """native_n0 identity (NATIVE-family n-0 relativized goal): un-relativizing
+    the stored 7-dim axis-angle action against the frame's OWN (native->quat)
+    state via ee_rel_world_inverse, then recovering a native delta against that
+    same state, must reproduce the native dataset's own command to float
+    precision — the data-level form of the n-0 GT-replay oracle at
+    n_action_steps=1 (anchor == current state)."""
+    from anvil_shared.ee_transform import ee_rel_world_inverse
+
+    from anvil_sim.libero_convert import raw_state_to_anvil
+    from anvil_sim.libero_processor import (
+        axis_angle_action_to_rot6d,
+        recovered_delta_native_action,
+    )
+
+    goal = _load_local_episode(spec.dataset_root)
+    native = _load_local_episode(_native_dataset_root(spec))
+    n = min(len(goal["action"]), len(native["action"]))
+    max_err = 0.0
+    for t in range(n):
+        anvil8 = raw_state_to_anvil(goal["state"][t].astype(np.float32))
+        rel10 = axis_angle_action_to_rot6d(goal["action"][t])
+        abs10 = ee_rel_world_inverse(rel10.reshape(1, 10), anvil8.reshape(1, 8))[0]
+        recovered = recovered_delta_native_action(
+            reconstructed_pos=abs10[:3],
+            reconstructed_rot6d=abs10[3:9],
+            reconstructed_gripper=float(abs10[9]),
+            current_state=anvil8,
+            current_gripper=float(anvil8[7]),
+            gripper_mode="native_cmd",
+        )
+        expected = np.clip(native["action"][t], -1.0, 1.0)
+        max_err = max(max_err, float(np.abs(recovered - expected).max()))
+    if max_err > _MATH_TOLERANCE:
+        raise RuntimeError(f"native_n0 identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
+    return {"identity": "native_n0 relativized goal -> native command", "frames": n, "max_err": max_err}
+
+
 def _validate_seq(spec: BenchSpec) -> dict:
     """delta/delta_hand family identity: accumulating the stored per-step
     deltas from the episode's first state must reproduce the achieved state
@@ -237,6 +344,9 @@ def _validate_native_hand(spec: BenchSpec) -> dict:
 
 _MATH_VALIDATORS = {
     "goalabs": _validate_goalabs,
+    "goalabs_aa": _validate_goalabs_aa,
+    "native_abs": _validate_native_abs,
+    "native_n0": _validate_native_n0,
     "native_hand": _validate_native_hand,
     "delta": _validate_seq,
     "delta_hand": _validate_seq,
@@ -253,7 +363,9 @@ def stage_validate_math(spec: BenchSpec) -> dict:
 
 
 def stage_dataset_validate(spec: BenchSpec) -> dict:
-    if spec.dataset_group in ("native", "native_hand", "native_rot6d"):
+    if spec.dataset_group in (
+        "native", "native_hand", "native_rot6d", "native_abs", "native_n0", "goalabs_aa"
+    ):
         return {"skipped": "dataset-validate targets the Anvil EE writer schema"}
     cmd = [
         "uv", "run", "--package", "mcap_converter", "dataset-validate",

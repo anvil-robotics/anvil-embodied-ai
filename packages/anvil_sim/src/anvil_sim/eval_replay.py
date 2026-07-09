@@ -66,12 +66,18 @@ from lerobot.processor import PolicyProcessorPipeline
 from lerobot.utils.constants import ACTION
 
 from anvil_sim.eval_libero_ee import (
+    _AXIS_ANGLE_ACTION_TYPES,
     _LEGACY_ACTION_TYPES,
     _NATIVE_FRAME_ACTION_TYPES,
     _ZERO_CAL_ACTION_TYPES,
     _make_anvil_env_pre_post_processors,
 )
-from anvil_sim.libero_processor import AnvilEEObsProcessorStep, NativeRot6dActionProcessorStep
+from anvil_sim.libero_processor import (
+    AnvilEEObsProcessorStep,
+    NativeRot6dActionProcessorStep,
+    axis_angle_action_to_rot6d,
+    rot6d_action_to_native,
+)
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +106,16 @@ def _provider_mode(action_type: str) -> str:
         # hand frame) — a perfect policy outputs it as-is; the eval action
         # step rotates it back to world against the live obs EE orientation.
         return "direct"
+    if action_type in _AXIS_ANGLE_ACTION_TYPES:
+        # native_abs / native_n0 are NATIVE-family (lerobot-train raw): the
+        # per-frame policy-output form is BAKED into the stored column at
+        # convert time (native_abs = absolute goal; native_n0 = the goal
+        # ALREADY relativized per-frame against its own obs pose). So a perfect
+        # policy outputs the stored value as-is — "direct", NOT a live
+        # re-relativization. (The rot6d goalabs world-n0 family, by contrast,
+        # stores the ABSOLUTE goal and relativizes at load time, hence its
+        # "rel_world" provider below.)
+        return "direct"
     if action_type in _ZERO_CAL_ACTION_TYPES:
         mode = _ZERO_CAL_ACTION_TYPES[action_type][1]
         if mode in ("rel_hand", "rel_world"):
@@ -127,6 +143,12 @@ class GtActionProvider:
     mode: str  # "direct" | "rel_hand" | "rel_world"
     obs_step: AnvilEEObsProcessorStep | None = None  # None for "direct" without anchor needs
     n_action_steps: int = 1
+    # "rot6d" (default) or "axis_angle": for the goalabs_aa family
+    # (native_abs / native_n0) the stored action is 7-dim [pos, aa, gripper];
+    # the n-0 forward relativization runs on the shared rot6d machinery, so
+    # decode -> forward -> re-encode keeps the provided "policy output" in the
+    # same axis-angle layout the action step then decodes.
+    action_encoding: str = "rot6d"
     _call_count: int = field(default=0, init=False, repr=False)
     _chunk_anchor: np.ndarray | None = field(default=None, init=False, repr=False)
 
@@ -141,8 +163,16 @@ class GtActionProvider:
             self._chunk_anchor = self.obs_step.last_anvil_state.copy()
         self._call_count += 1
 
+        act10 = (
+            axis_angle_action_to_rot6d(stored_action)
+            if self.action_encoding == "axis_angle"
+            else stored_action
+        )
         forward = ee_rel_forward if self.mode == "rel_hand" else ee_rel_world_forward
-        rel = forward(stored_action.reshape(1, 10), self._chunk_anchor.reshape(1, 8))[0]
+        rel = forward(act10.reshape(1, 10), self._chunk_anchor.reshape(1, 8))[0]
+        if self.action_encoding == "axis_angle":
+            # Re-encode to the 7-dim axis-angle layout the action step expects.
+            return rot6d_action_to_native(rel).astype(np.float32)
         return rel.astype(np.float32)
 
 
@@ -218,7 +248,10 @@ def replay(
     with open(trace_path, "w") as trace_f:
         for ep in range(n_episodes):
             provider = GtActionProvider(
-                mode=_provider_mode(action_type), obs_step=obs_step, n_action_steps=n_action_steps
+                mode=_provider_mode(action_type),
+                obs_step=obs_step,
+                n_action_steps=n_action_steps,
+                action_encoding="axis_angle" if action_type in _AXIS_ANGLE_ACTION_TYPES else "rot6d",
             )
             # Real bug #5 regression guard: the action step's chunk counter
             # must re-align at every episode start, exactly like the policy

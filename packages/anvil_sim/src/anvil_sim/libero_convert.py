@@ -90,11 +90,14 @@ import logging
 from pathlib import Path
 
 import numpy as np
+from anvil_shared.ee_transform import ee_rel_world_forward
 from anvil_shared.rotation import (
     axis_angle_to_matrix,
+    matrix_to_axis_angle,
     matrix_to_quat,
     matrix_to_rot6d,
     quat_to_matrix,
+    rot6d_to_matrix,
 )
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from mcap_converter.config.schema import DataConfig
@@ -285,6 +288,82 @@ def convert_episode_goal_abs_actions(goal_states: np.ndarray) -> np.ndarray:
     ``EERelWorldTransform``/``EERelTransform``).
     """
     return np.stack([anvil_state_to_abs_action(g) for g in goal_states]).astype(np.float32)
+
+
+def goal_state_to_axis_angle_action(goal_state8: np.ndarray) -> np.ndarray:
+    """Encode an absolute Anvil EE goal state as a 7-dim AXIS-ANGLE action
+    ``[pos(3), axis-angle(3), gripper]`` — the axis-angle analogue of
+    :func:`anvil_state_to_abs_action` (which uses 10-dim rot6d).
+
+    Rotation is stored as axis-angle via
+    ``matrix_to_axis_angle(quat_to_matrix(quat))``; this is EXACTLY the layout
+    ``native_action_to_rot6d`` inverts, so
+    ``anvil_sim.libero_processor.axis_angle_action_to_rot6d`` decodes it back
+    to rot6d losslessly at eval. Shared encoder for the ``goalabs_aa`` dataset
+    group — the axis-angle counterpart of ``goalabs`` — serving the
+    ``native_abs`` (absolute goal) and ``native_n0`` (chunk-start / n-0
+    relativized) conditions, which differ from the rot6d ``goalabs`` family
+    (``abs``/``world-n0``) ONLY in this rotation encoding. Gripper is the
+    goal's native +/-1 command (``native_delta_to_goal`` passthrough), carried
+    through unchanged.
+    """
+    pos = goal_state8[:3]
+    aa = matrix_to_axis_angle(quat_to_matrix(goal_state8[3:7]))
+    gripper = goal_state8[7]
+    return np.concatenate([pos, aa, [gripper]]).astype(np.float32)
+
+
+def convert_episode_goal_aa_actions(goal_states: np.ndarray) -> np.ndarray:
+    """Encode the absolute goal trajectory as the 7-dim AXIS-ANGLE action —
+    the ``goalabs_aa`` group's action column, shared by ``native_abs`` and
+    ``native_n0`` (see :func:`goal_state_to_axis_angle_action`). Axis-angle
+    counterpart of :func:`convert_episode_goal_abs_actions`.
+    """
+    return np.stack([goal_state_to_axis_angle_action(g) for g in goal_states]).astype(np.float32)
+
+
+def goal_state_to_n0_axis_angle_action(
+    goal_state8: np.ndarray, anchor_state8: np.ndarray
+) -> np.ndarray:
+    """Express the absolute goal RELATIVE to a per-frame WORLD-frame anchor
+    (n-0) and encode as a 7-dim AXIS-ANGLE action ``[pos(3), axis-angle(3),
+    gripper]`` — the ``native_n0`` dataset column.
+
+    This is the NATIVE-family (``lerobot-train`` raw, 8-dim native
+    observation) counterpart of the rot6d ``goalabs`` world-n0 condition
+    (which relativizes at anvil-trainer LOAD time via ``EERelWorldTransform``).
+    Because ``native_n0`` trains on raw ``lerobot-train`` with NO load-time
+    transform, the relativization is BAKED into the stored column here:
+    ``rel = ee_rel_world_forward(goal, anchor)``, where ``anchor`` is that
+    frame's own observed EE pose (``anvil_state[t]``, quat layout). Rotation is
+    stored as axis-angle (via ``rot6d_to_matrix``/``matrix_to_axis_angle``) so
+    the eval action step decodes it back to rot6d losslessly
+    (``axis_angle_action_to_rot6d``) and runs the IDENTICAL
+    ``ee_rel_world_inverse`` chunk-start reconstruction as the rot6d goalabs
+    world-n0 condition. Gripper is the goal's native +/-1 command, carried
+    through unchanged (``ee_rel_world_forward`` passes gripper through).
+    """
+    goal10 = anvil_state_to_abs_action(goal_state8)  # [pos, rot6d, gripper]
+    rel10 = ee_rel_world_forward(goal10.reshape(1, 10), anchor_state8.reshape(1, 8))[0]
+    pos = rel10[:3]
+    aa = matrix_to_axis_angle(rot6d_to_matrix(rel10[3:9]))
+    gripper = rel10[9]
+    return np.concatenate([pos, aa, [gripper]]).astype(np.float32)
+
+
+def convert_episode_goal_n0_aa_actions(
+    goal_states: np.ndarray, anchor_states: np.ndarray
+) -> np.ndarray:
+    """Relativize every per-frame goal against that frame's own observed EE
+    pose (n-0, world frame) and encode as 7-dim axis-angle — the ``native_n0``
+    group's action column (see :func:`goal_state_to_n0_axis_angle_action`).
+    ``anchor_states`` is the episode's Anvil observation trajectory
+    (``anvil_states``), the same states the policy conditions on.
+    """
+    n = goal_states.shape[0]
+    return np.stack(
+        [goal_state_to_n0_axis_angle_action(goal_states[t], anchor_states[t]) for t in range(n)]
+    ).astype(np.float32)
 
 
 def anvil_state_to_hand_delta_action(anvil_state8: np.ndarray, next_anvil_state8: np.ndarray) -> np.ndarray:
@@ -508,6 +587,40 @@ def _make_native_rot6d_dataset(output_dir: Path, repo_id: str) -> LeRobotDataset
     )
 
 
+def _make_goalabs_aa_dataset(output_dir: Path, repo_id: str) -> LeRobotDataset:
+    """Create the local dataset for the ``goalabs_aa`` group — the axis-angle
+    counterpart of ``goalabs``. Same Anvil EE observation as ``goalabs``
+    (8-dim ``[x,y,z,qx,qy,qz,qw,gripper]`` quat state, ``agentview``/``wrist``
+    cameras), but the ``action`` column is the 7-dim AXIS-ANGLE encoding of
+    the formal goal (see :func:`goal_state_to_axis_angle_action`) instead of
+    the 10-dim rot6d one ``goalabs`` stores. Written via
+    ``LeRobotDataset.create`` directly (the plain lerobot mechanism), like
+    :func:`_make_native_rot6d_dataset`, because the mcap EE ``LeRobotWriter``
+    enforces its own 10-dim rot6d action schema.
+    """
+    img_w, img_h = LIBERO_IMAGE_RESOLUTION
+    features = {
+        "observation.state": {"dtype": "float32", "shape": (8,), "names": ["state"]},
+        "action": {"dtype": "float32", "shape": (7,), "names": ["actions"]},
+        **{
+            f"observation.images.{cam}": {
+                "dtype": "video",
+                "shape": (3, img_h, img_w),
+                "names": ["channel", "height", "width"],
+            }
+            for cam in CAMERA_NAMES
+        },
+    }
+    return LeRobotDataset.create(
+        repo_id=repo_id,
+        fps=10,
+        root=str(output_dir),
+        robot_type="panda",
+        features=features,
+        use_videos=True,
+    )
+
+
 def _make_writer(output_dir: Path, repo_id: str) -> LeRobotWriter:
     config = DataConfig(
         data_space="ee",
@@ -524,7 +637,10 @@ def _make_writer(output_dir: Path, repo_id: str) -> LeRobotWriter:
 
 
 ALL_DATASET_GROUPS = frozenset(
-    {"native", "native_hand", "native_rot6d", "abs", "rel", "delta", "goalabs", "delta_hand"}
+    {
+        "native", "native_hand", "native_rot6d", "native_abs", "native_n0",
+        "abs", "rel", "delta", "goalabs", "delta_hand", "goalabs_aa",
+    }
 )
 """All dataset groups :func:`convert` can write. See its ``only`` parameter.
 
@@ -583,12 +699,15 @@ def convert(
 
     native_dir = output_root / f"libero-task{task_index}-native"
     native_hand_dir = output_root / f"libero-task{task_index}-native-hand"
+    native_abs_dir = output_root / f"libero-task{task_index}-native-abs"
+    native_n0_dir = output_root / f"libero-task{task_index}-native-n0"
     abs_dir = output_root / f"libero-task{task_index}-abs"
     rel_dir = output_root / f"libero-task{task_index}-rel"
     delta_dir = output_root / f"libero-task{task_index}-delta"
     native_rot6d_dir = output_root / f"libero-task{task_index}-native-rot6d"
     goalabs_dir = output_root / f"libero-task{task_index}-goalabs"
     delta_hand_dir = output_root / f"libero-task{task_index}-delta-hand"
+    goalabs_aa_dir = output_root / f"libero-task{task_index}-goalabs-aa"
 
     dataset_native = (
         _make_native_dataset(native_dir, f"anvil/libero-task{task_index}-native")
@@ -607,6 +726,28 @@ def convert(
     dataset_native_rot6d = (
         _make_native_rot6d_dataset(native_rot6d_dir, f"anvil/libero-task{task_index}-native-rot6d")
         if "native_rot6d" in groups
+        else None
+    )
+    # native_abs / native_n0 are NATIVE-family control-factor conditions: they
+    # share native's exact schema (8-dim native axis-angle state, 7-dim action,
+    # original image/image2 camera keys) and train via plain lerobot-train — so
+    # they hold observation + trainer FIXED vs `native` and differ from it in
+    # exactly ONE thing (abs-vs-rel target; n-0 vs n-(n-1) anchor). Only the
+    # ACTION column differs: the 7-dim axis-angle goal (native_abs) / n-0
+    # relativized goal (native_n0). Reuses _make_native_dataset unchanged.
+    dataset_native_abs = (
+        _make_native_dataset(native_abs_dir, f"anvil/libero-task{task_index}-native-abs")
+        if "native_abs" in groups
+        else None
+    )
+    dataset_native_n0 = (
+        _make_native_dataset(native_n0_dir, f"anvil/libero-task{task_index}-native-n0")
+        if "native_n0" in groups
+        else None
+    )
+    dataset_goalabs_aa = (
+        _make_goalabs_aa_dataset(goalabs_aa_dir, f"anvil/libero-task{task_index}-goalabs-aa")
+        if "goalabs_aa" in groups
         else None
     )
     writer_abs = _make_writer(abs_dir, f"anvil/libero-task{task_index}-abs") if "abs" in groups else None
@@ -663,7 +804,13 @@ def convert(
         # Experiment 7 ("goal" target family) — see native_delta_to_goal.
         goal_states = convert_episode_goal_states(anvil_states, native_actions)
         action_goal_abs = convert_episode_goal_abs_actions(goal_states)
+        action_goal_aa = convert_episode_goal_aa_actions(goal_states)
         action_delta_hand = convert_episode_delta_hand_actions(anvil_states)
+        # native_abs: absolute goal in axis-angle (identical column to
+        # goalabs_aa, but stored alongside NATIVE 8-dim obs). native_n0: that
+        # goal relativized per-frame against its own observed EE pose (n-0,
+        # world frame) — see convert_episode_goal_n0_aa_actions.
+        action_native_n0 = convert_episode_goal_n0_aa_actions(goal_states, anvil_states)
 
         for t, item in enumerate(ep_items):
             images = {
@@ -688,6 +835,21 @@ def convert(
             frame_native_rot6d = {
                 "observation.state": raw_states[t],
                 "action": native_action_to_rot6d(item["action"].numpy()),
+                "task": task_text,
+                **images_native,
+            }
+            # native_abs / native_n0: NATIVE 8-dim observation (raw_states,
+            # unchanged from native), only the ACTION column is the 7-dim
+            # axis-angle goal / n-0 relativized goal.
+            frame_native_abs = {
+                "observation.state": raw_states[t],
+                "action": action_goal_aa[t],
+                "task": task_text,
+                **images_native,
+            }
+            frame_native_n0 = {
+                "observation.state": raw_states[t],
+                "action": action_native_n0[t],
                 "task": task_text,
                 **images_native,
             }
@@ -728,12 +890,26 @@ def convert(
                 "task": task_text,
                 **images,
             }
+            # goalabs_aa: SAME Anvil EE observation + cameras as goalabs (so
+            # this is cleanly "goalabs with an axis-angle action"), only the
+            # action is the 7-dim axis-angle goal encoding (see
+            # convert_episode_goal_aa_actions).
+            frame_goalabs_aa = {
+                "observation.state": anvil_states[t],
+                "action": action_goal_aa[t],
+                "task": task_text,
+                **images,
+            }
             if dataset_native is not None:
                 dataset_native.add_frame(frame_native)
             if dataset_native_hand is not None:
                 dataset_native_hand.add_frame(frame_native_hand)
             if dataset_native_rot6d is not None:
                 dataset_native_rot6d.add_frame(frame_native_rot6d)
+            if dataset_native_abs is not None:
+                dataset_native_abs.add_frame(frame_native_abs)
+            if dataset_native_n0 is not None:
+                dataset_native_n0.add_frame(frame_native_n0)
             if dataset_abs is not None:
                 dataset_abs.add_frame(frame_abs)
             if dataset_rel is not None:
@@ -744,10 +920,14 @@ def convert(
                 dataset_goalabs.add_frame(frame_goalabs)
             if dataset_delta_hand is not None:
                 dataset_delta_hand.add_frame(frame_delta_hand)
+            if dataset_goalabs_aa is not None:
+                dataset_goalabs_aa.add_frame(frame_goalabs_aa)
 
         for dataset in (
-            dataset_native, dataset_native_hand, dataset_native_rot6d, dataset_abs,
+            dataset_native, dataset_native_hand, dataset_native_rot6d,
+            dataset_native_abs, dataset_native_n0, dataset_abs,
             dataset_rel, dataset_delta, dataset_goalabs, dataset_delta_hand,
+            dataset_goalabs_aa,
         ):
             if dataset is not None:
                 dataset.save_episode()
@@ -763,6 +943,12 @@ def convert(
         dataset_native_hand.finalize()
     if dataset_native_rot6d is not None:
         dataset_native_rot6d.finalize()
+    if dataset_native_abs is not None:
+        dataset_native_abs.finalize()
+    if dataset_native_n0 is not None:
+        dataset_native_n0.finalize()
+    if dataset_goalabs_aa is not None:
+        dataset_goalabs_aa.finalize()
     if writer_abs is not None:
         writer_abs.finalize(dataset_abs)
     if writer_rel is not None:
@@ -778,11 +964,14 @@ def convert(
         "native": native_dir,
         "native_hand": native_hand_dir,
         "native_rot6d": native_rot6d_dir,
+        "native_abs": native_abs_dir,
+        "native_n0": native_n0_dir,
         "abs": abs_dir,
         "rel": rel_dir,
         "delta": delta_dir,
         "goalabs": goalabs_dir,
         "delta_hand": delta_hand_dir,
+        "goalabs_aa": goalabs_aa_dir,
     }
     return {
         "task_index": task_index,

@@ -260,6 +260,32 @@ def rot6d_action_to_native(rot6d_action10: np.ndarray) -> np.ndarray:
     return np.concatenate([pos, native_rot, [gripper]]).astype(np.float32)
 
 
+def axis_angle_action_to_rot6d(aa_action7: np.ndarray) -> np.ndarray:
+    """Decode a 7-dim ``[pos(3), axis-angle(3), gripper]`` action into the
+    10-dim ``[pos(3), rot6d(6), gripper]`` rot6d layout — the EXACT inverse of
+    :func:`rot6d_action_to_native`, and identical math to
+    ``anvil_sim.libero_convert.native_action_to_rot6d``.
+
+    Used by the ``goalabs_aa`` family (the axis-angle counterparts
+    ``native_abs``/``native_n0`` of the rot6d ``goalabs`` conditions
+    ``zerocal_goal_abs``/``zerocal_goal_world_n0``): those store the formal
+    goal ``G[t] = state[t] + native_delta[t]`` with its rotation as AXIS-ANGLE
+    instead of rot6d, so the eval action step decodes it back to rot6d here
+    and then runs the IDENTICAL abs / rel_world reconstruction and
+    recovered-delta relative delivery as the rot6d ``goalabs`` family. Because
+    ``axis_angle_to_matrix``/``matrix_to_rot6d`` are exact invertible math,
+    this round-trips losslessly (proven zero-error by the same
+    ``native_action_to_rot6d``/``rot6d_action_to_native`` pair the
+    ``native_rot6d`` arm relies on).
+
+    Pure function (no torch/env dependency) so it can be unit-tested directly.
+    """
+    pos = aa_action7[:3]
+    rot6d = matrix_to_rot6d(axis_angle_to_matrix(aa_action7[3:6]))
+    gripper = aa_action7[6]
+    return np.concatenate([pos, rot6d, [gripper]]).astype(np.float32)
+
+
 def hand_action_to_native(hand_action7: np.ndarray, ee_axis_angle3: np.ndarray) -> np.ndarray:
     """Exact inverse of
     :func:`anvil_sim.libero_convert.native_action_to_hand`: rotate a
@@ -665,6 +691,24 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
     n_action_steps: int = 1
     deliver: str = "absolute"
     gripper_mode: str = "target_qpos"  # "native_cmd" for the goalabs family — see recovered_delta_native_action
+    # "rot6d" (default): policy output is the 10-dim rot6d layout the goalabs
+    # / ee_abs / ee_rel datasets store. "axis_angle": policy output is the
+    # 7-dim [pos, axis-angle, gripper] layout the goalabs_aa family stores
+    # (native_abs / native_n0) — decoded to rot6d up front via
+    # axis_angle_action_to_rot6d, after which every branch below is identical.
+    action_encoding: str = "rot6d"
+    # rel_world / rel_hand reconstruction anchor. False (default): anchor to the
+    # CHUNK-START pose (n-0), correct for the rot6d goalabs world-n0/hand-n0
+    # family, whose absolute-goal column is relativized against the chunk start
+    # at anvil-trainer LOAD time (EERelWorldTransform). True: anchor to the
+    # PER-FRAME current pose. Required for the axis-angle native_n0 condition,
+    # whose column bakes the relativization against each frame's OWN observed
+    # pose at convert time (libero_convert.goal_state_to_n0_axis_angle_action) —
+    # a static lerobot-train column cannot carry a chunk-start anchor (chunks
+    # exist only at inference). Chunk-start inverse of that per-frame column only
+    # matches at n_action_steps=1 (frame == chunk start); at n>1 it diverges over
+    # the chunk and collapses to 0%. Per-frame inverse recovers the goal at all n.
+    per_frame_anchor: bool = False
 
     _call_count: int = field(default=0, init=False, repr=False)
     _chunk_anchor: np.ndarray | None = field(default=None, init=False, repr=False)
@@ -680,6 +724,10 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
         if self.gripper_mode not in ("target_qpos", "native_cmd"):
             raise ValueError(
                 f"gripper_mode must be 'target_qpos' or 'native_cmd', got {self.gripper_mode!r}"
+            )
+        if self.action_encoding not in ("rot6d", "axis_angle"):
+            raise ValueError(
+                f"action_encoding must be 'rot6d' or 'axis_angle', got {self.action_encoding!r}"
             )
 
     def reset_episode_state(self) -> None:
@@ -705,14 +753,22 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
         self._call_count += 1
 
         act10 = (action[0] if action.dim() > 1 else action).detach().cpu().numpy()
+        if self.action_encoding == "axis_angle":
+            # goalabs_aa family: 7-dim [pos, axis-angle, gripper] -> 10-dim
+            # rot6d, lossless (see axis_angle_action_to_rot6d). Every branch
+            # below then operates on rot6d exactly as for the goalabs family.
+            act10 = axis_angle_action_to_rot6d(act10)
 
+        # Chunk-start anchor (rot6d goalabs n-0) or per-frame anchor (axis-angle
+        # native_n0, whose column is baked per-frame) — see per_frame_anchor.
+        anchor = current_state if self.per_frame_anchor else self._chunk_anchor
         if self.mode == "abs":
             target_pos, target_rot6d, target_gripper = act10[:3], act10[3:9], float(act10[9])
         elif self.mode == "rel_world":
-            abs10 = ee_rel_world_inverse(act10.reshape(1, 10), self._chunk_anchor.reshape(1, 8))[0]
+            abs10 = ee_rel_world_inverse(act10.reshape(1, 10), anchor.reshape(1, 8))[0]
             target_pos, target_rot6d, target_gripper = abs10[:3], abs10[3:9], float(abs10[9])
         elif self.mode == "rel_hand":
-            abs10 = ee_rel_inverse(act10.reshape(1, 10), self._chunk_anchor.reshape(1, 8))[0]
+            abs10 = ee_rel_inverse(act10.reshape(1, 10), anchor.reshape(1, 8))[0]
             target_pos, target_rot6d, target_gripper = abs10[:3], abs10[3:9], float(abs10[9])
         else:  # rel_world_seq / rel_hand_seq — accumulate consecutive deltas from the anchor
             if chunk_start:

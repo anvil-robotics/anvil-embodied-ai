@@ -1,0 +1,29 @@
+# =============================================================================
+# LIBERO validation-harness spec — anchor control factor isolated on the
+# NATIVE family. Holds observation + trainer FIXED vs task10_native_act.yaml
+# (8-dim native observation, plain lerobot-train raw) and flips ONLY the anchor
+# (n-(n-1) -> chunk-start n-0): the action column is the formal goal
+# G = state + native_delta relativized per-frame against its own observed EE
+# pose (world frame, ee_rel_world_forward), stored as AXIS-ANGLE, reconstructed
+# at eval via the chunk-start anchor (ee_rel_world_inverse) and delivered as a
+# recovered native delta, ACT. See packages/anvil_sim/README.md.
+# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_native_n0_act.yaml
+# =============================================================================
+
+name: task10-native-n0-act
+task_index: 10
+env_suite: libero_goal
+env_task_id: 8
+dataset_group: native_n0
+train:
+  trainer: lerobot-train
+  policy_type: act
+  steps: 50000
+  batch_size: 16
+  output_dir: model_zoo/native/libero-task10-native-n0/act
+eval:
+  action_type: native_n0
+  control_mode: relative
+  n_episodes: 50
+gates:
+  gt_replay_margin: 15.0

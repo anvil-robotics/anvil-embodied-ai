@@ -1,0 +1,27 @@
+# =============================================================================
+# LIBERO validation-harness spec — abs/rel control factor isolated on the
+# NATIVE family. Holds observation + trainer FIXED vs task10_native_act.yaml
+# (8-dim native observation, plain lerobot-train raw) and flips ONLY
+# absolute-vs-relative: the action column is the formal goal
+# G = state + native_delta stored as AXIS-ANGLE (native's own rotation format),
+# recovered-delta relative delivery, ACT. See packages/anvil_sim/README.md.
+# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_native_abs_act.yaml
+# =============================================================================
+
+name: task10-native-abs-act
+task_index: 10
+env_suite: libero_goal
+env_task_id: 8
+dataset_group: native_abs
+train:
+  trainer: lerobot-train
+  policy_type: act
+  steps: 50000
+  batch_size: 16
+  output_dir: model_zoo/native/libero-task10-native-abs/act
+eval:
+  action_type: native_abs
+  control_mode: relative
+  n_episodes: 50
+gates:
+  gt_replay_margin: 15.0

@@ -37,6 +37,7 @@ from anvil_sim.libero_processor import (
     NativeRot6dActionProcessorStep,
     ZeroCalActionProcessorStep,
     absolute_native_action_from_target,
+    axis_angle_action_to_rot6d,
     hand_action_to_native,
     native_action_from_targets,
     native_action_from_world_delta,
@@ -795,3 +796,72 @@ def test_native_hand_action_processor_requires_observation_first():
     action_step = NativeHandActionProcessorStep(obs_step=obs_step)
     with pytest.raises(RuntimeError, match="paired NativeHandObsProcessorStep"):
         action_step.action(torch.zeros(1, 7))
+
+
+# =============================================================================
+# axis_angle_action_to_rot6d / ZeroCalActionProcessorStep(action_encoding=...)
+# -- the goalabs_aa family (native_abs / native_n0): the axis-angle
+# counterparts of the rot6d goalabs conditions. The ONLY difference is the
+# action rotation encoding (axis-angle vs rot6d), decoded up front and then
+# run through the identical abs / rel_world reconstruction.
+# =============================================================================
+
+
+def test_axis_angle_action_to_rot6d_is_inverse_of_rot6d_action_to_native():
+    """axis_angle_action_to_rot6d (7-dim -> 10-dim) and rot6d_action_to_native
+    (10-dim -> 7-dim) must be exact inverses -- the lossless swap the
+    goalabs_aa family relies on, same proven pattern as
+    native_action_to_rot6d/rot6d_action_to_native."""
+    aa_actions = np.array(
+        [
+            [0.01, -0.02, 0.005, 0.0, 0.0, 0.0, 1.0],           # zero rotation
+            [0.01, -0.02, 0.005, 0.001, -0.0008, 0.0012, -1.0],  # tiny rotation
+            [0.3, 0.0, -0.1, 0.5, -0.3, 0.2, 1.0],               # larger rotation
+        ],
+        dtype=np.float32,
+    )
+    for aa in aa_actions:
+        rot6d10 = axis_angle_action_to_rot6d(aa)
+        assert rot6d10.shape == (10,)
+        recovered = rot6d_action_to_native(rot6d10)
+        np.testing.assert_allclose(recovered, aa, atol=1e-5)
+
+
+@pytest.mark.parametrize("mode", ["abs", "rel_world"])
+def test_zero_cal_axis_angle_encoding_matches_rot6d_encoding(mode):
+    """The core native_abs (mode='abs') / native_n0 (mode='rel_world')
+    equivalence: feeding a 7-dim axis-angle action with
+    action_encoding='axis_angle' must produce the EXACT same native command
+    as feeding the equivalent 10-dim rot6d action with the default rot6d
+    encoding -- proving the axis-angle path is only a lossless re-encoding of
+    the proven rot6d goalabs machinery, delivered relative with native_cmd
+    gripper."""
+    quat = matrix_to_quat(axis_angle_to_matrix(np.array([0.2, -0.4, 0.15])))
+    goal = np.array([0.15, 0.25, 0.35, *quat, -1.0], dtype=np.float32)
+    aa_action = np.concatenate([goal[:3], matrix_to_axis_angle(quat_to_matrix(goal[3:7])), [goal[7]]])
+    rot6d_action = axis_angle_action_to_rot6d(aa_action)
+
+    anchor = np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.02], dtype=np.float32)
+
+    obs_rot6d = AnvilEEObsProcessorStep(action_type="ee_rel" if mode == "rel_world" else "ee_abs")
+    step_rot6d = ZeroCalActionProcessorStep(
+        mode=mode, obs_step=obs_rot6d, deliver="relative", gripper_mode="native_cmd",
+    )
+    obs_rot6d.last_anvil_state = anchor
+    out_rot6d = step_rot6d.action(torch.from_numpy(rot6d_action.astype(np.float32))).numpy()[0]
+
+    obs_aa = AnvilEEObsProcessorStep(action_type="ee_rel" if mode == "rel_world" else "ee_abs")
+    step_aa = ZeroCalActionProcessorStep(
+        mode=mode, obs_step=obs_aa, deliver="relative", gripper_mode="native_cmd",
+        action_encoding="axis_angle",
+    )
+    obs_aa.last_anvil_state = anchor
+    out_aa = step_aa.action(torch.from_numpy(aa_action.astype(np.float32))).numpy()[0]
+
+    np.testing.assert_allclose(out_aa, out_rot6d, atol=1e-5)
+
+
+def test_zero_cal_rejects_invalid_action_encoding():
+    obs_step = AnvilEEObsProcessorStep(action_type="ee_abs")
+    with pytest.raises(ValueError, match="action_encoding"):
+        ZeroCalActionProcessorStep(mode="abs", obs_step=obs_step, action_encoding="quat")

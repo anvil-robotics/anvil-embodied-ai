@@ -134,8 +134,36 @@ _ZERO_CAL_GOAL_ACTION_TYPES = {
     # re-encoded, hence confounded for a frame comparison).
     "zerocal_goal_world_seq_rel": ("ee_abs", "rel_world_seq", "relative", "target_qpos"),
     "zerocal_goal_hand_seq_rel": ("ee_abs", "rel_hand_seq", "relative", "target_qpos"),
+    # NATIVE-family control-factor conditions (obs + trainer FIXED vs `native`;
+    # differ in exactly ONE thing). Both use the 8-dim NATIVE passthrough
+    # observation (NativeHandObsProcessorStep, see
+    # _make_anvil_env_pre_post_processors) and are trained via plain
+    # lerobot-train on their own dataset group (native_abs / native_n0), NOT
+    # the 10-dim anvil-trainer goalabs_aa path. Rotation is stored/predicted as
+    # AXIS-ANGLE (native's own format), decoded to rot6d up front by
+    # ZeroCalActionProcessorStep(action_encoding="axis_angle") so the abs /
+    # rel_world reconstruction is byte-identical to the rot6d goalabs family.
+    # - native_abs: dataset action = absolute goal G[t]=state[t]+native_delta[t]
+    #   (axis-angle); flips ONLY absolute-vs-relative from `native` (delta
+    #   command -> absolute goal). mode "abs".
+    # - native_n0: dataset action = that goal relativized per-frame against its
+    #   own observed EE pose (n-0, world frame, BAKED at convert time since
+    #   lerobot-train applies no load-time transform); flips ONLY the anchor
+    #   (n-(n-1) -> chunk-start n-0). mode "rel_world" reconstructs the absolute
+    #   goal via ee_rel_world_inverse against the chunk-start anchor.
+    # (The first tuple element is unused for these two — obs is always the
+    # 8-dim native passthrough, never AnvilEEObsProcessorStep.)
+    "native_abs": ("ee_abs", "abs", "relative", "native_cmd"),
+    "native_n0": ("ee_rel", "rel_world", "relative", "native_cmd"),
 }
 _ZERO_CAL_ACTION_TYPES = {**_ZERO_CAL_ACTION_TYPES, **_ZERO_CAL_GOAL_ACTION_TYPES}
+
+# Zero-cal goal action types whose stored/predicted action carries its
+# rotation as AXIS-ANGLE (7-dim [pos, aa, gripper]) rather than rot6d (10-dim)
+# — the ONLY difference from their rot6d counterparts. Consumed by
+# _make_anvil_env_pre_post_processors here and by the GT-replay provider in
+# eval_replay to decode/re-encode around the shared rot6d n-0 machinery.
+_AXIS_ANGLE_ACTION_TYPES = frozenset({"native_abs", "native_n0"})
 
 
 def _load_policy_from_checkpoint(cfg: PreTrainedConfig):
@@ -263,6 +291,33 @@ def _make_anvil_env_pre_post_processors(
     if action_type in _NATIVE_FRAME_ACTION_TYPES:
         obs_step = NativeHandObsProcessorStep()
         action_step = NativeHandActionProcessorStep(obs_step=obs_step)
+    elif action_type in _AXIS_ANGLE_ACTION_TYPES:
+        # native_abs / native_n0 — NATIVE-family control-factor conditions:
+        # 8-dim native passthrough observation (SAME as native / native_hand,
+        # via NativeHandObsProcessorStep — which also caches last_anvil_state
+        # in quat layout for the goal reconstruction), trained via plain
+        # lerobot-train. Only the ACTION side runs the ZeroCal goal
+        # reconstruction (decode axis-angle -> rot6d -> recover native delta).
+        # This is the fix for the obs-dim confound: the old build attached
+        # AnvilEEObsProcessorStep here (10-dim rot6d obs), mismatching the
+        # 8-dim dataset the policy was actually trained on.
+        _, zero_cal_mode, deliver, gripper_mode = _ZERO_CAL_ACTION_TYPES[action_type]
+        obs_step = NativeHandObsProcessorStep()
+        action_step = ZeroCalActionProcessorStep(
+            mode=zero_cal_mode,
+            obs_step=obs_step,
+            n_action_steps=n_action_steps,
+            deliver=deliver,
+            gripper_mode=gripper_mode,
+            action_encoding="axis_angle",
+            # native_n0's column bakes its n-0 relativization per-frame against
+            # each frame's OWN pose (libero_convert.goal_state_to_n0_axis_angle_action),
+            # since plain lerobot-train applies no chunk-start load-time transform;
+            # its reconstruction must therefore anchor per-frame, not to the chunk
+            # start (which only matches at n_action_steps=1). native_abs is mode
+            # "abs" and ignores the anchor entirely.
+            per_frame_anchor=zero_cal_mode in ("rel_world", "rel_hand"),
+        )
     elif action_type in _ZERO_CAL_ACTION_TYPES:
         obs_action_type, zero_cal_mode, deliver, gripper_mode = _ZERO_CAL_ACTION_TYPES[action_type]
         obs_step = AnvilEEObsProcessorStep(action_type=obs_action_type)
@@ -272,6 +327,7 @@ def _make_anvil_env_pre_post_processors(
             n_action_steps=n_action_steps,
             deliver=deliver,
             gripper_mode=gripper_mode,
+            action_encoding="axis_angle" if action_type in _AXIS_ANGLE_ACTION_TYPES else "rot6d",
         )
     else:
         obs_step = AnvilEEObsProcessorStep(action_type=action_type)

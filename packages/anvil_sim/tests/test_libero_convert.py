@@ -22,14 +22,22 @@ from anvil_sim.libero_convert import (
     convert_episode_actions,
     convert_episode_delta_actions,
     convert_episode_delta_hand_actions,
+    convert_episode_goal_aa_actions,
     convert_episode_goal_abs_actions,
+    convert_episode_goal_n0_aa_actions,
     convert_episode_goal_states,
     convert_episode_native_hand_actions,
+    goal_state_to_axis_angle_action,
     native_action_to_hand,
     native_action_to_rot6d,
     native_delta_to_goal,
 )
-from anvil_sim.libero_processor import hand_action_to_native, rot6d_action_to_native
+from anvil_sim.libero_processor import (
+    axis_angle_action_to_rot6d,
+    hand_action_to_native,
+    recovered_delta_native_action,
+    rot6d_action_to_native,
+)
 
 
 def test_convert_episode_actions_returns_absolute_not_relative():
@@ -269,3 +277,84 @@ def test_native_action_to_hand_matches_episode_helper():
         raw_state.reshape(1, 8), native.reshape(1, 7)
     )[0]
     np.testing.assert_allclose(episode, per_step, atol=1e-7)
+
+
+# --- Experiment: axis-angle "goal" family (goalabs_aa: native_abs / native_n0) ---
+
+
+def test_goal_state_to_axis_angle_action_decodes_to_the_rot6d_goal_action():
+    """goalabs_aa stores the goal rotation as AXIS-ANGLE; decoding it back to
+    rot6d (axis_angle_action_to_rot6d) must reproduce EXACTLY the 10-dim rot6d
+    action the rot6d `goalabs` group stores (anvil_state_to_abs_action) — the
+    lossless rot6d<->axis-angle swap is the ONLY difference between the two
+    families, proven zero-error just like native_rot6d."""
+    quat = matrix_to_quat(axis_angle_to_matrix(np.array([0.3, -0.5, 0.2])))
+    goal = np.array([0.4, -0.1, 0.6, *quat, -1.0], dtype=np.float32)
+
+    aa_action = goal_state_to_axis_angle_action(goal)
+    assert aa_action.shape == (7,)
+
+    decoded_rot6d = axis_angle_action_to_rot6d(aa_action)
+    expected_rot6d = anvil_state_to_abs_action(goal)
+    np.testing.assert_allclose(decoded_rot6d, expected_rot6d, atol=1e-6)
+    # pos and gripper pass through untouched in the axis-angle layout.
+    np.testing.assert_allclose(aa_action[:3], goal[:3], atol=1e-8)
+    assert aa_action[6] == goal[7]
+
+
+def test_goalabs_aa_action_recovers_the_native_command_to_float_precision():
+    """The native_abs identity (the whole point of the GT-replay oracle, at
+    the data level): decode the stored axis-angle goal back to rot6d and
+    recover a native-delta against the SAME state the goal was built from —
+    this must reproduce native's own command exactly (goal = state +
+    native_delta, so goal - state = native_delta)."""
+    quat0 = matrix_to_quat(axis_angle_to_matrix(np.array([0.1, -0.2, 0.05])))
+    states = np.array([[0.3, -0.1, 0.5, *quat0, 0.02]], dtype=np.float32)
+    native_actions = np.array([[0.4, -0.6, 0.3, 0.2, -0.4, 0.15, -1.0]], dtype=np.float32)
+
+    goal_states = convert_episode_goal_states(states, native_actions)
+    aa_actions = convert_episode_goal_aa_actions(goal_states)
+    assert aa_actions.shape == (1, 7)
+
+    rot6d10 = axis_angle_action_to_rot6d(aa_actions[0])
+    recovered = recovered_delta_native_action(
+        reconstructed_pos=rot6d10[:3],
+        reconstructed_rot6d=rot6d10[3:9],
+        reconstructed_gripper=float(rot6d10[9]),
+        current_state=states[0],
+        current_gripper=float(states[0][7]),
+        gripper_mode="native_cmd",
+    )
+    expected = np.clip(native_actions[0], -1.0, 1.0)
+    np.testing.assert_allclose(recovered, expected, atol=1e-5)
+
+
+def test_native_n0_action_recovers_the_native_command_to_float_precision():
+    """The native_n0 identity at the data level (n_action_steps=1, anchor ==
+    current state): the stored action is the goal ALREADY relativized per-frame
+    against its own obs pose (ee_rel_world_forward). Un-relativizing it via
+    ee_rel_world_inverse against that same state recovers the absolute goal,
+    and recovering a native-delta against the same state reproduces native's
+    own command — proving native_n0 and native_abs collapse to the identical
+    native delta when the n-0 anchor is the current frame (the GT-replay
+    regime), differing only for chunked (n>1) reconstruction."""
+    quat0 = matrix_to_quat(axis_angle_to_matrix(np.array([0.1, -0.2, 0.05])))
+    states = np.array([[0.3, -0.1, 0.5, *quat0, 0.02]], dtype=np.float32)
+    native_actions = np.array([[0.4, -0.6, 0.3, 0.2, -0.4, 0.15, -1.0]], dtype=np.float32)
+
+    goal_states = convert_episode_goal_states(states, native_actions)
+    n0_actions = convert_episode_goal_n0_aa_actions(goal_states, states)
+    assert n0_actions.shape == (1, 7)
+
+    rel10 = axis_angle_action_to_rot6d(n0_actions[0])
+    abs10 = ee_rel_world_inverse(rel10.reshape(1, 10), states[0].reshape(1, 8))[0]
+    recovered = recovered_delta_native_action(
+        reconstructed_pos=abs10[:3],
+        reconstructed_rot6d=abs10[3:9],
+        reconstructed_gripper=float(abs10[9]),
+        current_state=states[0],
+        current_gripper=float(states[0][7]),
+        gripper_mode="native_cmd",
+    )
+    expected = np.clip(native_actions[0], -1.0, 1.0)
+    np.testing.assert_allclose(recovered, expected, atol=1e-5)
