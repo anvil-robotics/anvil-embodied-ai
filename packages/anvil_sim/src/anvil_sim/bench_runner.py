@@ -24,7 +24,7 @@ Subprocess stages log to ``outputs/bench/runs/<name>/<stage>.log``.
 
 Usage::
 
-    anvil-sim-bench run configs/libero_bench/task10_goal_abs_act.yaml
+    anvil-sim-bench run packages/anvil_sim/src/anvil_sim/studies/libero_ee/configs/task10_goal_abs_act.yaml
     anvil-sim-bench run spec.yaml --from-stage eval
     anvil-sim-bench run spec.yaml --dry-run
     anvil-sim-bench status

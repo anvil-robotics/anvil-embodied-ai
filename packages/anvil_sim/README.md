@@ -32,11 +32,11 @@ with minimum effort — and makes it structurally impossible to burn a full
 training run on a config whose eval path is broken (the failure mode that
 cost this project four separate full sweeps before the harness existed).
 
-**Step 1 — write one spec YAML** under `configs/libero_bench/` (see the 14
+**Step 1 — write one spec YAML** under `packages/anvil_sim/src/anvil_sim/studies/libero_ee/configs/` (see the 14
 existing files there for every supported pattern):
 
 ```yaml
-# configs/libero_bench/task10_my_idea_act.yaml
+# packages/anvil_sim/src/anvil_sim/studies/libero_ee/configs/task10_my_idea_act.yaml
 name: task10-my-idea-act
 task_index: 10
 env_suite: libero_goal
@@ -60,7 +60,7 @@ construction to `libero_convert.py`, the eval decode to
 **Step 3 — run it**:
 
 ```bash
-uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_my_idea_act.yaml
+uv run --package anvil-sim anvil-sim-bench run packages/anvil_sim/src/anvil_sim/studies/libero_ee/configs/task10_my_idea_act.yaml
 ```
 
 The pipeline executes eight idempotent stages — `convert → validate-math →

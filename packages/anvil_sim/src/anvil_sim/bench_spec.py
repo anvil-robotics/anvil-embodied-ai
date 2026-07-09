@@ -1,6 +1,6 @@
 """Declarative experiment spec for the LIBERO validation harness.
 
-One treatment = one YAML file under ``configs/libero_bench/`` (following the
+One treatment = one YAML file under ``packages/anvil_sim/src/anvil_sim/studies/libero_ee/configs/`` (following the
 repo's ``configs/<tool>/`` convention). The bench runner
 (``anvil-sim-bench``, see ``bench_runner.py``) executes a spec through a
 gated pipeline where every cheap check runs BEFORE any expensive training —
@@ -9,7 +9,7 @@ unit tests and training loss burned multiple full training sweeps.
 
 Example::
 
-    # configs/libero_bench/task10_goal_abs_act.yaml
+    # packages/anvil_sim/src/anvil_sim/studies/libero_ee/configs/task10_goal_abs_act.yaml
     name: task10-goal-abs-act
     task_index: 10
     env_suite: libero_goal
