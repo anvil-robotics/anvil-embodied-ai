@@ -203,19 +203,11 @@ conditions — `goal-{world,hand}-seq` with RELATIVE delivery — were gate-reje
 Deprecated `ee_abs`/`ee_rel`/`ee_delta` are kept for the reasoning trail (their story is bugs
 #1–#3) but **excluded from the control-factor analysis in §3**.
 
-**Five real eval-path bugs were found and fixed** (documented in
-`packages/anvil_sim/README.md`): (#1) `ee_rel` chunk-anchor mismatch; (#2) `ee_rel`
-double-relativization; (#3) `native`+Diffusion upstream `lerobot` `EpisodeAwareSampler` crash;
-(#4) `goalabs` gripper semantics; (#5) chunk-anchor state leaking across episodes. Every one
-was invisible to training loss (all converged normally) and to synthetic-value unit tests;
-each was caught only by running real data through the actual eval path.
-
-**Five real eval-path bugs were found and fixed** across the effort (all documented in
-`packages/anvil_sim/README.md`): (#1) `ee_rel` chunk-anchor mismatch; (#2) `ee_rel`
-double-relativization; (#3) `native`+Diffusion upstream `lerobot` `EpisodeAwareSampler` crash;
-(#4) `goalabs` gripper semantics; (#5) chunk-anchor state leaking across episodes. Every one
-was invisible to training loss (all converged normally) and to synthetic-value unit tests;
-each was caught only by running real data through the actual eval path.
+**Five real eval-path bugs were found and fixed** (see the Diary, Part 2): (#1) `ee_rel`
+chunk-anchor mismatch; (#2) `ee_rel` double-relativization; (#3) `native`+Diffusion upstream
+`lerobot` `EpisodeAwareSampler` crash; (#4) `goalabs` gripper semantics; (#5) chunk-anchor state
+leaking across episodes. Every one was invisible to training loss (all converged normally) and to
+synthetic-value unit tests; each was caught only by running real data through the actual eval path.
 
 ## 3. Analysis by control factor — clean native-family single-flip design
 
