@@ -154,6 +154,26 @@ anvil-embodied-ai/
 
 ---
 
+## Simulation Validation (dev tool)
+
+A gated **LIBERO simulation validation harness** (`anvil_sim`) for cheaply testing a new action
+representation, data treatment, or policy idea *before* committing a full training run. It is a
+**developer tool**, separate from the data → train → infer pipeline above. Every cheap check runs
+before training — including a **GT-replay gate** that catches eval-path bugs (invisible to training
+loss and unit tests) by replaying ground-truth actions through your exact eval path.
+
+```bash
+uv sync --package anvil-sim --extra dev            # install (+ a one-time LIBERO config pre-seed — see the guide)
+uv run --package anvil-sim anvil-libero-convert    # build the datasets (one-time)
+uv run --package anvil-sim anvil-sim-bench run <spec>.yaml   # run a treatment through the gated pipeline
+```
+
+**Full guide → [docs/simulation.md](docs/simulation.md).** Worked example & results (the EE
+action-representation study this was built for):
+[`packages/anvil_sim/src/anvil_sim/studies/libero_ee/report.md`](packages/anvil_sim/src/anvil_sim/studies/libero_ee/report.md).
+
+---
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
