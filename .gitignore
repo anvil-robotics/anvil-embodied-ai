@@ -79,6 +79,9 @@ logs/
 wandb/
 runs/
 
+# mcap-valid default report output (always written unless --output overrides)
+mcap_valid_reports/
+
 # Videos and media
 videos/
 *.mp4
