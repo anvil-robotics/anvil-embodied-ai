@@ -57,11 +57,13 @@ episodes (experiment E1); deprecated and `seq` rows remain at n=10 (noted). task
 | Condition | Representation | ACT | Diffusion | n |
 |---|---|---|---|---|
 | `native` | native delta command, WORLD frame, relative delivery (gold reference) | **88** | 100 | 50 / 10 |
-| `native_hand` | native command rotated to HAND (body) frame, relative delivery | **64** | — | 50 |
-| `goal-abs` | formal `state+native_delta`, recovered-delta relative delivery | **94** | **98** | 50 |
+| `native_rot6d` | native family, action rot6d (#1 encoding flip) | **76** | 100 | 50 / 10 |
+| `native_abs` | native family, absolute goal `state+native_delta` (aa) (#2 abs/rel flip) | **80** | — | 50 |
+| `native_n0` | native family, goal per-frame-relativized (aa) (#3 anchor flip) | **86** | — | 50 |
+| `native_hand` | native command rotated to HAND (body) frame (#4 frame flip) | **64** | — | 50 |
+| `goal-abs` | formal `state+native_delta`, recovered-delta relative delivery (goal family, 10-dim obs) | **94** | **98** | 50 |
 | `goal-world-n0` | goal target, world-frame anchor-relative (n-0), relative | **82** | **16** | 50 |
 | `goal-hand-n0` | goal target, hand-frame anchor-relative (n-0), relative | **76** | — | 50 |
-| `native_rot6d` | native scale, rotation re-encoded axis-angle→rot6d | **76** | 100 | 50 / 10 |
 | `goal-world-seq` | real consecutive states (n-(n-1)), **absolute** delivery | 50 | — | 10 |
 | `goal-hand-seq` | real consecutive states, hand frame, **absolute** delivery | 30 | — | 10 |
 | ~~`ee_abs`~~ (deprecated) | Anvil act-from-obs absolute pose, calibrated | 40 | 50 | 10 |
@@ -89,127 +91,87 @@ double-relativization; (#3) `native`+Diffusion upstream `lerobot` `EpisodeAwareS
 was invisible to training loss (all converged normally) and to synthetic-value unit tests;
 each was caught only by running real data through the actual eval path.
 
-## 3. Analysis by control factor
+## 3. Analysis by control factor — clean native-family single-flip design
 
-Each comparison isolates — as far as the available conditions allow — a **single** design
-variable, holding the rest fixed. This replaces the earlier "native ≫ everything" narrative,
-which was an artifact of bugs #4/#5. Numbers are pc_success (%), ACT and task10 unless noted;
-conditions factor as `{target definition}-{anchor scheme}-{frame}` with delivery
-(relative/absolute) noted separately. The deprecated `ee_abs`/`ee_rel`/`ee_delta` are excluded
-(see §2).
+Each factor is measured by flipping **exactly one** variable from `native`, holding the
+observation (8-dim native state) AND the trainer (`lerobot-train` raw) FIXED — i.e. all
+conditions live in the **native family**. This matters: the goal family (`goal-abs`,
+`goal-world-n0`, …) trains via `anvil-trainer` on a **different 10-dim Anvil-EE observation**, so
+comparing native against a goal-family condition confounds the design factor with the observation
+encoding. Only same-family, single-variable flips are clean. All numbers task10, ACT, n=50.
 
-For orientation, the overall ranking (task10, ACT, n=50, incl. deprecated for reference):
-`goal-abs` 94 > `native` 88 > `world-n0` 82 > {`native_rot6d` 76, `hand-n0` 76} > `world-seq` 50 >
-~~`ee_abs` 40~~ > {~~`ee_rel`~~ 30, `hand-seq` 30} > ~~`ee_delta`~~ 10.
+### 3.0 The clean matrix (all native-family, single flip from `native`)
 
-### 3.1 Rotation encoding — axis-angle vs rot6d
-Hold native scale, world frame, native-delta target, relative delivery.
-
-| | task10 ACT | task14 ACT | task11 ACT | task10 Diffusion |
+| flip from native | condition | pc | Δ vs native | GT-replay (math check) |
 |---|---|---|---|---|
-| `native` (axis-angle) | 88 | 90 | 80 | 100 |
-| `native_rot6d` (rot6d) | 76 | 76 | 78 | 100 |
+| — (reference: aa, delta, world, n-(n-1), relative) | `native` | **88** | — | baseline 60 |
+| #4 frame → hand | `native_hand` | 64 | **−24** | 71 (healthy) |
+| #1 encoding → rot6d | `native_rot6d` | 76 | **−12** | 60 (healthy) |
+| #2 abs/rel → absolute goal | `native_abs` | 80 | **−8** | 86 (healthy) |
+| #3 anchor → n-0 | `native_n0` | 86 | **−2** | 60 (healthy) |
 
-**axis-angle ≥ rot6d** for ACT (~12–14pp on rotation-light/medium, but only ~2pp on
-rotation-heavy — the penalty SHRINKS as rotation dominates, opposite of the naive expectation);
-**neutral for Diffusion** (100 = 100). Real but secondary.
+Every condition's GT-replay ≈ the native baseline, so the eval paths execute ground truth
+correctly and each gap is a genuine **learnability** difference, not an eval artifact. **Factor
+magnitude: frame (−24) ≫ encoding (−12) > abs/rel (−8) > anchor (≈0).**
 
-### 3.2 Target definition — own delta command vs formal absolute goal (relative delivery)
+### 3.1 Frame — world vs hand: **−24 (dominant factor)**
+`native` (world) 88 vs `native_hand` (same command rotated into the EE body frame) 64. **World
+frame wins by 24pp.** The body-frame command is substantially *harder to learn* — **opposite** to
+the common "body-frame is more local, hence easier" (UMI) intuition. (Goal-family cross-check,
+different obs: world-n0 82 vs hand-n0 76, +6 — same direction, smaller.)
 
-| | task10 | task14 | task11 |
-|---|---|---|---|
-| `native` (own delta command) | 88 | 90 | 80 |
-| `goal-abs` (formal `state+native_delta`, recovered-delta relative) | 94 | 72 | 76 |
-| **goal-abs − native** | **+6** | **−18** | **−4** |
+### 3.2 Rotation encoding — axis-angle vs rot6d: **−12**
+`native` (axis-angle) 88 vs `native_rot6d` 76. axis-angle > rot6d for ACT; **neutral for
+Diffusion** (100=100). Cross-task: the penalty **shrinks as rotation grows** (task14 −14, task11
+only −2) — opposite the naive expectation.
 
-`goal-abs` is an **absolute representation with delta execution**. It beats native ONLY on the
-rotation-light task10; on the other two it trails. **Non-monotonic and task-specific** (see 3.6).
+### 3.3 Absolute vs relative target — **relative wins, −8** (sign-corrected)
+`native` (relative delta command) 88 vs `native_abs` (absolute goal `state+native_delta`, same
+command, recovered-delta relative delivery) 80. **The relative command beats the absolute-goal
+formulation by 8pp.**
+> **Correction.** An earlier ENCODING-CONFOUNDED pairing (goal-abs rot6d **94** vs native_rot6d
+> 76) suggested the *opposite* — "absolute +18". On the clean native family (observation and
+> encoding held fixed) the sign flips: relative wins. The apparent goal-abs advantage was the
+> goal family's richer 10-dim observation, not the absolute representation. This is exactly why
+> same-family isolation was necessary.
 
-### 3.3 Relativization horizon — n-(n-1) consecutive vs n-0 single-anchor
-Both relative delivery, world frame, task10 ACT. `native` is a consecutive per-step delta =
-relative **n-(n-1)**; `goal-world-n0` re-anchors each chunk to a single step-0 anchor (**n-0**).
+### 3.4 Anchor — n-(n-1) vs n-0: **≈ none (−2), and not independently isolable in this family**
+`native` (n-(n-1)) 88 vs `native_n0` (n-0) 86 — no meaningful effect. But the deeper finding is
+structural: **a true chunk-start (n-0) anchor cannot be encoded in a static `lerobot-train`
+dataset column**, because chunks exist only at inference. A per-frame-consistent "n-0"
+degenerates to the command itself (`ee_rel_world_forward(state+native_delta, state) ≈
+native_delta`), which is why native_n0 ≈ native. Genuine chunk-start anchoring requires
+**chunk-aware training** (the goal family / anvil-trainer). So the anchor factor is **entangled
+with the training mechanism**, not an independent single-flip in the command family. (This was
+surfaced by a chunk-anchor eval bug — native_n0 GT-replay healthy at n_action_steps=1 but 0% at
+n=100 — fixed by anchoring the eval reconstruction per-frame to match the per-frame training
+target; `ZeroCalActionProcessorStep.per_frame_anchor`.)
 
-| `native` (n-(n-1)) | `goal-world-n0` (n-0) |
-|---|---|
-| 88 | 82 |
-
-**Horizon is minor under relative delivery** (88 vs 82). Caveat: this pair also differs in target
-definition and rotation encoding, so it is not a pure horizon isolation.
-
-### 3.4 Reference frame — world vs hand
-The **cleanest** isolation uses the NATIVE command and flips ONLY the frame: `native_hand` is
-`native`'s own per-step command rotated into the EE body frame at convert time and rotated back
-at eval (`native_action_to_hand` / `hand_action_to_native`) — same command, same relative
-delivery, same everything else. Frame correctness verified: GT-replay **71.4%** ≈ native baseline
-60% (and validate-math round-trip max_err 6e-8), so any eval gap is pure learnability, not an
-eval-path artifact.
-
-| representation (task10 ACT, n=50) | world | hand | Δ |
-|---|---|---|---|
-| **native command** (`native` vs `native_hand`) | **88** | **64** | **+24** |
-| goal, n-0, re-encoded, relative (`world-n0` vs `hand-n0`) | 82 | 76 | +6 |
-| goal, seq (n-(n-1)), re-encoded, absolute (`world-seq` vs `hand-seq`) | 50 | 30 | +20 |
-
-**World frame beats hand frame in every representation** (+6 to +24pp), decisively for the native
-command. The 24pp native drop is a genuine **learnability** difference (GT executes fine at 71.4%):
-the body-frame command is harder for the policy to fit than the world-frame command. Notably this
-is **opposite** to the common "body-frame is more local, hence easier" intuition (UMI-style) — on
-LIBERO the world-frame command wins clearly.
-
-One cube cell is unfillable: n-(n-1) `seq` under RELATIVE delivery (both frames 0%, gate-rejected)
-— the `seq` datasets store physical-unit state deltas, which relative delivery double-scales
-(§3.5). That is a units limitation, not a frame result.
-
-### 3.5 Delivery mode — recovered-delta relative vs absolute (NOT a free flip)
-Delivery must match the target's units:
-- **Formal-goal targets** (`goal-abs`, `n-0`): unscaled formal composition → recovered-delta
-  **relative** is correct (goal-abs 94, world-n0 82), letting robosuite apply the true scale.
-- **Consecutive-seq targets**: already in **physical units** → must be **absolute** (world-seq 50,
-  hand-seq 30); relative delivery double-scales them → 0% (gate-rejected, §3.4).
-
-The winning combination is **formal-goal target + recovered-delta relative delivery** (`goal-abs`).
-Absolute-delivered seq is the weakest valid family.
-
-### 3.6 Task robustness — rotation-light → medium → heavy (ACT, n=50)
-
-| | task10 (0.0082) | task14 (0.0125) | task11 (0.0258) |
-|---|---|---|---|
-| `native` | 88 | 90 | 80 |
-| `native_rot6d` | 76 | 76 | 78 |
-| `goal-abs` | 94 | 72 | 76 |
-
-`native` is 80–90 everywhere — **the most robust**. `goal-abs` is **non-monotonic** (94/72/76):
-it tops native only on task10 and is *below* native on both other tasks. **Its task10 lead does
-not generalize** — the single most important correction from the n=50 / third-task sweep.
-
-### 3.7 Architecture robustness — ACT vs Diffusion (task10, n=50)
-
-| | ACT | Diffusion |
-|---|---|---|
-| `goal-abs` | 94 | **98** |
-| `goal-world-n0` | 82 | **16** |
-| `native` | 88 | 100 (n=10) |
-
-`goal-abs` is **architecture-robust** (top-tier on both). `goal-world-n0` is
-**architecture-fragile**: ACT 82 → Diffusion **16** collapse, despite identical training loss and
-a healthy GT-replay (85.7%) — a genuine representation×architecture interaction, not a bug (the
-harness confirms the eval path is fine). Anchor-relative representations are not trustworthy
-across architectures.
+### 3.5 Secondary cross-checks (goal family — different 10-dim obs, NOT clean single-flips)
+These use the anvil-trainer 10-dim observation, so read them as directional, not as clean isolations:
+- **Delivery is not a free flip.** Formal-goal targets (`goal-abs`, `n-0`) are unscaled → recovered-delta
+  **relative** is correct (goal-abs 94, world-n0 82). Consecutive-`seq` targets are physical-unit →
+  must be **absolute** (world-seq 50, hand-seq 30); relative delivery double-scales them → 0%
+  (gate-rejected).
+- **Task robustness** (ACT, n=50): `native` 88/90/80 across task10/14/11 — the most robust.
+  `goal-abs` is **non-monotonic** (94/72/76): tops native only on rotation-light task10, trails on
+  the other two. Its task10 lead does not generalize.
+- **Architecture** (task10): `goal-abs` robust (ACT 94 / Diffusion **98**); `goal-world-n0`
+  **fragile** (ACT 82 → Diffusion **16** collapse, normal loss + healthy GT-replay — a real
+  representation×architecture interaction, not a bug).
 
 ### Bottom line
-- **Most reliable across tasks AND architectures:** `native` (own delta command + relative
-  delivery) — 80–100 everywhere. This is what production already uses.
-- **`goal-abs`** (formal absolute target + recovered-delta relative delivery): competitive-to-best
-  and architecture-robust, but its edge over native is **task-specific** (task10 only). A per-task
-  option worth harness-testing, **not a blanket upgrade**.
-- **Anchor-relative** (`world-n0`/`hand-n0`): architecture-fragile (Diffusion collapse); avoid.
-- **Frame: world ≫ hand**, robustly across every representation (+6 to +24pp; +24 for the native
-  command isolated cleanly via `native_hand`). Body-frame is *harder* to learn here — opposite to
-  the UMI intuition. Keep world-frame actions.
-- **Delivery:** recovered-delta relative is valid only for formal-goal targets; physical-unit seq
-  targets must be absolute (the reverse combo is gate-rejected).
-- **Rotation encoding:** secondary ACT penalty that shrinks as rotation grows; neutral for Diffusion.
-- **Standing caveat:** n=50, three tasks (all `libero_goal`), goal-family Diffusion only on task10.
+- **Frame dominates: world ≫ hand (−24).** Keep world-frame actions; body-frame is harder to learn
+  (contra UMI intuition).
+- **Encoding secondary: axis-angle > rot6d (−12) for ACT, neutral for Diffusion.**
+- **Relative > absolute (−8):** the native delta command beats the absolute-goal formulation once
+  observation/encoding are held fixed — the sign is opposite to the confounded comparison.
+- **Anchor ≈ no effect (−2), and not independently isolable** in the command family (true n-0 needs
+  chunk-aware training).
+- **Across tasks & architectures, `native` (world-frame delta command, relative delivery) is the
+  most reliable** — which is what production already uses. `goal-abs` is a task-specific,
+  obs-dependent option, not a blanket upgrade.
+- **Standing caveat:** task10 primary (task11/14 for robustness), goal-family Diffusion only on task10.
 
 ## 4. Experiment 7 (original text): "negative result" — SUPERSEDED
 
@@ -314,15 +276,19 @@ exists to expose cheaply, rather than trusting task10's single headline number.
 
 **What the control-factor sweep says for the real-robot EE pipeline (`implement-ee-space`):**
 
-1. **Keep `native`-style world-frame delta commands + relative delivery.** It is the most robust
-   representation across tasks (80–90) AND architectures (ACT 88 / Diffusion 100), and it is what
-   production already uses. The sweep validates that choice rather than overturning it.
-2. **World frame, not hand frame** (§3.4): +6 to +24pp everywhere; body-frame is harder to learn
-   here. Production already delivers world-frame poses — keep it; do not switch to body-frame.
-3. **`goal-abs` (absolute target + delta execution) is a per-task option, not a blanket upgrade**
-   (§3.6): it wins only on the rotation-light task10 (94 vs 88) and trails native on task14/task11.
-   → The production P2 idea (goal-style targets) should be **deprioritized / gated on per-task
-   harness testing**, not adopted wholesale.
+1. **Keep `native`-style world-frame delta commands + relative delivery.** The clean
+   same-family single-flip sweep (§3.0) confirms every flip AWAY from native costs: frame→hand −24,
+   encoding→rot6d −12, target→absolute −8, anchor→n-0 ≈0. It is also the most robust across tasks
+   (80–90) and architectures (ACT 88 / Diffusion 100), and is what production already uses. The
+   sweep validates that choice.
+2. **World frame, not hand frame** (§3.1): the dominant factor (−24 on the clean isolation);
+   body-frame is harder to learn here (contra UMI). Production already delivers world-frame poses —
+   keep it; do not switch to body-frame.
+3. **Relative delta beats absolute goal (−8, sign-corrected §3.3), so DROP the goal-style (P2)
+   idea for production.** On the clean native family (obs fixed), the absolute-goal formulation
+   *loses* to the native delta command; the earlier "absolute wins +18" was an observation-encoding
+   confound. `goal-abs` only looks good in its own 10-dim-obs goal family, and even there is
+   task-specific (§3.5, wins only task10). → P2 (goal-style targets) is **not worth pursuing**.
 4. **Avoid anchor-relative representations** (§3.7): architecture-fragile (Diffusion 16%).
 5. **`native_rot6d` is a safe secondary** (flat 76–78 across tasks, 100 on Diffusion): production's
    rot6d choice costs ~12pp for ACT but is neutral for Diffusion — acceptable, no action needed.
