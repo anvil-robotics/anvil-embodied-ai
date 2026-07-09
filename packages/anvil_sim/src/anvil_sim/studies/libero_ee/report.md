@@ -35,16 +35,22 @@ holding the observation (8-dim native state) AND the trainer (`lerobot-train` ra
 4. **Relative > absolute** (sign-corrected): the delta command beats the absolute-goal
    formulation once observation and encoding are held fixed. The earlier "absolute wins +18" was
    an observation-encoding confound → the goal-style production idea (P2) is **not worth pursuing**.
-5. **Anchor ≈ no effect, and not independently isolable** in the command family: a true
-   chunk-start (n-0) anchor can't be encoded in a static training column; it degenerates to the
-   command. Genuine n-0 needs chunk-aware training.
-6. **The harness earned its keep:** its GT-replay gate caught **5 real eval-path bugs**, every one
+5. **Anchor is the architecture story (§3.6): on ACT ≈ no effect, but on Diffusion it decides
+   everything.** Per-frame relative (`native_n0`) is Diffusion-robust (98); chunk-start (n-0)
+   re-encoding (`world-n0`) **collapses on Diffusion (16)**. Relative-position is NOT diffusion-hard
+   — chunk-anchoring is. (A true n-0 also can't be encoded in a static training column anyway.)
+6. **Diffusion tolerates the representation choice** far more than ACT — every native-family flip
+   is 98–100 on Diffusion; the ACT penalties (frame, encoding, abs/rel) largely vanish.
+7. **The harness earned its keep:** its GT-replay gate caught **5 real eval-path bugs**, every one
    invisible to training loss and to synthetic-value unit tests.
 
-**Production recommendation:** keep the native world-frame delta command + relative delivery; do
-not adopt goal-style targets or body-frame actions; avoid anchor-relative representations
-(Diffusion-fragile). Details in Part 3 §8. **Caveats:** n=50, `libero_goal` tasks only,
-goal-family Diffusion only on task10.
+**Recipe for EE relative-position training** (this branch's deliverable, validated on ACT +
+Diffusion): **world frame + per-frame anchor (relative to the current state, NOT chunk-start n-0) +
+rot6d-OK + recovered-delta relative delivery.** Production's `ee_rel` fails because it uses the two
+worst choices — **body frame + chunk-anchor (n-0)** — and chunk-anchor is exactly the Diffusion
+killer; the fix is world-frame + per-frame anchor, not abandoning relative. Full recipe + rationale
+in Part 3 §8. **Caveats:** n=50, `libero_goal` only; task10 is near-ceiling for Diffusion (the
+discriminating signal is the world-n0 collapse).
 
 ---
 
@@ -124,6 +130,18 @@ extended the harness / a representation · `[insight]` conclusion or reversal.
 - `[fix]` **P1 production:** fixed the analog of Bug #5 in `implement-ee-space` —
   `inference_node.reset_policy` never cleared the chunk-anchor state and nothing reset it at
   episode boundaries (branch `fix/inference-episode-reset`).
+- `[exp]` **E-diff — native-family Diffusion coverage** (the recipe decider). Ran `native_abs`,
+  `native_n0`, `native_hand` on Diffusion to complete the ACT+Diffusion matrix, motivated by the
+  production question "can a re-encoded RELATIVE representation succeed on Diffusion, given
+  goal-world-n0 collapsed to 16?".
+- `[result]` All three = **98** on Diffusion (native/native_rot6d were already 100). Crucially
+  **`native_n0` (per-frame relative) = 98, NOT collapsed** like the chunk-anchored goal-world-n0 (16).
+- `[insight]` **Relative-position is not Diffusion-hard — chunk-anchor (n-0) re-encoding is.** rot6d
+  is Diffusion-neutral, so the world-n0 collapse is the anchor, not the encoding. Diffusion also
+  tolerates the representation choice far more than ACT (all native flips 98–100). → **Recipe (§8):
+  world frame + per-frame anchor + relative delivery works on both architectures; production's
+  `ee_rel` (body-frame + chunk-anchor n-0) picked the two worst choices, and chunk-anchor is exactly
+  its Diffusion failure mode.**
 
 ---
 
@@ -166,9 +184,9 @@ episodes (experiment E1); deprecated and `seq` rows remain at n=10 (noted). task
 |---|---|---|---|---|
 | `native` | native delta command, WORLD frame, relative delivery (gold reference) | **88** | 100 | 50 / 10 |
 | `native_rot6d` | native family, action rot6d (#1 encoding flip) | **76** | 100 | 50 / 10 |
-| `native_abs` | native family, absolute goal `state+native_delta` (aa) (#2 abs/rel flip) | **80** | — | 50 |
-| `native_n0` | native family, goal per-frame-relativized (aa) (#3 anchor flip) | **86** | — | 50 |
-| `native_hand` | native command rotated to HAND (body) frame (#4 frame flip) | **64** | — | 50 |
+| `native_abs` | native family, absolute goal `state+native_delta` (aa) (#2 abs/rel flip) | **80** | **98** | 50 |
+| `native_n0` | native family, goal per-frame-relativized (aa) (#3 anchor flip) | **86** | **98** | 50 |
+| `native_hand` | native command rotated to HAND (body) frame (#4 frame flip) | **64** | **98** | 50 |
 | `goal-abs` | formal `state+native_delta`, recovered-delta relative delivery (goal family, 10-dim obs) | **94** | **98** | 50 |
 | `goal-world-n0` | goal target, world-frame anchor-relative (n-0), relative | **82** | **16** | 50 |
 | `goal-hand-n0` | goal target, hand-frame anchor-relative (n-0), relative | **76** | — | 50 |
@@ -266,7 +284,32 @@ These use the anvil-trainer 10-dim observation, so read them as directional, not
   the other two. Its task10 lead does not generalize.
 - **Architecture** (task10): `goal-abs` robust (ACT 94 / Diffusion **98**); `goal-world-n0`
   **fragile** (ACT 82 → Diffusion **16** collapse, normal loss + healthy GT-replay — a real
-  representation×architecture interaction, not a bug).
+  representation×architecture interaction, not a bug). See §3.6.
+
+### 3.6 Architecture robustness — the native family on Diffusion (E-diff)
+
+Completing the native-family single-flip matrix on Diffusion (task10, n=50; `native`/`native_rot6d`
+Diffusion are the earlier n=10 runs):
+
+| flip from `native` | ACT | Diffusion |
+|---|---|---|
+| `native` (world, delta command, per-step) | 88 | 100 |
+| `native_rot6d` (→ rot6d) | 76 | 100 |
+| `native_abs` (→ absolute goal) | 80 | 98 |
+| `native_n0` (→ per-frame relative) | 86 | 98 |
+| `native_hand` (→ hand frame) | 64 | 98 |
+
+Two findings:
+1. **Diffusion is far more representation-tolerant than ACT.** Every native-family condition is
+   98–100 on Diffusion; the ACT penalties — frame (−24), encoding (−12), abs/rel (−8) —
+   essentially vanish. (Caveat: task10 is easy for Diffusion — near-ceiling — so the native-family
+   Diffusion cells don't discriminate; the discriminating signal is the contrast below.)
+2. **The one thing that kills Diffusion is chunk-anchor (n-0) re-encoding, NOT "relative" itself.**
+   The goal-family `world-n0` (n-0 chunk-anchor) collapses to **16** on Diffusion (§3.5), while the
+   native-family `native_n0` (per-frame relative) is robust at **98**. rot6d is Diffusion-neutral
+   (native_rot6d 100), so the collapse is the anchor/re-encoding, not the encoding. → **per-frame
+   relative is Diffusion-safe; chunk-anchored (n-0) relative is not.** This resolves the tension
+   from §3.5 and directly explains a production failure mode (see §8, the recipe).
 
 ### Bottom line
 - **Frame dominates: world ≫ hand (−24).** Keep world-frame actions; body-frame is harder to learn
@@ -279,7 +322,13 @@ These use the anvil-trainer 10-dim observation, so read them as directional, not
 - **Across tasks & architectures, `native` (world-frame delta command, relative delivery) is the
   most reliable** — which is what production already uses. `goal-abs` is a task-specific,
   obs-dependent option, not a blanket upgrade.
-- **Standing caveat:** task10 primary (task11/14 for robustness), goal-family Diffusion only on task10.
+- **Architecture (§3.6): Diffusion tolerates the representation choice** (native family 98–100 on
+  all flips); the ONE Diffusion-killer is **chunk-anchor (n-0) re-encoding** (world-n0 → 16). This
+  is the crux of the production recipe (§8): true per-frame relative works on both ACT and
+  Diffusion; chunk-anchored relative does not.
+- **Standing caveat:** task10 primary (task11/14 for robustness); task10 is near-ceiling for
+  Diffusion so its Diffusion cells don't discriminate — the discriminating Diffusion signal is the
+  world-n0 collapse vs the native family.
 
 ## 4. Experiment 7 (original text): "negative result" — SUPERSEDED
 
@@ -380,39 +429,51 @@ monotonic** in rotation: on the medium task14 it trails native by 18pp, on the h
 a rotation-light-task specialist, not a general upgrade — exactly the task-dependence the harness
 exists to expose cheaply, rather than trusting task10's single headline number.
 
-## 8. Production implications & open questions
+## 8. Recipe for EE relative-position training (this study's deliverable)
 
-**What the control-factor sweep says for the real-robot EE pipeline (`implement-ee-space`):**
+The purpose of this branch was to determine, in sim, **how to do EE-space relative-position model
+training so it SUCCEEDS on both ACT and Diffusion** — because the production `ee_rel` pipeline
+failed (Diffusion outputting garbage). A working recipe follows from the single-flip matrix (§3.0)
+and the Diffusion coverage (§3.6).
 
-1. **Keep `native`-style world-frame delta commands + relative delivery.** The clean
-   same-family single-flip sweep (§3.0) confirms every flip AWAY from native costs: frame→hand −24,
-   encoding→rot6d −12, target→absolute −8, anchor→n-0 ≈0. It is also the most robust across tasks
-   (80–90) and architectures (ACT 88 / Diffusion 100), and is what production already uses. The
-   sweep validates that choice.
-2. **World frame, not hand frame** (§3.1): the dominant factor (−24 on the clean isolation);
-   body-frame is harder to learn here (contra UMI). Production already delivers world-frame poses —
-   keep it; do not switch to body-frame.
-3. **Relative delta beats absolute goal (−8, sign-corrected §3.3), so DROP the goal-style (P2)
-   idea for production.** On the clean native family (obs fixed), the absolute-goal formulation
-   *loses* to the native delta command; the earlier "absolute wins +18" was an observation-encoding
-   confound. `goal-abs` only looks good in its own 10-dim-obs goal family, and even there is
-   task-specific (§3.5, wins only task10). → P2 (goal-style targets) is **not worth pursuing**.
-4. **Avoid anchor-relative representations** (§3.7): architecture-fragile (Diffusion 16%).
-5. **`native_rot6d` is a safe secondary** (flat 76–78 across tasks, 100 on Diffusion): production's
-   rot6d choice costs ~12pp for ACT but is neutral for Diffusion — acceptable, no action needed.
-6. **P1 shipped:** the production episode-boundary reset bug (`inference_node.reset_policy` not
-   clearing `_delta_ref_state`/`_abs_shadow_queue`; no `/eval/episode_start` subscription) — the
-   direct analog of sim bug #5 — is fixed on branch `fix/inference-episode-reset` (independent PR).
+**The recipe (validated on ACT + Diffusion, task10):**
 
-**Open questions (not blocking):**
-- **Absolute-delivery divergence** (E5, not yet run): why `control_mode="absolute"` diverges
-  open-loop even with exact per-step targets, and whether that is OSC-specific (would tell us if it
-  matters for the real controller). Deferred.
-- **Diffusion coverage** beyond task10 for the goal family.
-- **Larger task set / non-`libero_goal` suites** to confirm the world>hand and native-robustness
-  findings generalize.
+| choice | use | evidence |
+|---|---|---|
+| **Frame** | **world**, not body/hand | ACT: world ≫ hand (−24); Diffusion neutral (both 98) |
+| **Anchor** | **per-frame** (relative to the CURRENT state each step), NOT chunk-start (n-0) | per-frame `native_n0`: ACT 86 / **Diffusion 98**; chunk-anchor `world-n0`: ACT 82 / **Diffusion 16 (collapse)** |
+| **Representation** | **relative** works (per-frame); it is NOT diffusion-hard | `native_n0` 86/98 — relative-position is viable on both architectures |
+| **Rotation encoding** | rot6d is fine | −12 for ACT, neutral for Diffusion (native_rot6d 100) |
+| **Delivery** | recovered-delta **relative** (subtract the live state, deliver a per-step delta) | native / native_n0 use it; physical-unit absolute-delivery seq is the weakest (§3.5) |
 
-**Status.** Sim work on `feat/ee-libero-benchmark` (pushed, no PR — per earlier decision).
-Production fix on `fix/inference-episode-reset` (pushed). Harness registry refactor (§0 gap) still
-pending. Ledger of record: `outputs/bench/RESULTS.md`.
+**Why production's current `ee_rel` fails — it made the two worst choices.** From the production
+map, its `ee_rel` is **body-frame + chunk-start (n-0) anchor + rot6d**, delivered as absolute pose.
+Body frame is the −24 ACT loser, and **chunk-anchor (n-0) is exactly the Diffusion-killer** (world-n0
+→ 16) that matches the reported "Diffusion garbage" failure. The fix is not "abandon relative" — it
+is **switch to world-frame + per-frame anchor**. A rebuild that does so should train a working
+relative-position policy on both ACT and Diffusion.
+
+**What is validated vs not:**
+- Validated: the frame / anchor / encoding / delivery directions above, on task10 (ACT n=50,
+  Diffusion n=50), with the GT-replay gate confirming every eval path is correct.
+- **Caveats:** task10 is near-ceiling for Diffusion, so the native-family Diffusion cells don't
+  discriminate — the load-bearing Diffusion signal is the `world-n0` collapse vs the native family.
+  n=50, `libero_goal` tasks only. The per-frame anchor was reached in sim by baking per-frame
+  relativization into a static dataset column; a production trainer can relativize per-frame at
+  load time.
+- **Already shipped (P1):** the production episode-boundary reset bug (`inference_node.reset_policy`
+  not clearing the chunk-anchor state; no `/eval/episode_start` subscription — the analog of sim
+  bug #5) is fixed on `fix/inference-episode-reset`.
+
+**Open questions for the production rebuild (out of scope for this sim branch):**
+- **Controller delivery** — whether the real controller wants a per-step incremental command or an
+  absolute pose. Sim's `control_mode="absolute"` diverges open-loop (E5, not run) but that is
+  robosuite-OSC-specific; answer it on the real controller, not LIBERO.
+- **Discriminating Diffusion signal on a harder task** — task10 saturates; a rotation-heavy task
+  would show whether the frame/anchor effects persist under Diffusion.
+- **Larger task set / non-`libero_goal` suites** to confirm world>hand and per-frame-relative
+  robustness generalize.
+
+**Status.** Sim work on `feat/ee-libero-benchmark`. Production fix on `fix/inference-episode-reset`.
+Ledger of record: `outputs/bench/RESULTS.md`. Production rebuild = a separate branch.
 </content>
