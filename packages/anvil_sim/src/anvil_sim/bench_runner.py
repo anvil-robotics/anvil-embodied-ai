@@ -40,8 +40,6 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-import numpy as np
-
 from anvil_sim.bench_spec import BenchSpec, load_spec
 
 log = logging.getLogger(__name__)
@@ -60,8 +58,6 @@ STAGES = (
 BENCH_ROOT = Path("outputs/bench")
 RESULTS_JSON = BENCH_ROOT / "results.json"
 RESULTS_MD = BENCH_ROOT / "RESULTS.md"
-
-_MATH_TOLERANCE = 1e-4  # max abs error allowed by validate-math identities
 
 
 # --------------------------------------------------------------------------- #
@@ -96,276 +92,35 @@ def _run_logged(cmd: list[str], log_path: Path) -> None:
         raise RuntimeError(f"command failed (exit {proc.returncode}): {' '.join(cmd)}\n--- log tail ---\n{tail}")
 
 
-def _native_dataset_root(spec: BenchSpec) -> Path:
-    return Path(f"data/datasets/ee-space/libero-task{spec.task_index}-native")
-
-
 # --------------------------------------------------------------------------- #
 # Stage implementations — each returns an info dict on success, raises on fail #
 # --------------------------------------------------------------------------- #
 
 
 def stage_convert(spec: BenchSpec) -> dict:
-    """Ensure the spec's dataset group AND the native group (needed by
-    validate-math and the gt-replay baseline) exist for this task."""
-    missing = [g for g, root in
-               ((spec.dataset_group, spec.dataset_root), ("native", _native_dataset_root(spec)))
-               if not root.exists()]
-    missing = sorted(set(missing))
+    """Ensure the spec's dataset group AND the study's baseline group (needed
+    by validate-math and the gt-replay baseline) exist for this task."""
+    study = spec.study
+    candidates = (
+        (spec.dataset_group, spec.dataset_root),
+        (study.baseline_group, study.dataset_root(study.baseline_group, spec.task_index)),
+    )
+    missing = sorted({g for g, root in candidates if not root.exists()})
     if not missing:
         return {"skipped": "datasets already exist"}
-    cmd = [
-        "uv", "run", "--package", "anvil-sim", "anvil-libero-convert",
-        f"--task-index={spec.task_index}",
-        f"--only={','.join(missing)}",
-    ]
-    _run_logged(cmd, spec.run_dir / "convert.log")
+    _run_logged(study.convert_command(spec.task_index, missing), spec.run_dir / "convert.log")
     return {"created": missing}
 
 
-def _load_local_episode(root: Path, episode: int = 0) -> dict[str, np.ndarray]:
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-    ds = LeRobotDataset(repo_id="local", root=str(root))
-    hf = ds.hf_dataset.select_columns(["episode_index", "action", "observation.state"]).with_format(None)
-    actions, states = [], []
-    for ep, act, sta in zip(hf["episode_index"], hf["action"], hf["observation.state"], strict=True):
-        if int(ep) == episode:
-            actions.append(np.asarray(act, dtype=np.float64))
-            states.append(np.asarray(sta, dtype=np.float64))
-    return {"action": np.stack(actions), "state": np.stack(states)}
-
-
-def _validate_goalabs(spec: BenchSpec) -> dict:
-    """goalabs family identity: recovering a native-delta from the stored
-    formal goal against the SAME state must reproduce the native dataset's
-    own command — pos/rot to float precision, gripper via native_cmd
-    passthrough (the dimension bug #4 hid in; validated explicitly now)."""
-    from anvil_sim.libero_processor import recovered_delta_native_action
-
-    goal = _load_local_episode(spec.dataset_root)
-    native = _load_local_episode(_native_dataset_root(spec))
-    n = min(len(goal["action"]), len(native["action"]))
-    max_err = 0.0
-    for t in range(n):
-        act10, state8 = goal["action"][t], goal["state"][t]
-        recovered = recovered_delta_native_action(
-            reconstructed_pos=act10[:3],
-            reconstructed_rot6d=act10[3:9],
-            reconstructed_gripper=float(act10[9]),
-            current_state=state8.astype(np.float32),
-            current_gripper=float(state8[7]),
-            gripper_mode="native_cmd",
-        )
-        expected = np.clip(native["action"][t], -1.0, 1.0)
-        max_err = max(max_err, float(np.abs(recovered - expected).max()))
-    if max_err > _MATH_TOLERANCE:
-        raise RuntimeError(f"goalabs identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
-    return {"identity": "goalabs->native command", "frames": n, "max_err": max_err}
-
-
-def _validate_goalabs_aa(spec: BenchSpec) -> dict:
-    """goalabs_aa family identity (axis-angle counterpart of _validate_goalabs):
-    decoding the stored 7-dim axis-angle goal back to rot6d and recovering a
-    native-delta against the SAME state must reproduce the native dataset's
-    own command to float precision — the round-trip identity for native_abs /
-    native_n0. If this fails, the axis-angle goal construction / decode is
-    wrong and no training will help."""
-    from anvil_sim.libero_processor import (
-        axis_angle_action_to_rot6d,
-        recovered_delta_native_action,
-    )
-
-    goal = _load_local_episode(spec.dataset_root)
-    native = _load_local_episode(_native_dataset_root(spec))
-    n = min(len(goal["action"]), len(native["action"]))
-    max_err = 0.0
-    for t in range(n):
-        act7, state8 = goal["action"][t], goal["state"][t]
-        rot6d10 = axis_angle_action_to_rot6d(act7)
-        recovered = recovered_delta_native_action(
-            reconstructed_pos=rot6d10[:3],
-            reconstructed_rot6d=rot6d10[3:9],
-            reconstructed_gripper=float(rot6d10[9]),
-            current_state=state8.astype(np.float32),
-            current_gripper=float(state8[7]),
-            gripper_mode="native_cmd",
-        )
-        expected = np.clip(native["action"][t], -1.0, 1.0)
-        max_err = max(max_err, float(np.abs(recovered - expected).max()))
-    if max_err > _MATH_TOLERANCE:
-        raise RuntimeError(f"goalabs_aa identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
-    return {"identity": "axis-angle goalabs->native command", "frames": n, "max_err": max_err}
-
-
-def _validate_native_abs(spec: BenchSpec) -> dict:
-    """native_abs identity (NATIVE-family axis-angle absolute goal): decoding
-    the stored 7-dim axis-angle goal back to rot6d and recovering a native
-    delta against the frame's OWN state (converted native->quat, since the obs
-    column is now native 8-dim axis-angle) must reproduce the native dataset's
-    own command to float precision. Same round-trip guarantee as
-    _validate_goalabs_aa, but for the native-family observation."""
-    from anvil_sim.libero_convert import raw_state_to_anvil
-    from anvil_sim.libero_processor import (
-        axis_angle_action_to_rot6d,
-        recovered_delta_native_action,
-    )
-
-    goal = _load_local_episode(spec.dataset_root)
-    native = _load_local_episode(_native_dataset_root(spec))
-    n = min(len(goal["action"]), len(native["action"]))
-    max_err = 0.0
-    for t in range(n):
-        anvil8 = raw_state_to_anvil(goal["state"][t].astype(np.float32))
-        rot6d10 = axis_angle_action_to_rot6d(goal["action"][t])
-        recovered = recovered_delta_native_action(
-            reconstructed_pos=rot6d10[:3],
-            reconstructed_rot6d=rot6d10[3:9],
-            reconstructed_gripper=float(rot6d10[9]),
-            current_state=anvil8,
-            current_gripper=float(anvil8[7]),
-            gripper_mode="native_cmd",
-        )
-        expected = np.clip(native["action"][t], -1.0, 1.0)
-        max_err = max(max_err, float(np.abs(recovered - expected).max()))
-    if max_err > _MATH_TOLERANCE:
-        raise RuntimeError(f"native_abs identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
-    return {"identity": "native_abs goal -> native command", "frames": n, "max_err": max_err}
-
-
-def _validate_native_n0(spec: BenchSpec) -> dict:
-    """native_n0 identity (NATIVE-family n-0 relativized goal): un-relativizing
-    the stored 7-dim axis-angle action against the frame's OWN (native->quat)
-    state via ee_rel_world_inverse, then recovering a native delta against that
-    same state, must reproduce the native dataset's own command to float
-    precision — the data-level form of the n-0 GT-replay oracle at
-    n_action_steps=1 (anchor == current state)."""
-    from anvil_shared.ee_transform import ee_rel_world_inverse
-
-    from anvil_sim.libero_convert import raw_state_to_anvil
-    from anvil_sim.libero_processor import (
-        axis_angle_action_to_rot6d,
-        recovered_delta_native_action,
-    )
-
-    goal = _load_local_episode(spec.dataset_root)
-    native = _load_local_episode(_native_dataset_root(spec))
-    n = min(len(goal["action"]), len(native["action"]))
-    max_err = 0.0
-    for t in range(n):
-        anvil8 = raw_state_to_anvil(goal["state"][t].astype(np.float32))
-        rel10 = axis_angle_action_to_rot6d(goal["action"][t])
-        abs10 = ee_rel_world_inverse(rel10.reshape(1, 10), anvil8.reshape(1, 8))[0]
-        recovered = recovered_delta_native_action(
-            reconstructed_pos=abs10[:3],
-            reconstructed_rot6d=abs10[3:9],
-            reconstructed_gripper=float(abs10[9]),
-            current_state=anvil8,
-            current_gripper=float(anvil8[7]),
-            gripper_mode="native_cmd",
-        )
-        expected = np.clip(native["action"][t], -1.0, 1.0)
-        max_err = max(max_err, float(np.abs(recovered - expected).max()))
-    if max_err > _MATH_TOLERANCE:
-        raise RuntimeError(f"native_n0 identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
-    return {"identity": "native_n0 relativized goal -> native command", "frames": n, "max_err": max_err}
-
-
-def _validate_seq(spec: BenchSpec) -> dict:
-    """delta/delta_hand family identity: accumulating the stored per-step
-    deltas from the episode's first state must reproduce the achieved state
-    trajectory (the check that exposed Experiment 7's v2 anchor bug)."""
-    from anvil_shared.rotation import matrix_to_quat, quat_to_matrix, rot6d_to_matrix
-
-    data = _load_local_episode(spec.dataset_root)
-    hand_frame = spec.dataset_group == "delta_hand"
-    running = data["state"][0].copy()
-    max_err = 0.0
-    n = len(data["action"]) - 1
-    for t in range(n):
-        act10 = data["action"][t]
-        R_running = quat_to_matrix(running[3:7])
-        R_delta = rot6d_to_matrix(act10[3:9])
-        if hand_frame:
-            new_pos = running[:3] + R_running @ act10[:3]
-            new_r = R_running @ R_delta
-        else:
-            new_pos = running[:3] + act10[:3]
-            new_r = R_delta @ R_running
-        running = np.concatenate([new_pos, matrix_to_quat(new_r), [act10[9]]])
-        max_err = max(max_err, float(np.abs(running[:3] - data["state"][t + 1][:3]).max()))
-    if max_err > _MATH_TOLERANCE:
-        raise RuntimeError(f"seq accumulation failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
-    return {"identity": "seq accumulation -> state trajectory", "frames": n, "max_err": max_err}
-
-
-def _validate_act_from_obs(spec: BenchSpec) -> dict:
-    """abs/rel family definitional check: action[t] encodes state[t+1]
-    (act-from-obs); catches double-relativization-style dataset corruption
-    (real bug #2) at the data level."""
-    from anvil_shared.rotation import matrix_to_rot6d, quat_to_matrix
-
-    data = _load_local_episode(spec.dataset_root)
-    n = len(data["action"]) - 1
-    max_err = 0.0
-    for t in range(n):
-        nxt = data["state"][t + 1]
-        expected = np.concatenate(
-            [nxt[:3], matrix_to_rot6d(quat_to_matrix(nxt[3:7])), [nxt[7]]]
-        )
-        max_err = max(max_err, float(np.abs(data["action"][t] - expected).max()))
-    if max_err > _MATH_TOLERANCE:
-        raise RuntimeError(f"act-from-obs identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
-    return {"identity": "action[t] == encode(state[t+1])", "frames": n, "max_err": max_err}
-
-
-def _validate_native_hand(spec: BenchSpec) -> dict:
-    """native_hand identity (world->hand->world round-trip, at the data
-    level): rotating each stored hand-frame command back to the world frame
-    (via hand_action_to_native, using that frame's OWN EE axis-angle from
-    observation.state[3:6]) must reproduce the native dataset's own command
-    to float precision — because the eval rotate-back is the exact inverse of
-    the convert-time rotation with the same per-step EE orientation. This is
-    the data-level form of the closed-loop GT-replay oracle; if it fails, the
-    frame convention is wrong and no amount of training will help."""
-    from anvil_sim.libero_processor import hand_action_to_native
-
-    hand = _load_local_episode(spec.dataset_root)
-    native = _load_local_episode(_native_dataset_root(spec))
-    n = min(len(hand["action"]), len(native["action"]))
-    max_err = 0.0
-    for t in range(n):
-        recovered = hand_action_to_native(hand["action"][t], hand["state"][t][3:6])
-        max_err = max(max_err, float(np.abs(recovered - native["action"][t]).max()))
-    if max_err > _MATH_TOLERANCE:
-        raise RuntimeError(f"native_hand identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
-    return {"identity": "hand->world command == native", "frames": n, "max_err": max_err}
-
-
-_MATH_VALIDATORS = {
-    "goalabs": _validate_goalabs,
-    "goalabs_aa": _validate_goalabs_aa,
-    "native_abs": _validate_native_abs,
-    "native_n0": _validate_native_n0,
-    "native_hand": _validate_native_hand,
-    "delta": _validate_seq,
-    "delta_hand": _validate_seq,
-    "abs": _validate_act_from_obs,
-    "rel": _validate_act_from_obs,  # rel stores the same absolute column (relativized at load time)
-}
-
-
 def stage_validate_math(spec: BenchSpec) -> dict:
-    validator = _MATH_VALIDATORS.get(spec.dataset_group)
+    validator = spec.study.math_validators.get(spec.dataset_group)
     if validator is None:
         return {"skipped": f"no math validator registered for group {spec.dataset_group!r}"}
     return validator(spec)
 
 
 def stage_dataset_validate(spec: BenchSpec) -> dict:
-    if spec.dataset_group in (
-        "native", "native_hand", "native_rot6d", "native_abs", "native_n0", "goalabs_aa"
-    ):
+    if spec.study.dataset_validate_skip(spec):
         return {"skipped": "dataset-validate targets the Anvil EE writer schema"}
     cmd = [
         "uv", "run", "--package", "mcap_converter", "dataset-validate",
@@ -376,22 +131,25 @@ def stage_dataset_validate(spec: BenchSpec) -> dict:
 
 
 def _replay_baseline(spec: BenchSpec) -> dict:
-    """Native GT-replay baseline for this task — computed once, cached."""
+    """Study baseline GT-replay for this task — computed once, cached."""
     baseline_dir = BENCH_ROOT / "replay" / f"baseline-task{spec.task_index}"
     info_path = baseline_dir / "replay_info.json"
     if info_path.exists():
         return json.loads(info_path.read_text())
     from anvil_sim.eval_replay import replay
 
+    study = spec.study
+    gr = study.gt_replay
     return replay(
-        action_type="native",
-        dataset_root=_native_dataset_root(spec),
-        control_mode="relative",
+        action_type=gr.baseline_action_type,
+        dataset_root=study.dataset_root(study.baseline_group, spec.task_index),
+        control_mode=gr.baseline_control_mode,
         task=spec.env_suite,
         task_id=spec.env_task_id,
         n_episodes=spec.eval.n_episodes,
-        n_action_steps=1,
+        n_action_steps=gr.n_action_steps,
         output_dir=baseline_dir,
+        adapter=study.replay_adapter,
     )
 
 
@@ -399,7 +157,7 @@ def stage_gt_replay(spec: BenchSpec) -> dict:
     from anvil_sim.eval_replay import replay
 
     baseline = _replay_baseline(spec)
-    if spec.eval.action_type in ("native", "native_rot6d") and spec.dataset_group == "native":
+    if spec.study.gt_replay.is_baseline(spec):
         return {"skipped": "treatment IS the native baseline", "baseline": baseline["pc_success"]}
 
     result = replay(
@@ -411,6 +169,7 @@ def stage_gt_replay(spec: BenchSpec) -> dict:
         n_episodes=spec.eval.n_episodes,
         n_action_steps=1,
         output_dir=spec.run_dir / "gt-replay",
+        adapter=spec.study.replay_adapter,
     )
     floor = baseline["pc_success"] - spec.gates.gt_replay_margin
     if result["pc_success"] < floor:
@@ -427,59 +186,6 @@ def stage_gt_replay(spec: BenchSpec) -> dict:
     }
 
 
-def _train_cmd(spec: BenchSpec, *, steps: int, batch_size: int, output_dir: Path) -> list[str]:
-    if spec.train.trainer == "anvil-trainer":
-        return [
-            "uv", "run", "--package", "anvil-trainer", "anvil-trainer",
-            f"--dataset.root={spec.dataset_root}",
-            f"--policy.type={spec.train.policy_type}",
-            f"--action-type={spec.train.action_type}",
-            f"--output_dir={output_dir}",
-            f"--job_name={spec.name}",
-            f"--batch_size={batch_size}",
-            f"--steps={steps}",
-            "--policy.device=cuda",
-            "--wandb.enable=false",
-        ]
-    return [  # lerobot-train (native family)
-        "uv", "run", "--package", "anvil-sim", "lerobot-train",
-        "--dataset.repo_id=local",
-        f"--dataset.root={spec.dataset_root}",
-        f"--policy.type={spec.train.policy_type}",
-        "--policy.push_to_hub=false",
-        f"--output_dir={output_dir}",
-        f"--job_name={spec.name}",
-        f"--batch_size={batch_size}",
-        f"--steps={steps}",
-        "--policy.device=cuda",
-        "--wandb.enable=false",
-    ]
-
-
-def _eval_cmd(spec: BenchSpec, checkpoint: Path, output_dir: Path, n_episodes: int) -> list[str]:
-    if spec.eval.action_type == "native":
-        entry = ["uv", "run", "--package", "anvil-sim", "lerobot-eval"]
-        extra: list[str] = []
-    elif spec.eval.action_type == "native_rot6d":
-        entry = ["uv", "run", "--package", "anvil-sim", "anvil-eval-native-rot6d"]
-        extra = []
-    else:
-        entry = ["uv", "run", "--package", "anvil-sim", "anvil-eval-libero"]
-        extra = [f"--action-type={spec.eval.action_type}"]
-    return [
-        *entry, *extra,
-        f"--policy.path={checkpoint}",
-        "--env.type=libero",
-        f"--env.task={spec.env_suite}",
-        f"--env.task_ids=[{spec.env_task_id}]",
-        f"--env.control_mode={spec.eval.control_mode}",
-        f"--eval.n_episodes={n_episodes}",
-        "--eval.batch_size=1",
-        f"--output_dir={output_dir}",
-        "--policy.device=cuda",
-    ]
-
-
 def stage_smoke(spec: BenchSpec) -> dict:
     if spec.train.reuse_checkpoint:
         return {"skipped": "reusing an existing checkpoint; nothing to smoke-train"}
@@ -489,12 +195,12 @@ def stage_smoke(spec: BenchSpec) -> dict:
     if smoke_dir.exists():
         shutil.rmtree(smoke_dir)
     _run_logged(
-        _train_cmd(spec, steps=20, batch_size=8, output_dir=smoke_dir),
+        spec.study.train_command(spec, steps=20, batch_size=8, output_dir=smoke_dir),
         spec.run_dir / "smoke-train.log",
     )
     smoke_ckpt = smoke_dir / "checkpoints" / "last" / "pretrained_model"
     _run_logged(
-        _eval_cmd(spec, smoke_ckpt, spec.run_dir / "smoke_eval", n_episodes=1),
+        spec.study.eval_command(spec, smoke_ckpt, spec.run_dir / "smoke_eval", n_episodes=1),
         spec.run_dir / "smoke-eval.log",
     )
     shutil.rmtree(smoke_dir)  # ~hundreds of MB; the signal was "no crash"
@@ -510,8 +216,8 @@ def stage_train(spec: BenchSpec) -> dict:
     if spec.checkpoint.exists():
         return {"skipped": f"checkpoint already exists: {spec.checkpoint}"}
     _run_logged(
-        _train_cmd(spec, steps=spec.train.steps, batch_size=spec.train.batch_size,
-                   output_dir=spec.output_dir),
+        spec.study.train_command(spec, steps=spec.train.steps,
+                                 batch_size=spec.train.batch_size, output_dir=spec.output_dir),
         spec.run_dir / "train.log",
     )
     if not spec.checkpoint.exists():
@@ -523,7 +229,8 @@ def stage_eval(spec: BenchSpec) -> dict:
     info_path = spec.eval_output_dir / "eval_info.json"
     if not info_path.exists():
         _run_logged(
-            _eval_cmd(spec, spec.checkpoint, spec.eval_output_dir, spec.eval.n_episodes),
+            spec.study.eval_command(spec, spec.checkpoint, spec.eval_output_dir,
+                                    spec.eval.n_episodes),
             spec.run_dir / "eval.log",
         )
     info = json.loads(info_path.read_text())

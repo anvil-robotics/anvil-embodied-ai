@@ -20,12 +20,12 @@ from anvil_shared.rotation import (
     quat_to_matrix,
 )
 
-from anvil_sim.libero_convert import (
+from anvil_sim.studies.libero_ee.libero_convert import (
     native_action_to_hand,
     native_action_to_rot6d,
     native_delta_to_goal,
 )
-from anvil_sim.libero_processor import (
+from anvil_sim.studies.libero_ee.libero_processor import (
     GRIPPER_CLOSE_CMD,
     GRIPPER_OPEN_CMD,
     NATIVE_POS_SCALE,

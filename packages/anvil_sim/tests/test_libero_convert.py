@@ -17,7 +17,7 @@ from anvil_shared.rotation import (
     rot6d_to_matrix,
 )
 
-from anvil_sim.libero_convert import (
+from anvil_sim.studies.libero_ee.libero_convert import (
     anvil_state_to_abs_action,
     convert_episode_actions,
     convert_episode_delta_actions,
@@ -32,7 +32,7 @@ from anvil_sim.libero_convert import (
     native_action_to_rot6d,
     native_delta_to_goal,
 )
-from anvil_sim.libero_processor import (
+from anvil_sim.studies.libero_ee.libero_processor import (
     axis_angle_action_to_rot6d,
     hand_action_to_native,
     recovered_delta_native_action,

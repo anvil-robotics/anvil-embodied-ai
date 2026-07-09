@@ -42,9 +42,9 @@ dev = [
 ]
 
 [project.scripts]
-anvil-libero-convert = "anvil_sim.libero_convert:main"
-anvil-eval-libero = "anvil_sim.eval_libero_ee:main"
-anvil-eval-native-rot6d = "anvil_sim.eval_native_rot6d:main"
+anvil-libero-convert = "anvil_sim.studies.libero_ee.libero_convert:main"
+anvil-eval-libero = "anvil_sim.studies.libero_ee.eval_libero_ee:main"
+anvil-eval-native-rot6d = "anvil_sim.studies.libero_ee.eval_native_rot6d:main"
 anvil-libero-replay = "anvil_sim.eval_replay:main"
 anvil-sim-bench = "anvil_sim.bench_runner:main"
 

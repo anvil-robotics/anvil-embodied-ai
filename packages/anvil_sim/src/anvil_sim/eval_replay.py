@@ -52,8 +52,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -62,70 +64,12 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.envs.configs import LiberoEnv as LiberoEnvConfig
 from lerobot.envs.factory import make_env
 from lerobot.envs.utils import add_envs_task, close_envs, preprocess_observation
-from lerobot.processor import PolicyProcessorPipeline
 from lerobot.utils.constants import ACTION
 
-from anvil_sim.eval_libero_ee import (
-    _AXIS_ANGLE_ACTION_TYPES,
-    _LEGACY_ACTION_TYPES,
-    _NATIVE_FRAME_ACTION_TYPES,
-    _ZERO_CAL_ACTION_TYPES,
-    _make_anvil_env_pre_post_processors,
-)
-from anvil_sim.libero_processor import (
-    AnvilEEObsProcessorStep,
-    NativeRot6dActionProcessorStep,
-    axis_angle_action_to_rot6d,
-    rot6d_action_to_native,
-)
+if TYPE_CHECKING:
+    from anvil_sim.study import ReplayAdapter
 
 log = logging.getLogger(__name__)
-
-# Action types replayable by this driver, beyond eval_libero_ee's own:
-# "native" (raw 7-dim passthrough, identity processors — the baseline) and
-# "native_rot6d" (10-dim re-encoded column via NativeRot6dActionProcessorStep).
-_EXTRA_ACTION_TYPES = ("native", "native_rot6d")
-
-
-def _provider_mode(action_type: str) -> str:
-    """Map an eval action-type to how the dataset's stored action column
-    relates to what a perfect policy would output at each step.
-
-    - "direct": stored value IS the per-step policy output (absolute
-      targets, per-step deltas, native commands) — feed as-is.
-    - "rel_hand"/"rel_world": stored value is the ABSOLUTE target (the n-0
-      relativization happens at train load time, not in the stored data);
-      a perfect policy outputs it relativized against the CHUNK ANCHOR, so
-      the provider forward-transforms with the same anchor tracking the
-      action processor uses.
-    """
-    if action_type in _EXTRA_ACTION_TYPES:
-        return "direct"
-    if action_type in _NATIVE_FRAME_ACTION_TYPES:
-        # native_hand stores the per-step native command (rotated into the
-        # hand frame) — a perfect policy outputs it as-is; the eval action
-        # step rotates it back to world against the live obs EE orientation.
-        return "direct"
-    if action_type in _AXIS_ANGLE_ACTION_TYPES:
-        # native_abs / native_n0 are NATIVE-family (lerobot-train raw): the
-        # per-frame policy-output form is BAKED into the stored column at
-        # convert time (native_abs = absolute goal; native_n0 = the goal
-        # ALREADY relativized per-frame against its own obs pose). So a perfect
-        # policy outputs the stored value as-is — "direct", NOT a live
-        # re-relativization. (The rot6d goalabs world-n0 family, by contrast,
-        # stores the ABSOLUTE goal and relativizes at load time, hence its
-        # "rel_world" provider below.)
-        return "direct"
-    if action_type in _ZERO_CAL_ACTION_TYPES:
-        mode = _ZERO_CAL_ACTION_TYPES[action_type][1]
-        if mode in ("rel_hand", "rel_world"):
-            return mode
-        return "direct"  # "abs", "rel_world_seq", "rel_hand_seq" — stored form is the output form
-    if action_type in _LEGACY_ACTION_TYPES:
-        # ee_abs: absolute stored+output. ee_delta: per-step delta stored+output.
-        # ee_rel: absolute stored, hand-relativized output (same as rel_hand).
-        return "rel_hand" if action_type == "ee_rel" else "direct"
-    raise ValueError(f"Unsupported --action-type for replay: {action_type!r}")
 
 
 @dataclass
@@ -141,14 +85,20 @@ class GtActionProvider:
     """
 
     mode: str  # "direct" | "rel_hand" | "rel_world"
-    obs_step: AnvilEEObsProcessorStep | None = None  # None for "direct" without anchor needs
+    obs_step: Any | None = None  # study obs step (None for "direct" without anchor needs)
     n_action_steps: int = 1
     # "rot6d" (default) or "axis_angle": for the goalabs_aa family
     # (native_abs / native_n0) the stored action is 7-dim [pos, aa, gripper];
     # the n-0 forward relativization runs on the shared rot6d machinery, so
     # decode -> forward -> re-encode keeps the provided "policy output" in the
-    # same axis-angle layout the action step then decodes.
+    # same axis-angle layout the action step then decodes. The codec itself
+    # (``encode``/``decode``) is study-provided so the harness stays agnostic:
+    # ``encode`` maps the stored action -> 10-dim rot6d, ``decode`` maps the
+    # relativized rot6d back to the stored layout. Both ``None`` == rot6d
+    # identity (the default).
     action_encoding: str = "rot6d"
+    encode: Callable[[np.ndarray], np.ndarray] | None = None
+    decode: Callable[[np.ndarray], np.ndarray] | None = None
     _call_count: int = field(default=0, init=False, repr=False)
     _chunk_anchor: np.ndarray | None = field(default=None, init=False, repr=False)
 
@@ -163,34 +113,13 @@ class GtActionProvider:
             self._chunk_anchor = self.obs_step.last_anvil_state.copy()
         self._call_count += 1
 
-        act10 = (
-            axis_angle_action_to_rot6d(stored_action)
-            if self.action_encoding == "axis_angle"
-            else stored_action
-        )
+        act10 = self.encode(stored_action) if self.encode is not None else stored_action
         forward = ee_rel_forward if self.mode == "rel_hand" else ee_rel_world_forward
         rel = forward(act10.reshape(1, 10), self._chunk_anchor.reshape(1, 8))[0]
-        if self.action_encoding == "axis_angle":
-            # Re-encode to the 7-dim axis-angle layout the action step expects.
-            return rot6d_action_to_native(rel).astype(np.float32)
+        if self.decode is not None:
+            # Re-encode to the layout the study's action step expects.
+            return self.decode(rel).astype(np.float32)
         return rel.astype(np.float32)
-
-
-def _identity_pipelines() -> tuple[PolicyProcessorPipeline, PolicyProcessorPipeline]:
-    return PolicyProcessorPipeline(steps=[]), PolicyProcessorPipeline(steps=[])
-
-
-def _make_replay_processors(action_type: str, n_action_steps: int):
-    """(env_preprocessor, env_postprocessor, obs_step_for_anchor_or_None)."""
-    if action_type == "native":
-        pre, post = _identity_pipelines()
-        return pre, post, None
-    if action_type == "native_rot6d":
-        pre, _ = _identity_pipelines()
-        return pre, PolicyProcessorPipeline(steps=[NativeRot6dActionProcessorStep()]), None
-    pre, post = _make_anvil_env_pre_post_processors(action_type, n_action_steps=n_action_steps)
-    obs_step = pre.steps[0]
-    return pre, post, obs_step
 
 
 def load_episode_actions(dataset_root: Path) -> tuple[list[np.ndarray], list[np.ndarray]]:
@@ -225,6 +154,7 @@ def replay(
     n_episodes: int,
     n_action_steps: int,
     output_dir: Path,
+    adapter: ReplayAdapter,
     max_steps: int | None = None,
 ) -> dict:
     """Run the open-loop GT replay and return the summary dict (also
@@ -237,9 +167,11 @@ def replay(
     # make_env returns {suite_name: {task_id: vec_env}} for libero.
     env = next(iter(next(iter(envs.values())).values()))
 
-    env_pre, env_post, obs_step = _make_replay_processors(action_type, n_action_steps)
+    env_pre, env_post, obs_step = adapter.make_processors(action_type, n_action_steps)
     # Diagnostics-only state extractor, independent of the treatment pipeline.
-    state_probe = AnvilEEObsProcessorStep(action_type="ee_abs")
+    state_probe = adapter.make_state_probe()
+    encoding = adapter.action_encoding(action_type)
+    provider_mode = adapter.provider_mode(action_type)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     trace_path = output_dir / "trace.jsonl"
@@ -248,14 +180,16 @@ def replay(
     with open(trace_path, "w") as trace_f:
         for ep in range(n_episodes):
             provider = GtActionProvider(
-                mode=_provider_mode(action_type),
+                mode=provider_mode,
                 obs_step=obs_step,
                 n_action_steps=n_action_steps,
-                action_encoding="axis_angle" if action_type in _AXIS_ANGLE_ACTION_TYPES else "rot6d",
+                action_encoding=encoding,
+                encode=adapter.encode_to_rot6d if encoding == "axis_angle" else None,
+                decode=adapter.decode_from_rot6d if encoding == "axis_angle" else None,
             )
             # Real bug #5 regression guard: the action step's chunk counter
             # must re-align at every episode start, exactly like the policy
-            # eval's rollout wrapper does (see eval_libero_ee).
+            # eval's rollout wrapper does (via the study's action processors).
             for step in env_post.steps:
                 if hasattr(step, "reset_episode_state"):
                     step.reset_episode_state()
@@ -344,14 +278,10 @@ def replay(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    from anvil_sim.study import get_study
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    all_types = (
-        _EXTRA_ACTION_TYPES
-        + _LEGACY_ACTION_TYPES
-        + _NATIVE_FRAME_ACTION_TYPES
-        + tuple(_ZERO_CAL_ACTION_TYPES)
-    )
-    parser.add_argument("--action-type", required=True, choices=sorted(all_types))
+    parser.add_argument("--study", default="libero_ee")
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--control-mode", required=True, choices=["relative", "absolute"])
     parser.add_argument("--task", default="libero_goal")
@@ -360,6 +290,10 @@ def main() -> None:
     parser.add_argument("--n-action-steps", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--max-steps", type=int, default=None)
+    # Resolve the study first so --action-type's choices come from its registry.
+    known_study = parser.parse_known_args()[0].study
+    study = get_study(known_study)
+    parser.add_argument("--action-type", required=True, choices=sorted(study.eval_action_types))
     args = parser.parse_args()
     replay(
         action_type=args.action_type,
@@ -370,6 +304,7 @@ def main() -> None:
         n_episodes=args.n_episodes,
         n_action_steps=args.n_action_steps,
         output_dir=args.output_dir,
+        adapter=study.replay_adapter,
         max_steps=args.max_steps,
     )
 

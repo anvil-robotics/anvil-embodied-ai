@@ -11,8 +11,9 @@ import pytest
 from anvil_shared.ee_transform import ee_rel_forward, ee_rel_world_forward
 from anvil_shared.rotation import axis_angle_to_matrix, matrix_to_quat, matrix_to_rot6d
 
-from anvil_sim.eval_replay import GtActionProvider, _provider_mode
-from anvil_sim.libero_processor import AnvilEEObsProcessorStep
+from anvil_sim.eval_replay import GtActionProvider
+from anvil_sim.studies.libero_ee.libero_processor import AnvilEEObsProcessorStep
+from anvil_sim.studies.libero_ee.replay_adapter import _provider_mode
 
 
 @pytest.mark.parametrize(

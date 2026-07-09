@@ -49,7 +49,7 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.utils import init_logging
 
-from anvil_sim.libero_processor import NativeRot6dActionProcessorStep
+from anvil_sim.studies.libero_ee.libero_processor import NativeRot6dActionProcessorStep
 
 
 def _load_policy_from_checkpoint(cfg: PreTrainedConfig):

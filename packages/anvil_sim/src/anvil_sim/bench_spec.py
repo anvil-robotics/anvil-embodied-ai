@@ -38,26 +38,20 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
-from anvil_sim.eval_libero_ee import _ALL_ACTION_TYPES, _ZERO_CAL_ACTION_TYPES
-from anvil_sim.libero_convert import ALL_DATASET_GROUPS
+if TYPE_CHECKING:
+    from anvil_sim.study import Study
 
 log = logging.getLogger(__name__)
 
 _VALID_TRAINERS = ("anvil-trainer", "lerobot-train")
 _VALID_POLICY_TYPES = ("act", "diffusion")
 _VALID_CONTROL_MODES = ("relative", "absolute")
-# Eval action types replayable/evaluable, incl. the native family handled by
-# lerobot's stock eval path rather than anvil-eval-libero.
-_NATIVE_EVAL_TYPES = ("native", "native_rot6d")
-
-# deliver -> the env.control_mode it REQUIRES. Feeding a treatment through
-# the wrong mode is exactly the class of mistake that produced Experiment
-# 7's first 0% sweep; specs violating this fail at load time.
-_REQUIRED_CONTROL_MODE = {"relative": "relative", "absolute": "absolute"}
 
 
 @dataclass
@@ -102,16 +96,24 @@ class BenchSpec:
     eval: EvalSpec
     gates: GateSpec = field(default_factory=GateSpec)
     source_path: str | None = None  # where the YAML was loaded from
+    # Which registered study this spec belongs to (YAML key ``study``). Selects
+    # the plugin that owns dataset groups, action types, commands, math
+    # identities, and the GT-replay wiring — see :mod:`anvil_sim.study`.
+    study_name: str = "libero_ee"
 
     # ------------------------------------------------------------------ #
     # Derived paths (single source of truth for the runner)               #
     # ------------------------------------------------------------------ #
+    @cached_property
+    def study(self) -> Study:
+        """The resolved study plugin (cached per spec)."""
+        from anvil_sim.study import get_study
+
+        return get_study(self.study_name)
+
     @property
     def dataset_root(self) -> Path:
-        # Directory suffixes are hyphenated (libero_convert.py convention:
-        # delta_hand -> libero-taskN-delta-hand, native_rot6d -> ...-native-rot6d).
-        suffix = self.dataset_group.replace("_", "-")
-        return Path(f"data/datasets/ee-space/libero-task{self.task_index}-{suffix}")
+        return self.study.dataset_root(self.dataset_group, self.task_index)
 
     @property
     def output_dir(self) -> Path:
@@ -138,10 +140,6 @@ class BenchSpec:
 
         if not self.name or "/" in self.name:
             errors.append(f"name must be a non-empty path-safe string, got {self.name!r}")
-        if self.dataset_group not in ALL_DATASET_GROUPS:
-            errors.append(
-                f"dataset_group {self.dataset_group!r} not in {sorted(ALL_DATASET_GROUPS)}"
-            )
         if self.train.trainer not in _VALID_TRAINERS:
             errors.append(f"train.trainer must be one of {_VALID_TRAINERS}")
         if self.train.policy_type not in _VALID_POLICY_TYPES:
@@ -154,23 +152,9 @@ class BenchSpec:
         if self.train.trainer == "lerobot-train" and self.train.action_type:
             errors.append("train.action_type must be omitted for lerobot-train")
 
-        valid_eval = tuple(_ALL_ACTION_TYPES) + _NATIVE_EVAL_TYPES
-        if self.eval.action_type not in valid_eval:
-            errors.append(f"eval.action_type {self.eval.action_type!r} not in {sorted(valid_eval)}")
-
-        # deliver <-> control_mode pairing (the Experiment 7 lesson).
-        if self.eval.action_type in _ZERO_CAL_ACTION_TYPES:
-            deliver = _ZERO_CAL_ACTION_TYPES[self.eval.action_type][2]
-            required = _REQUIRED_CONTROL_MODE[deliver]
-            if self.eval.control_mode != required:
-                errors.append(
-                    f"eval.action_type {self.eval.action_type!r} delivers via "
-                    f"{deliver!r} and REQUIRES env.control_mode={required!r} "
-                    f"(got {self.eval.control_mode!r}) — see Experiment 7's "
-                    "post-mortem for what happens otherwise"
-                )
-        elif self.eval.action_type in _NATIVE_EVAL_TYPES and self.eval.control_mode != "relative":
-            errors.append("native/native_rot6d eval requires env.control_mode=relative")
+        # Study-specific legality: dataset groups, eval action-type registry,
+        # and the deliver<->control_mode pairing (the Experiment 7 lesson).
+        errors.extend(self.study.legality(self))
 
         if errors:
             raise ValueError(
@@ -196,7 +180,7 @@ def load_spec(path: Path | str) -> BenchSpec:
         return cls(**d)
 
     top_allowed = {"name", "task_index", "env_suite", "env_task_id", "dataset_group",
-                   "train", "eval", "gates"}
+                   "train", "eval", "gates", "study"}
     unknown = set(raw) - top_allowed
     if unknown:
         raise ValueError(f"{path}: unknown top-level key(s) {sorted(unknown)}")
@@ -211,6 +195,7 @@ def load_spec(path: Path | str) -> BenchSpec:
         eval=_take(raw.get("eval", {}), EvalSpec, "eval"),
         gates=_take(raw.get("gates", {}), GateSpec, "gates"),
         source_path=str(path),
+        study_name=raw.get("study", "libero_ee"),
     )
     spec.validate()
     return spec
