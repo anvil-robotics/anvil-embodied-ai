@@ -21,7 +21,6 @@ train:
   policy_type: act
   steps: 50000
   batch_size: 16
-  output_dir: model_zoo/native/libero-task11-native-n0/act
 eval:
   action_type: native_n0
   control_mode: relative

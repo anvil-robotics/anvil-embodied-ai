@@ -53,6 +53,17 @@ _VALID_TRAINERS = ("anvil-trainer", "lerobot-train")
 _VALID_POLICY_TYPES = ("act", "diffusion")
 _VALID_CONTROL_MODES = ("relative", "absolute")
 
+# Every artifact for one research topic lives under ``research/<study>/`` (raw
+# per-experiment results + the write-ups), keyed by the study/topic name so the
+# layout generalizes to any study. Model checkpoints (large binaries) mirror the
+# scheme under ``model_zoo/research/<study>/``.
+RESEARCH_ROOT = Path("research")
+
+
+def topic_root(study_name: str) -> Path:
+    """Root dir for one research topic's results: ``research/<study_name>/``."""
+    return RESEARCH_ROOT / study_name
+
 
 @dataclass
 class TrainSpec:
@@ -117,7 +128,7 @@ class BenchSpec:
 
     @property
     def output_dir(self) -> Path:
-        return Path(self.train.output_dir or f"model_zoo/bench/{self.name}")
+        return Path(self.train.output_dir or f"model_zoo/research/{self.study_name}/{self.name}")
 
     @property
     def checkpoint(self) -> Path:
@@ -127,11 +138,11 @@ class BenchSpec:
 
     @property
     def run_dir(self) -> Path:
-        return Path(f"outputs/bench/runs/{self.name}")
+        return topic_root(self.study_name) / "experiments" / self.name
 
     @property
     def eval_output_dir(self) -> Path:
-        return Path(f"outputs/eval/bench-{self.name}")
+        return self.run_dir / "eval"
 
     def validate(self) -> None:
         """Raise ValueError on any illegal combination. Encodes the

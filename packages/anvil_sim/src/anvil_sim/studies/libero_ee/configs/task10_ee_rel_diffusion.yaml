@@ -16,7 +16,6 @@ train:
   policy_type: diffusion
   steps: 30000
   batch_size: 16
-  output_dir: model_zoo/ee-space/libero-task10-rel/diffusion
 eval:
   action_type: ee_rel
   control_mode: relative

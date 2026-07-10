@@ -17,7 +17,6 @@ train:
   policy_type: diffusion
   steps: 30000
   batch_size: 16
-  output_dir: model_zoo/ee-space/libero-task10-goalabs/goal2worldn0-diffusion
 eval:
   action_type: zerocal_goal_world_n0
   control_mode: relative

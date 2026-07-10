@@ -44,7 +44,7 @@ Usage::
         --control-mode relative \\
         --task libero_goal --task-id 8 \\
         --n-episodes 10 \\
-        --output-dir outputs/bench/replay/goalabs-relative
+        --output-dir research/libero_ee/replay/goalabs-relative
 """
 
 from __future__ import annotations

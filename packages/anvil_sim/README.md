@@ -6,7 +6,7 @@ Every cheap check (including a GT-replay gate that catches eval-path bugs) runs 
 
 - **Usage guide:** [`docs/simulation.md`](../../docs/simulation.md)
 - **Worked example / results** (the EE action-representation study this was built for):
-  [`src/anvil_sim/studies/libero_ee/report.md`](src/anvil_sim/studies/libero_ee/report.md)
+  [`research/libero_ee/report.md`](../../research/libero_ee/report.md) (+ `diary.md`)
 
 The package is a study-agnostic harness (`bench_runner`, `bench_spec`, `eval_replay`, `study`) plus
 the LIBERO EE study registered as a plugin under `src/anvil_sim/studies/libero_ee/`.

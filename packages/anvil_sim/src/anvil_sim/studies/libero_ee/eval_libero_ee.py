@@ -17,20 +17,20 @@ Usage (mirrors `lerobot-eval`, plus one extra flag)::
     # Legacy (scaled-delta reconstruction, env.control_mode=relative):
     anvil-eval-libero \\
         --action-type=ee_abs \\
-        --policy.path=outputs/train/.../checkpoints/last/pretrained_model \\
+        --policy.path=model_zoo/research/libero_ee/<name>/checkpoints/last/pretrained_model \\
         --env.type=libero --env.task=libero_goal --env.task_ids='[8]' \\
         --env.control_mode=relative \\
         --eval.n_episodes=10 --eval.batch_size=1 \\
-        --output_dir=outputs/eval/libero_ee_abs
+        --output_dir=research/libero_ee/scratch/libero_ee_abs
 
     # Zero-calibration re-run (see _ZERO_CAL_ACTION_TYPES), env.control_mode=absolute:
     anvil-eval-libero \\
         --action-type=zerocal_abs \\
-        --policy.path=outputs/train/.../checkpoints/last/pretrained_model \\
+        --policy.path=model_zoo/research/libero_ee/<name>/checkpoints/last/pretrained_model \\
         --env.type=libero --env.task=libero_goal --env.task_ids='[8]' \\
         --env.control_mode=absolute \\
         --eval.n_episodes=10 --eval.batch_size=1 \\
-        --output_dir=outputs/eval/libero_zerocal_abs
+        --output_dir=research/libero_ee/scratch/libero_zerocal_abs
 
     # 7th-round "goal" family (see _ZERO_CAL_GOAL_ACTION_TYPES) -- NOTE the
     # required --env.control_mode differs PER ACTION TYPE within this
@@ -38,11 +38,11 @@ Usage (mirrors `lerobot-eval`, plus one extra flag)::
     # world-seq/hand-seq need "absolute" (deliver="absolute"):
     anvil-eval-libero \\
         --action-type=zerocal_goal_abs \\
-        --policy.path=outputs/train/.../checkpoints/last/pretrained_model \\
+        --policy.path=model_zoo/research/libero_ee/<name>/checkpoints/last/pretrained_model \\
         --env.type=libero --env.task=libero_goal --env.task_ids='[8]' \\
         --env.control_mode=relative \\
         --eval.n_episodes=10 --eval.batch_size=1 \\
-        --output_dir=outputs/eval/libero_zerocal_goal_abs
+        --output_dir=research/libero_ee/scratch/libero_zerocal_goal_abs
 """
 
 import json

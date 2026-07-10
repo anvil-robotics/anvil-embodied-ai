@@ -79,6 +79,14 @@ logs/
 wandb/
 runs/
 
+# Per-topic research results (regenerable): keep only the tracked write-ups
+# (report.md / diary.md / README.md at each research/<topic>/ root).
+research/**/experiments/
+research/**/analysis/
+research/**/ledger/
+research/**/replay/
+research/**/logs/
+
 # Videos and media
 videos/
 *.mp4

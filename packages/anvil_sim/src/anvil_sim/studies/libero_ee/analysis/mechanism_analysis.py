@@ -39,7 +39,7 @@ Run:
     uv run --package anvil-sim python -m \
         anvil_sim.studies.libero_ee.analysis.mechanism_analysis \
         --dataset data/datasets/ee-space/libero-task10-goalabs \
-        --out outputs/bench/analysis
+        --out research/libero_ee/analysis
 """
 
 from __future__ import annotations
@@ -282,13 +282,13 @@ def main() -> None:
     ap.add_argument("--dataset", type=Path,
                     default=Path("data/datasets/ee-space/libero-task10-goalabs"))
     ap.add_argument("--horizon", type=int, default=DEFAULT_HORIZON)
-    ap.add_argument("--out", type=Path, default=Path("outputs/bench/analysis"))
+    ap.add_argument("--out", type=Path, default=Path("research/libero_ee/analysis"))
     ap.add_argument("--collapse-trace", type=Path,
-                    default=Path("outputs/bench/analysis/traces/collapse_worldn0_diffusion/trace.jsonl"))
+                    default=Path("research/libero_ee/analysis/traces/collapse_worldn0_diffusion/trace.jsonl"))
     ap.add_argument("--robust-trace", type=Path,
-                    default=Path("outputs/bench/analysis/traces/robust_native_n0_diffusion/trace.jsonl"))
+                    default=Path("research/libero_ee/analysis/traces/robust_native_n0_diffusion/trace.jsonl"))
     ap.add_argument("--gt-trace", type=Path,
-                    default=Path("outputs/bench/replay/native-baseline/trace.jsonl"))
+                    default=Path("research/libero_ee/replay/native-baseline/trace.jsonl"))
     args = ap.parse_args()
 
     episodes = load_abs_goal_and_state(args.dataset)

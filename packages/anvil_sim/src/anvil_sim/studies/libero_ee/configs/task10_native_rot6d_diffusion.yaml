@@ -15,7 +15,6 @@ train:
   policy_type: diffusion
   steps: 30000
   batch_size: 16
-  output_dir: model_zoo/native/libero-task10-native-rot6d/diffusion
 eval:
   action_type: native_rot6d
   control_mode: relative

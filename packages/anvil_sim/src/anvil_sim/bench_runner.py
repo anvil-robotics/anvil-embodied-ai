@@ -14,13 +14,16 @@ every cheap check runs BEFORE any expensive training:
 5.  ``smoke``             20-step train + 1-episode eval, no crash
 6.  ``train``             full training (skipped when reusing a checkpoint)
 7.  ``eval``              closed-loop eval, standard ``eval_info.json``
-8.  ``record``            upsert ``outputs/bench/results.json`` and
-                          regenerate ``outputs/bench/RESULTS.md``
+8.  ``record``            upsert ``research/<study>/ledger/results.json`` and
+                          regenerate ``research/<study>/ledger/RESULTS.md``
 
+All results for one study/topic live under ``research/<study>/`` (see
+``bench_spec.topic_root``): per-experiment raw output in
+``research/<study>/experiments/<name>/`` and the write-ups alongside.
 Stages are idempotent: each writes its status to
-``outputs/bench/runs/<name>/stage_status.json`` and re-running a spec skips
-already-passed stages (``--force-stage`` / ``--from-stage`` override).
-Subprocess stages log to ``outputs/bench/runs/<name>/<stage>.log``.
+``research/<study>/experiments/<name>/stage_status.json`` and re-running a spec
+skips already-passed stages (``--force-stage`` / ``--from-stage`` override).
+Subprocess stages log to ``research/<study>/experiments/<name>/<stage>.log``.
 
 Usage::
 
@@ -40,7 +43,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from anvil_sim.bench_spec import BenchSpec, load_spec
+from anvil_sim.bench_spec import RESEARCH_ROOT, BenchSpec, load_spec, topic_root
 
 log = logging.getLogger(__name__)
 
@@ -55,9 +58,9 @@ STAGES = (
     "record",
 )
 
-BENCH_ROOT = Path("outputs/bench")
-RESULTS_JSON = BENCH_ROOT / "results.json"
-RESULTS_MD = BENCH_ROOT / "RESULTS.md"
+def _ledger_dir(study_name: str) -> Path:
+    """Per-topic ledger dir: ``research/<study>/ledger/`` (RESULTS.md + results.json)."""
+    return topic_root(study_name) / "ledger"
 
 
 # --------------------------------------------------------------------------- #
@@ -132,7 +135,7 @@ def stage_dataset_validate(spec: BenchSpec) -> dict:
 
 def _replay_baseline(spec: BenchSpec) -> dict:
     """Study baseline GT-replay for this task — computed once, cached."""
-    baseline_dir = BENCH_ROOT / "replay" / f"baseline-task{spec.task_index}"
+    baseline_dir = topic_root(spec.study_name) / "replay" / f"baseline-task{spec.task_index}"
     info_path = baseline_dir / "replay_info.json"
     if info_path.exists():
         return json.loads(info_path.read_text())
@@ -255,16 +258,18 @@ def stage_record(spec: BenchSpec) -> dict:
         "checkpoint": str(spec.checkpoint),
         "recorded_at": _now(),
     }
-    BENCH_ROOT.mkdir(parents=True, exist_ok=True)
-    results = json.loads(RESULTS_JSON.read_text()) if RESULTS_JSON.exists() else []
+    ledger_dir = _ledger_dir(spec.study_name)
+    results_json = ledger_dir / "results.json"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    results = json.loads(results_json.read_text()) if results_json.exists() else []
     results = [r for r in results if r["name"] != spec.name] + [entry]
     results.sort(key=lambda r: (r["task_index"], r["name"]))
-    RESULTS_JSON.write_text(json.dumps(results, indent=2))
-    _write_results_md(results)
-    return {"ledger": str(RESULTS_JSON)}
+    results_json.write_text(json.dumps(results, indent=2))
+    _write_results_md(results, ledger_dir / "RESULTS.md")
+    return {"ledger": str(results_json)}
 
 
-def _write_results_md(results: list[dict]) -> None:
+def _write_results_md(results: list[dict], md_path: Path) -> None:
     lines = [
         "# LIBERO validation-harness results",
         "",
@@ -285,7 +290,7 @@ def _write_results_md(results: list[dict]) -> None:
             f"| {r['eval_action_type']} | {r['control_mode']} | {r.get('n_episodes', '—')} | {replay_txt} "
             f"| **{r['pc_success']}** | {r['recorded_at']} |"
         )
-    RESULTS_MD.write_text("\n".join(lines) + "\n")
+    md_path.write_text("\n".join(lines) + "\n")
 
 
 _STAGE_FNS = {
@@ -351,11 +356,18 @@ def run_spec(spec: BenchSpec, from_stage: str | None = None, dry_run: bool = Fal
     return status
 
 
-def cmd_status() -> None:
-    if not RESULTS_JSON.exists():
+def cmd_status(study: str | None = None) -> None:
+    """Print the ledger for one topic (``--study``) or every topic under research/."""
+    if study:
+        md_paths = [_ledger_dir(study) / "RESULTS.md"]
+    else:
+        md_paths = sorted(RESEARCH_ROOT.glob("*/ledger/RESULTS.md"))
+    md_paths = [m for m in md_paths if m.exists()]
+    if not md_paths:
         print("No results recorded yet.")
         return
-    print(RESULTS_MD.read_text() if RESULTS_MD.exists() else RESULTS_JSON.read_text())
+    for md in md_paths:
+        print(md.read_text())
 
 
 def main() -> None:
@@ -370,16 +382,18 @@ def main() -> None:
                        help="rerun this stage even if already passed (repeatable)")
     run_p.add_argument("--dry-run", action="store_true")
 
-    sub.add_parser("status", help="print the results ledger")
+    status_p = sub.add_parser("status", help="print the results ledger")
+    status_p.add_argument("--study", default=None,
+                          help="one topic (default: every topic under research/)")
 
     args = parser.parse_args()
     if args.command == "status":
-        cmd_status()
+        cmd_status(args.study)
         return
     spec = load_spec(args.spec)
     run_spec(spec, from_stage=args.from_stage, dry_run=args.dry_run,
              force_stages=args.force_stage)
-    print(f"\n[{spec.name}] pipeline complete. Ledger: {RESULTS_MD}")
+    print(f"\n[{spec.name}] pipeline complete. Ledger: {_ledger_dir(spec.study_name) / 'RESULTS.md'}")
 
 
 if __name__ == "__main__":

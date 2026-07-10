@@ -25,7 +25,7 @@ Usage (mirrors `lerobot-eval`, no extra flags needed)::
         --env.type=libero --env.task=libero_goal --env.task_ids='[8]' \\
         --env.control_mode=relative \\
         --eval.n_episodes=10 --eval.batch_size=1 \\
-        --output_dir=outputs/eval/native-rot6d-act
+        --output_dir=research/libero_ee/scratch/native-rot6d-act
 """
 
 import json

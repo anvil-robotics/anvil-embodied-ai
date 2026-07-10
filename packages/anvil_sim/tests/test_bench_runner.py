@@ -9,7 +9,7 @@ import json
 import pytest
 
 from anvil_sim import bench_runner
-from anvil_sim.bench_runner import RESULTS_JSON, RESULTS_MD, run_spec, stage_record
+from anvil_sim.bench_runner import _ledger_dir, run_spec, stage_record
 from anvil_sim.bench_spec import BenchSpec, EvalSpec, GateSpec, TrainSpec
 
 
@@ -30,7 +30,7 @@ def _spec(**gate_kwargs) -> BenchSpec:
 @pytest.fixture()
 def fake_stages(monkeypatch, tmp_path):
     """Replace every stage fn with a call recorder; chdir to tmp so all the
-    runner's relative paths (outputs/bench/...) land in the sandbox."""
+    runner's relative paths (research/<study>/...) land in the sandbox."""
     monkeypatch.chdir(tmp_path)
     calls: list[str] = []
 
@@ -146,12 +146,13 @@ def test_record_upserts_ledger_and_regenerates_md(monkeypatch, tmp_path):
     }))
 
     stage_record(spec)
-    results = json.loads(RESULTS_JSON.read_text())
+    ledger = _ledger_dir(spec.study_name)
+    results = json.loads((ledger / "results.json").read_text())
     assert len(results) == 1
     assert results[0]["pc_success"] == 100.0
     assert results[0]["gt_replay"]["baseline"] == 60.0
-    assert "unit-spec" in RESULTS_MD.read_text()
+    assert "unit-spec" in (ledger / "RESULTS.md").read_text()
 
     # Upsert: same name replaces, not duplicates.
     stage_record(spec)
-    assert len(json.loads(RESULTS_JSON.read_text())) == 1
+    assert len(json.loads((ledger / "results.json").read_text())) == 1

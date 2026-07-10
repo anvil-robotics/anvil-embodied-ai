@@ -170,7 +170,7 @@ uv run --package anvil-sim anvil-sim-bench run <spec>.yaml   # run a treatment t
 
 **Full guide → [docs/simulation.md](docs/simulation.md).** Worked example & results (the EE
 action-representation study this was built for):
-[`packages/anvil_sim/src/anvil_sim/studies/libero_ee/report.md`](packages/anvil_sim/src/anvil_sim/studies/libero_ee/report.md).
+[`research/libero_ee/report.md`](research/libero_ee/report.md) (+ [`diary.md`](research/libero_ee/diary.md)).
 
 ---
 

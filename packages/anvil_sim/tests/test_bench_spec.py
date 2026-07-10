@@ -38,7 +38,7 @@ def test_load_valid_spec(tmp_path):
     spec = load_spec(_write_spec(tmp_path, _VALID_YAML))
     assert spec.name == "task10-goal-abs-act"
     assert spec.dataset_root.name == "libero-task10-goalabs"
-    assert spec.output_dir.as_posix() == "model_zoo/bench/task10-goal-abs-act"
+    assert spec.output_dir.as_posix() == "model_zoo/research/libero_ee/task10-goal-abs-act"
     assert spec.checkpoint.as_posix().endswith("checkpoints/last/pretrained_model")
     assert spec.gates.gt_replay_margin == 15.0  # default
 
