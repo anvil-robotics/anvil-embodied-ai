@@ -43,7 +43,7 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 | Stage | Description |
 |-------|-------------|
 | **0. Data Collection** | Record teleoperation demos as MCAP files via [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox) |
-| **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets → [docs/data-conversion.md](docs/data-conversion.md) |
+| **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets → [docs/data-conversion.md](docs/data-conversion.md) (browse results with [dataset-viz](docs/dataset-viz.md)) |
 | **2. Model Training** | Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies → [docs/training.md](docs/training.md) |
 | **3. Offline Evaluation** | Validate model performance against ground-truth before deploying → [docs/evaluation.md](docs/evaluation.md) |
 | **4. Run Inference** | Deploy trained models on a GPU PC via ROS2 CycloneDDS → [docs/inference.md](docs/inference.md) |
@@ -106,6 +106,10 @@ Record teleoperation demonstrations as ROS2 MCAP files through an [Anvil Devbox]
 
 Convert MCAP recordings into LeRobot v3.0 datasets. Pick the config that matches your recording setup and run `mcap-convert`.
 
+#### Browse a Dataset ([doc](docs/dataset-viz.md))
+
+After conversion, browse episodes, videos, and action curves with `dataset-viz`'s Rerun-based viewer.
+
 ### 2. Model Training ([doc](docs/training.md))
 
 Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies. Checkpoints saved to `model_zoo/<dataset>/<job_name>/`.
@@ -139,6 +143,7 @@ anvil-embodied-ai/
 │   └── mcap_converter/            # Data conversion configs
 ├── docs/
 │   ├── data-conversion.md         # Data conversion guide
+│   ├── dataset-viz.md             # Dataset visualization guide
 │   ├── training.md                # Model training guide
 │   ├── evaluation.md              # Offline evaluation guide
 │   └── inference.md               # Inference deployment guide

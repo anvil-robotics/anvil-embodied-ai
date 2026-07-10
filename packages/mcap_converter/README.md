@@ -48,6 +48,16 @@ Validate a converted LeRobot dataset by loading and reading frames.
 dataset-valid --root /path/to/dataset
 ```
 
+### dataset-viz
+
+Browse a converted dataset's episodes, videos, and action curves with lerobot's own Rerun-based viewer.
+
+```bash
+dataset-viz /path/to/dataset
+```
+
+See [docs/dataset-viz.md](../../docs/dataset-viz.md) for the full flag reference and troubleshooting.
+
 ### mcap-upload
 
 Upload a LeRobot dataset to Hugging Face Hub.

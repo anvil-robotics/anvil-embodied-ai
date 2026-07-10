@@ -1,1 +1,1 @@
-"""dataset-viz: orchestration for browsing converted LeRobot datasets via the official lerobot-dataset-visualizer web app."""
+"""dataset-viz: browsing converted LeRobot datasets via lerobot's own Rerun-based viewer."""

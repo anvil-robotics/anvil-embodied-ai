@@ -265,9 +265,8 @@ def _ensure_output_readable(output_dir: str) -> None:
     libavformat, via encode_video_frames() in lerobot/datasets/
     video_utils.py) writes video files with 0600 permissions, bypassing the
     process umask. This breaks any tool that needs to read the dataset as a
-    different user/UID than the one that ran the conversion — e.g. nginx in
-    the dataset-viz feature, which serves the dataset to a browser and gets
-    403 Forbidden on video files without this fix-up.
+    different user/UID than the one that ran the conversion — e.g. a
+    different local user or service account reading the dataset later.
     """
     root = Path(output_dir)
     for path in root.rglob("*"):
@@ -633,8 +632,8 @@ def convert_session(
         with suppress_fd_output():
             writer.finalize(dataset)
         # lerobot's video encoder writes .mp4 files as 0600 (bypassing umask),
-        # which blocks any reader running as a different UID (e.g. nginx in
-        # dataset-viz). Fix up permissions across the whole output tree.
+        # which blocks any reader running as a different UID. Fix up
+        # permissions across the whole output tree.
         _ensure_output_readable(output_dir)
 
     # Debug plots: always generated after a successful conversion

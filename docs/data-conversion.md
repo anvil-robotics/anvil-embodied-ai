@@ -187,6 +187,8 @@ Expected: 5 checks all showing `[OK]`.
 | `--root PATH` | `output_dataset` | Dataset root directory to validate |
 | `--repo-id ID` | `anvil_robot/manipulation_v1` | Dataset repository ID passed to `LeRobotDataset` |
 
+To browse the converted dataset with a Rerun viewer, see [Dataset Visualization](dataset-viz.md).
+
 ---
 
 ## Additional tools
