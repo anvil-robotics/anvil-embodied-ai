@@ -1,29 +1,10 @@
-# =============================================================================
-# LIBERO validation-harness spec — G1 recipe generalization (ACT arm).
-# Mirrors task10_native_n0_act.yaml on the rotation-HEAVY task
-# (task_index=11 "put the wine bottle on the rack", libero_goal task_id=9,
-# rot_rms 0.0258 = 3.1x task 10) to test whether the EE relative-position
-# recipe (world frame, per-frame anchor, axis-angle, recovered-delta relative
-# delivery) survives on a second, harder task. Holds observation (8-dim native)
-# + trainer (lerobot-train raw) FIXED vs task11_native_act.yaml; flips only the
-# anchor to per-frame n-0 (ee_rel_world_forward against each frame's own pose),
-# stored axis-angle, decoded via chunk-start anchor to a recovered native delta.
-# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task11_native_n0_act.yaml
-# =============================================================================
+# EE relative-position recipe (native_n0) on task11 (rotation-heavy), ACT — G1 generalization check.
 
 name: task11-native-n0-act
 task_index: 11
-env_suite: libero_goal
-env_task_id: 9
 dataset_group: native_n0
 train:
-  trainer: lerobot-train
   policy_type: act
-  steps: 50000
-  batch_size: 16
 eval:
   action_type: native_n0
-  control_mode: relative
   n_episodes: 50
-gates:
-  gt_replay_margin: 15.0

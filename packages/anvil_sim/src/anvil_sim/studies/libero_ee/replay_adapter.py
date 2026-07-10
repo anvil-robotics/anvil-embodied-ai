@@ -14,7 +14,6 @@ from lerobot.processor import PolicyProcessorPipeline
 
 from anvil_sim.studies.libero_ee.eval_libero_ee import (
     _AXIS_ANGLE_ACTION_TYPES,
-    _LEGACY_ACTION_TYPES,
     _NATIVE_FRAME_ACTION_TYPES,
     _ZERO_CAL_ACTION_TYPES,
     _make_anvil_env_pre_post_processors,
@@ -66,11 +65,7 @@ def _provider_mode(action_type: str) -> str:
         mode = _ZERO_CAL_ACTION_TYPES[action_type][1]
         if mode in ("rel_hand", "rel_world"):
             return mode
-        return "direct"  # "abs", "rel_world_seq", "rel_hand_seq" — stored form is the output form
-    if action_type in _LEGACY_ACTION_TYPES:
-        # ee_abs: absolute stored+output. ee_delta: per-step delta stored+output.
-        # ee_rel: absolute stored, hand-relativized output (same as rel_hand).
-        return "rel_hand" if action_type == "ee_rel" else "direct"
+        return "direct"  # "abs" — stored form is the output form
     raise ValueError(f"Unsupported --action-type for replay: {action_type!r}")
 
 

@@ -16,7 +16,7 @@ from anvil_sim.studies.libero_ee.eval_libero_ee import (
     _ALL_ACTION_TYPES,
     _ZERO_CAL_ACTION_TYPES,
 )
-from anvil_sim.studies.libero_ee.libero_convert import ALL_DATASET_GROUPS
+from anvil_sim.studies.libero_ee.libero_convert import ALL_DATASET_GROUPS, LIBERO_ENV_SUITE
 from anvil_sim.studies.libero_ee.math_validators import MATH_VALIDATORS
 from anvil_sim.studies.libero_ee.replay_adapter import build_replay_adapter
 from anvil_sim.study import GtReplayConfig, Study
@@ -33,10 +33,15 @@ NATIVE_EVAL_TYPES = ("native", "native_rot6d")
 # first 0% sweep; specs violating this fail at load time.
 _REQUIRED_CONTROL_MODE = {"relative": "relative", "absolute": "absolute"}
 
+# lerobot/libero's global task_index -> libero.libero's own benchmark task_id
+# (see libero_convert.py:LIBERO_ENV_TASK_ID for why these don't line up by a
+# simple offset). Extend this as new tasks are added to the study.
+_ENV_TASK_ID_BY_TASK_INDEX = {10: 8, 11: 9, 14: 2}
+
 # Dataset groups whose action column is the Anvil-native (not Anvil-EE-writer)
 # schema, so the generic mcap dataset-validate stage does not apply.
 _DATASET_VALIDATE_SKIP = frozenset(
-    {"native", "native_hand", "native_rot6d", "native_abs", "native_n0", "goalabs_aa"}
+    {"native", "native_hand", "native_rot6d", "native_abs", "native_n0"}
 )
 
 
@@ -88,9 +93,6 @@ def _eval_command(spec: BenchSpec, checkpoint: Path, output_dir: Path, n_episode
     if spec.eval.action_type == "native":
         entry = ["uv", "run", "--package", "anvil-sim", "lerobot-eval"]
         extra: list[str] = []
-    elif spec.eval.action_type == "native_rot6d":
-        entry = ["uv", "run", "--package", "anvil-sim", "anvil-eval-native-rot6d"]
-        extra = []
     else:
         entry = ["uv", "run", "--package", "anvil-sim", "anvil-eval-libero"]
         extra = [f"--action-type={spec.eval.action_type}"]
@@ -147,10 +149,36 @@ def _dataset_validate_skip(spec: BenchSpec) -> bool:
     return spec.dataset_group in _DATASET_VALIDATE_SKIP
 
 
+def _default_control_mode(action_type: str) -> str:
+    """The env.control_mode a treatment REQUIRES, mirroring _legality()'s own
+    mapping — zero-cal goal types derive it from their deliver mode; every
+    other action type (native/native_rot6d/native_hand) always uses
+    "relative"."""
+    if action_type in _ZERO_CAL_ACTION_TYPES:
+        deliver = _ZERO_CAL_ACTION_TYPES[action_type][2]
+        return _REQUIRED_CONTROL_MODE[deliver]
+    return "relative"
+
+
+def _fill_defaults(spec: BenchSpec) -> None:
+    """Fill study-specific fields a spec left unset, so specs need not repeat
+    the same env_suite/env_task_id/control_mode on every file. Mutates
+    ``spec`` in place; called by load_spec before validate()."""
+    if spec.env_suite is None:
+        spec.env_suite = LIBERO_ENV_SUITE
+    if spec.env_task_id is None:
+        if spec.task_index not in _ENV_TASK_ID_BY_TASK_INDEX:
+            raise ValueError(
+                f"env_task_id must be given explicitly for task_index={spec.task_index} "
+                f"(no entry in _ENV_TASK_ID_BY_TASK_INDEX={sorted(_ENV_TASK_ID_BY_TASK_INDEX)})"
+            )
+        spec.env_task_id = _ENV_TASK_ID_BY_TASK_INDEX[spec.task_index]
+    if spec.eval.control_mode is None:
+        spec.eval.control_mode = _default_control_mode(spec.eval.action_type)
+
+
 def build_libero_ee_study() -> Study:
     return Study(
-        name="libero_ee",
-        dataset_groups=ALL_DATASET_GROUPS,
         baseline_group=BASELINE_GROUP,
         eval_action_types=tuple(_ALL_ACTION_TYPES) + NATIVE_EVAL_TYPES,
         dataset_root=_dataset_root,
@@ -160,6 +188,7 @@ def build_libero_ee_study() -> Study:
         train_command=_train_command,
         eval_command=_eval_command,
         dataset_validate_skip=_dataset_validate_skip,
+        fill_defaults=_fill_defaults,
         gt_replay=GtReplayConfig(
             baseline_action_type="native",
             baseline_control_mode="relative",

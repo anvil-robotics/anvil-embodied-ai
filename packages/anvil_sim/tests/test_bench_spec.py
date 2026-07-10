@@ -43,6 +43,58 @@ def test_load_valid_spec(tmp_path):
     assert spec.gates.gt_replay_margin == 15.0  # default
 
 
+_MINIMAL_YAML = """
+    name: task10-native-n0-act
+    task_index: 10
+    dataset_group: native_n0
+    train:
+      policy_type: act
+    eval:
+      action_type: native_n0
+      n_episodes: 50
+"""
+
+
+def test_derives_env_and_control_mode_when_omitted(tmp_path):
+    """env_suite/env_task_id/eval.control_mode may be omitted — Study.fill_defaults
+    fills them from task_index/eval.action_type before validate() runs."""
+    spec = load_spec(_write_spec(tmp_path, _MINIMAL_YAML))
+    assert spec.env_suite == "libero_goal"
+    assert spec.env_task_id == 8  # task_index=10 -> libero.libero's own task_id
+    assert spec.eval.control_mode == "relative"
+
+
+def test_derives_trainer_and_steps_when_omitted(tmp_path):
+    """train.trainer/train.steps/train.batch_size may be omitted too —
+    TrainSpec.__post_init__ derives them from action_type/policy_type."""
+    # lerobot-train + act (no train.action_type set)
+    spec = load_spec(_write_spec(tmp_path, _MINIMAL_YAML))
+    assert spec.train.trainer == "lerobot-train"
+    assert spec.train.steps == 50000
+    assert spec.train.batch_size == 16
+
+    # anvil-trainer + diffusion (train.action_type set)
+    bad = _MINIMAL_YAML.replace(
+        "dataset_group: native_n0\n    train:\n      policy_type: act",
+        "dataset_group: goalabs\n    train:\n      action_type: ee_abs\n      policy_type: diffusion",
+    ).replace("action_type: native_n0", "action_type: zerocal_goal_abs")
+    spec2 = load_spec(_write_spec(tmp_path, bad))
+    assert spec2.train.trainer == "anvil-trainer"
+    assert spec2.train.steps == 30000
+
+
+def test_explicit_env_task_id_overrides_derived_default(tmp_path):
+    bad = _MINIMAL_YAML + "    env_task_id: 999\n"
+    spec = load_spec(_write_spec(tmp_path, bad))
+    assert spec.env_task_id == 999
+
+
+def test_unmapped_task_index_without_explicit_env_task_id_raises(tmp_path):
+    bad = _MINIMAL_YAML.replace("task_index: 10", "task_index: 999")
+    with pytest.raises(ValueError, match="env_task_id must be given explicitly"):
+        load_spec(_write_spec(tmp_path, bad))
+
+
 def test_unknown_top_level_key_rejected(tmp_path):
     with pytest.raises(ValueError, match="unknown top-level key"):
         load_spec(_write_spec(tmp_path, _VALID_YAML + "\n    bogus_key: 1\n"))
@@ -59,14 +111,6 @@ def test_deliver_control_mode_pairing_enforced(tmp_path):
     delivers via 'relative' and must NOT be run with control_mode=absolute."""
     bad = _VALID_YAML.replace("control_mode: relative", "control_mode: absolute")
     with pytest.raises(ValueError, match="REQUIRES env.control_mode='relative'"):
-        load_spec(_write_spec(tmp_path, bad))
-
-
-def test_absolute_deliver_types_require_absolute_mode(tmp_path):
-    bad = _VALID_YAML.replace("zerocal_goal_abs", "zerocal_goal_world_seq").replace(
-        "dataset_group: goalabs", "dataset_group: delta"
-    )
-    with pytest.raises(ValueError, match="REQUIRES env.control_mode='absolute'"):
         load_spec(_write_spec(tmp_path, bad))
 
 
@@ -92,14 +136,14 @@ def test_unknown_dataset_group_rejected(tmp_path):
     ("group", "expected_dir"),
     [
         ("goalabs", "libero-task10-goalabs"),
-        ("delta_hand", "libero-task10-delta-hand"),   # underscore group -> hyphen dir
+        ("native_hand", "libero-task10-native-hand"),   # underscore group -> hyphen dir
         ("native_rot6d", "libero-task10-native-rot6d"),
     ],
 )
 def test_dataset_root_uses_hyphenated_dir_suffix(group, expected_dir):
     """Regression: group names use underscores but libero_convert writes
     hyphenated directory names — the mismatch made the convert stage try to
-    re-create an existing dataset (and fail) for delta_hand/native_rot6d."""
+    re-create an existing dataset (and fail) for native_hand/native_rot6d."""
     spec = BenchSpec(
         name="x", task_index=10, env_suite="libero_goal", env_task_id=8,
         dataset_group=group,
@@ -112,21 +156,21 @@ def test_dataset_root_uses_hyphenated_dir_suffix(group, expected_dir):
 def test_reuse_checkpoint_overrides_checkpoint_path():
     spec = BenchSpec(
         name="x", task_index=10, env_suite="libero_goal", env_task_id=8,
-        dataset_group="delta",
-        train=TrainSpec(reuse_checkpoint="model_zoo/ee-space/foo/pretrained_model"),
-        eval=EvalSpec(action_type="zerocal_goal_world_seq", control_mode="absolute"),
+        dataset_group="native_n0",
+        train=TrainSpec(reuse_checkpoint="model_zoo/research/libero_ee/foo/pretrained_model"),
+        eval=EvalSpec(action_type="native_n0", control_mode="relative"),
         gates=GateSpec(),
     )
-    assert spec.checkpoint.as_posix() == "model_zoo/ee-space/foo/pretrained_model"
+    assert spec.checkpoint.as_posix() == "model_zoo/research/libero_ee/foo/pretrained_model"
 
 
 def test_output_dir_override():
     spec = BenchSpec(
         name="x", task_index=10, env_suite="libero_goal", env_task_id=8,
-        dataset_group="abs",
-        train=TrainSpec(action_type="ee_abs", output_dir="model_zoo/ee-space/libero-task10-abs/act"),
+        dataset_group="native_abs",
+        train=TrainSpec(action_type="ee_abs", output_dir="model_zoo/research/libero_ee/task10-native-abs/act"),
         eval=EvalSpec(action_type="ee_abs", control_mode="relative"),
     )
     assert spec.checkpoint.as_posix() == (
-        "model_zoo/ee-space/libero-task10-abs/act/checkpoints/last/pretrained_model"
+        "model_zoo/research/libero_ee/task10-native-abs/act/checkpoints/last/pretrained_model"
     )

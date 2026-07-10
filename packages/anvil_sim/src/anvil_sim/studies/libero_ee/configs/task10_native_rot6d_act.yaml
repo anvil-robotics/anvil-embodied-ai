@@ -1,21 +1,10 @@
-# =============================================================================
-# LIBERO validation-harness spec — Experiment 5: rot6d-encoding isolation, ACT (60%)
-# Historical experiment re-expressed as a bench spec (see
-# packages/anvil_sim/README.md for the experiment's full story).
-# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_native_rot6d_act.yaml
-# =============================================================================
+# native-family control factor #1 (encoding flip vs native): rot6d rotation, ACT.
 
 name: task10-native-rot6d-act
 task_index: 10
-env_suite: libero_goal
-env_task_id: 8
 dataset_group: native_rot6d
 train:
-  trainer: lerobot-train
   policy_type: act
-  steps: 50000
-  batch_size: 16
 eval:
   action_type: native_rot6d
-  control_mode: relative
   n_episodes: 50

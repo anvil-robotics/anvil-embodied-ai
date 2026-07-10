@@ -1,41 +1,21 @@
-"""Closed-loop eval driver for the ee_abs/ee_rel arms (B/C), on the exact
-native ``LiberoEnv`` arm A (native) also uses.
+"""Closed-loop eval driver for the LIBERO-EE study's non-native action types
+(``native_hand``, ``native_abs``, ``native_n0``, and the ``zerocal_goal_*``
+"goal" family), on the exact native ``LiberoEnv`` the ``native`` arm also uses.
 
 This mirrors ``lerobot.scripts.lerobot_eval.eval_main`` almost line for
 line — same CLI config (``EvalPipelineConfig``), same policy loading, same
 ``eval_policy_all`` rollout/metrics code — with exactly one line swapped:
 instead of ``make_env_pre_post_processors(env_cfg, policy_cfg)`` (which
 would attach the stock ``LiberoProcessorStep``, wrong for a checkpoint
-trained on Anvil's EE encoding), we build our own
-``AnvilEEObsProcessorStep``/``AnvilEEActionProcessorStep`` pair. Everything
-else — the sim, the rollout loop, the success-rate aggregation — is
-untouched, so results are directly comparable to arm A's plain
+trained on Anvil's EE encoding), we build our own env pre/post-processor
+pair per action type (see :func:`_make_anvil_env_pre_post_processors`).
+Everything else — the sim, the rollout loop, the success-rate aggregation —
+is untouched, so results are directly comparable to ``native``'s plain
 ``lerobot-eval`` numbers.
 
 Usage (mirrors `lerobot-eval`, plus one extra flag)::
 
-    # Legacy (scaled-delta reconstruction, env.control_mode=relative):
-    anvil-eval-libero \\
-        --action-type=ee_abs \\
-        --policy.path=model_zoo/research/libero_ee/<name>/checkpoints/last/pretrained_model \\
-        --env.type=libero --env.task=libero_goal --env.task_ids='[8]' \\
-        --env.control_mode=relative \\
-        --eval.n_episodes=10 --eval.batch_size=1 \\
-        --output_dir=research/libero_ee/scratch/libero_ee_abs
-
-    # Zero-calibration re-run (see _ZERO_CAL_ACTION_TYPES), env.control_mode=absolute:
-    anvil-eval-libero \\
-        --action-type=zerocal_abs \\
-        --policy.path=model_zoo/research/libero_ee/<name>/checkpoints/last/pretrained_model \\
-        --env.type=libero --env.task=libero_goal --env.task_ids='[8]' \\
-        --env.control_mode=absolute \\
-        --eval.n_episodes=10 --eval.batch_size=1 \\
-        --output_dir=research/libero_ee/scratch/libero_zerocal_abs
-
-    # 7th-round "goal" family (see _ZERO_CAL_GOAL_ACTION_TYPES) -- NOTE the
-    # required --env.control_mode differs PER ACTION TYPE within this
-    # family: abs/world-n0/hand-n0 need "relative" (deliver="relative"),
-    # world-seq/hand-seq need "absolute" (deliver="absolute"):
+    # "goal" family (see _ZERO_CAL_ACTION_TYPES), env.control_mode=relative:
     anvil-eval-libero \\
         --action-type=zerocal_goal_abs \\
         --policy.path=model_zoo/research/libero_ee/<name>/checkpoints/last/pretrained_model \\
@@ -43,6 +23,15 @@ Usage (mirrors `lerobot-eval`, plus one extra flag)::
         --env.control_mode=relative \\
         --eval.n_episodes=10 --eval.batch_size=1 \\
         --output_dir=research/libero_ee/scratch/libero_zerocal_goal_abs
+
+    # native_hand / native_abs / native_n0 (NATIVE-family control-factor conditions):
+    anvil-eval-libero \\
+        --action-type=native_n0 \\
+        --policy.path=model_zoo/research/libero_ee/<name>/checkpoints/last/pretrained_model \\
+        --env.type=libero --env.task=libero_goal --env.task_ids='[8]' \\
+        --env.control_mode=relative \\
+        --eval.n_episodes=10 --eval.batch_size=1 \\
+        --output_dir=research/libero_ee/scratch/libero_native_n0
 """
 
 import json
@@ -69,78 +58,39 @@ from lerobot.utils.random_utils import set_seed
 from lerobot.utils.utils import init_logging
 
 from anvil_sim.studies.libero_ee.libero_processor import (
-    AnvilEEActionProcessorStep,
     AnvilEEObsProcessorStep,
     NativeHandActionProcessorStep,
     NativeHandObsProcessorStep,
+    NativeRot6dActionProcessorStep,
     ZeroCalActionProcessorStep,
 )
 
-# Zero-calibration re-run (env.control_mode="absolute", see
-# absolute_native_action_from_target) of the 4 control-variable conditions —
-# NOT the same code path as the original scaled-delta ee_abs/ee_rel/ee_delta
-# (those remain available, unchanged, under their original --action-type
-# values for backward comparison against the pre-fix numbers). Maps each CLI
-# value to (obs_action_type, ZeroCalActionProcessorStep mode, deliver,
-# gripper_mode) — gripper_mode is "target_qpos" for datasets whose action
-# gripper is a qpos-scale target (abs/rel/delta families) and "native_cmd"
-# for the goalabs family, whose gripper is LIBERO's own +/-1 command (see
-# recovered_delta_native_action's docstring for the real bug this split
-# fixes).
-_ZERO_CAL_ACTION_TYPES = {
-    "zerocal_abs": ("ee_abs", "abs", "absolute", "target_qpos"),
-    "zerocal_rel_world": ("ee_rel", "rel_world", "absolute", "target_qpos"),
-    "zerocal_rel_hand": ("ee_rel", "rel_hand", "absolute", "target_qpos"),
-    "zerocal_rel_world_seq": ("ee_abs", "rel_world_seq", "absolute", "target_qpos"),
-}
-
-# 7th-round "goal" target family (see anvil_sim.libero_convert's module
-# docstring). Two sub-families with DIFFERENT deliver modes — this is the
-# result of two bugs found and fixed during implementation (see the plan's
-# "實作中發現的第二個 bug" section), not a design choice made up front:
+# The "goal" target family (see anvil_sim.libero_convert's module docstring):
+# action = G[t] = state[t] + native_delta[t], UNSCALED — a purely FORMAL
+# composition (see native_delta_to_goal). Recovered as a native-delta
+# relative to the REAL current state at eval time (see
+# recovered_delta_native_action) and delivered via env.control_mode="relative",
+# letting robosuite's own scale_action apply the true physical scale. An
+# earlier version scaled this by robosuite's assumed output_max (0.05/0.5)
+# and fed it via "absolute" — that caused catastrophic failure (0% across all
+# 5 conditions) because the assumed scale was ~4.5x too large (empirically
+# verified against real episodes).
 #
-# - abs/world-n0/hand-n0 (trained on the `goalabs` dataset): action =
-#   G[t] = state[t] + native_delta[t], UNSCALED — a purely FORMAL
-#   composition (see native_delta_to_goal). Recovered as a native-delta
-#   relative to the REAL current state at eval time (see
-#   recovered_delta_native_action) and delivered via
-#   env.control_mode="relative", letting robosuite's own scale_action apply
-#   the true physical scale. An earlier version scaled this by robosuite's
-#   assumed output_max (0.05/0.5) and fed it via "absolute" — that caused
-#   catastrophic failure (0% across all 5 conditions) because the assumed
-#   scale was ~4.5x too large (empirically verified against real episodes).
-# - world-seq/hand-seq (trained on the EXISTING `delta`/new `delta-hand`
-#   datasets — REAL achieved-state deltas, NOT the formal `goalabs`
-#   construction): these targets are already in PHYSICAL units (metres/
-#   radians), so they're delivered via env.control_mode="absolute" with
-#   zero further scaling — identical to how zerocal_rel_world_seq already
-#   works above. world-seq REUSES the existing ee_delta checkpoint
-#   unchanged (no new dataset/training needed for it).
-_ZERO_CAL_GOAL_ACTION_TYPES = {
-    # goalabs family: gripper stored as native +/-1 command -> "native_cmd".
+# Maps each CLI value to (obs_action_type, ZeroCalActionProcessorStep mode,
+# deliver, gripper_mode) — gripper_mode is "native_cmd" because the goalabs
+# family's gripper is LIBERO's own +/-1 command, not a qpos-scale target (see
+# recovered_delta_native_action's docstring for the real bug this fixes).
+_ZERO_CAL_ACTION_TYPES = {
     "zerocal_goal_abs": ("ee_abs", "abs", "relative", "native_cmd"),
     "zerocal_goal_world_n0": ("ee_rel", "rel_world", "relative", "native_cmd"),
     "zerocal_goal_hand_n0": ("ee_rel", "rel_hand", "relative", "native_cmd"),
-    # delta/delta-hand family: gripper stored as qpos-scale target.
-    "zerocal_goal_world_seq": ("ee_abs", "rel_world_seq", "absolute", "target_qpos"),
-    "zerocal_goal_hand_seq": ("ee_abs", "rel_hand_seq", "absolute", "target_qpos"),
-    # Experiment E-framegap: SAME consecutive-delta (n-(n-1)) targets and
-    # checkpoints as the two seq entries above, but delivered via
-    # recovered-delta "relative" (like the n-0 goal family) instead of
-    # "absolute". Isolates delivery (relative vs absolute) at the n-(n-1)
-    # horizon, and — as a matched re-encoded pair — isolates frame (world vs
-    # hand) at n-(n-1) under relative delivery, completing the cube whose only
-    # world/n-(n-1)/relative cell was previously `native` (a raw command, not
-    # re-encoded, hence confounded for a frame comparison).
-    "zerocal_goal_world_seq_rel": ("ee_abs", "rel_world_seq", "relative", "target_qpos"),
-    "zerocal_goal_hand_seq_rel": ("ee_abs", "rel_hand_seq", "relative", "target_qpos"),
     # NATIVE-family control-factor conditions (obs + trainer FIXED vs `native`;
     # differ in exactly ONE thing). Both use the 8-dim NATIVE passthrough
     # observation (NativeHandObsProcessorStep, see
     # _make_anvil_env_pre_post_processors) and are trained via plain
-    # lerobot-train on their own dataset group (native_abs / native_n0), NOT
-    # the 10-dim anvil-trainer goalabs_aa path. Rotation is stored/predicted as
-    # AXIS-ANGLE (native's own format), decoded to rot6d up front by
+    # lerobot-train on their own dataset group (native_abs / native_n0).
+    # Rotation is stored/predicted as AXIS-ANGLE (native's own format),
+    # decoded to rot6d up front by
     # ZeroCalActionProcessorStep(action_encoding="axis_angle") so the abs /
     # rel_world reconstruction is byte-identical to the rot6d goalabs family.
     # - native_abs: dataset action = absolute goal G[t]=state[t]+native_delta[t]
@@ -156,7 +106,6 @@ _ZERO_CAL_GOAL_ACTION_TYPES = {
     "native_abs": ("ee_abs", "abs", "relative", "native_cmd"),
     "native_n0": ("ee_rel", "rel_world", "relative", "native_cmd"),
 }
-_ZERO_CAL_ACTION_TYPES = {**_ZERO_CAL_ACTION_TYPES, **_ZERO_CAL_GOAL_ACTION_TYPES}
 
 # Zero-cal goal action types whose stored/predicted action carries its
 # rotation as AXIS-ANGLE (7-dim [pos, aa, gripper]) rather than rot6d (10-dim)
@@ -186,28 +135,26 @@ def _load_policy_from_checkpoint(cfg: PreTrainedConfig):
     return policy
 
 
-_LEGACY_ACTION_TYPES = ("ee_abs", "ee_rel", "ee_delta")
 # Native-command arms whose action column is the raw LIBERO 7-dim command
 # re-expressed in a different FRAME (currently only the EE body/hand frame),
 # reconstructed to world at eval time and delivered via
 # env.control_mode="relative" exactly like `native`. Isolates the frame
 # factor with the native representation — see native_action_to_hand.
 _NATIVE_FRAME_ACTION_TYPES = ("native_hand",)
-_ALL_ACTION_TYPES = _LEGACY_ACTION_TYPES + _NATIVE_FRAME_ACTION_TYPES + tuple(_ZERO_CAL_ACTION_TYPES)
+# native_rot6d: observation.state is byte-identical to native's (stock
+# lerobot LiberoProcessorStep, no Anvil obs encoding at all); only the
+# action side is custom (NativeRot6dActionProcessorStep, an exact
+# invertible rot6d<->axis-angle format swap, zero calibration).
+_NATIVE_ROT6D_ACTION_TYPES = ("native_rot6d",)
+_ALL_ACTION_TYPES = (
+    _NATIVE_FRAME_ACTION_TYPES + _NATIVE_ROT6D_ACTION_TYPES + tuple(_ZERO_CAL_ACTION_TYPES)
+)
 
 
 def _pop_action_type() -> str:
     """Extract --action-type=<value> from sys.argv (draccus would otherwise
     reject it as an unrecognized flag), matching the anvil_trainer
     convention for custom CLI flags layered on lerobot CLIs.
-
-    Legacy values (``ee_abs``/``ee_rel``/``ee_delta``) use the ORIGINAL
-    ``NATIVE_POS_SCALE``/``NATIVE_ROT_SCALE`` scaled-delta reconstruction
-    with ``env.control_mode="relative"`` -- kept only so the old (pre-fix)
-    numbers stay reproducible for comparison. The ``zerocal_*`` values (see
-    ``_ZERO_CAL_ACTION_TYPES``) use ``ZeroCalActionProcessorStep`` with
-    ``env.control_mode="absolute"`` instead -- zero calibration error, this
-    is the corrected re-run.
     """
     prefix = "--action-type="
     for arg in list(sys.argv):
@@ -288,6 +235,20 @@ class _TraceWriter:
 def _make_anvil_env_pre_post_processors(
     action_type: str, n_action_steps: int, trace_dir: Path | None = None
 ):
+    if action_type in _NATIVE_ROT6D_ACTION_TYPES:
+        # native_rot6d's observation.state was never touched at dataset-write
+        # time, so there's nothing Anvil-specific to convert on the obs side —
+        # reuse lerobot's stock LiberoProcessorStep directly (equivalent to
+        # make_env_pre_post_processors(env_cfg, policy_cfg) for a LIBERO env
+        # + non-XVLA policy, which just wraps this same step with no other
+        # config-dependent behavior). Only the action side is custom.
+        from lerobot.processor.env_processor import LiberoProcessorStep
+
+        obs_step = LiberoProcessorStep()
+        action_step = NativeRot6dActionProcessorStep()
+        env_preprocessor = PolicyProcessorPipeline(steps=[obs_step])
+        env_postprocessor = PolicyProcessorPipeline(steps=[action_step])
+        return env_preprocessor, env_postprocessor
     if action_type in _NATIVE_FRAME_ACTION_TYPES:
         obs_step = NativeHandObsProcessorStep()
         action_step = NativeHandActionProcessorStep(obs_step=obs_step)
@@ -318,7 +279,7 @@ def _make_anvil_env_pre_post_processors(
             # "abs" and ignores the anchor entirely.
             per_frame_anchor=zero_cal_mode in ("rel_world", "rel_hand"),
         )
-    elif action_type in _ZERO_CAL_ACTION_TYPES:
+    else:  # action_type in _ZERO_CAL_ACTION_TYPES (rot6d goalabs family)
         obs_action_type, zero_cal_mode, deliver, gripper_mode = _ZERO_CAL_ACTION_TYPES[action_type]
         obs_step = AnvilEEObsProcessorStep(action_type=obs_action_type)
         action_step = ZeroCalActionProcessorStep(
@@ -327,12 +288,7 @@ def _make_anvil_env_pre_post_processors(
             n_action_steps=n_action_steps,
             deliver=deliver,
             gripper_mode=gripper_mode,
-            action_encoding="axis_angle" if action_type in _AXIS_ANGLE_ACTION_TYPES else "rot6d",
-        )
-    else:
-        obs_step = AnvilEEObsProcessorStep(action_type=action_type)
-        action_step = AnvilEEActionProcessorStep(
-            action_type=action_type, obs_step=obs_step, n_action_steps=n_action_steps
+            action_encoding="rot6d",
         )
     post_steps: list = [action_step]
     if trace_dir is not None:
@@ -352,9 +308,9 @@ def _install_episode_reset_hook() -> None:
     happened to be a multiple of ``n_action_steps``, every episode after
     the first reconstructed targets against an anchor captured at the wrong
     time — initially one from the PREVIOUS episode's scene. All
-    chunk-anchored conditions (ee_rel, zerocal rel modes, goal n-0/seq
-    modes) measured before this fix understate their true success from
-    episode 2 onward. Exposed by the GT-replay diagnostic: world-n0 replay
+    chunk-anchored conditions (the goal n-0 family) measured before this fix
+    understate their true success from episode 2 onward. Exposed by the
+    GT-replay diagnostic: world-n0 replay
     at n_action_steps=100 scored 20% where the forward/inverse identity
     predicts parity with the abs condition (80%).
 

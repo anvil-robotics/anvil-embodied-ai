@@ -1,23 +1,23 @@
-"""ProcessorSteps letting Anvil ee_abs/ee_rel policies run against LIBERO's
+"""ProcessorSteps letting the LIBERO-EE study's policies run against LIBERO's
 native environment via ``lerobot.scripts.lerobot_eval.rollout()``'s
-``env_preprocessor``/``env_postprocessor`` hooks.
+``env_preprocessor``/``env_postprocessor`` hooks. No custom gym env is
+needed — every arm shares the exact same native ``LiberoEnv``; these steps
+only translate the *format* crossing the policy/env boundary, the sim's own
+OSC_POSE controller still does all the actual low-level control.
 
-No custom gym env is needed: arms B (ee_abs) and C (ee_rel) share the exact
-same native ``LiberoEnv`` (``control_mode="relative"``) as arm A (native).
-These two steps only translate the *format* crossing the policy/env
-boundary — the sim's own OSC_POSE controller still does all the actual
-low-level control.
+:class:`AnvilEEObsProcessorStep` is the Anvil EE observation encoding (used
+by the ``goalabs`` family's ``zerocal_goal_*`` eval, and as a standalone
+diagnostics state probe elsewhere).
 
-Also home to :class:`NativeRot6dActionProcessorStep`, used only by the
-experimental 5th arm ``native_rot6d`` (see ``anvil_sim.libero_convert``
-module docstring) — a zero-calibration isolation of rot6d vs axis-angle
-rotation encoding that needs no paired obs processor at all.
+:class:`NativeRot6dActionProcessorStep` (``native_rot6d`` arm) and
+:class:`NativeHandObsProcessorStep`/:class:`NativeHandActionProcessorStep`
+(``native_hand`` arm) are self-contained format converters over native's own
+observation, no obs/action calibration involved.
 
-And :class:`ZeroCalActionProcessorStep`, used by the zero-calibration
-re-run of the ee_abs/ee_rel/ee_delta ablations via
-``env.control_mode="absolute"`` (see :func:`absolute_native_action_from_target`)
-instead of the ``NATIVE_POS_SCALE``/``NATIVE_ROT_SCALE`` reconstruction the
-other processors above use.
+:class:`ZeroCalActionProcessorStep` is the zero-calibration re-run
+(``env.control_mode="absolute"`` or ``"relative"``, see
+:func:`absolute_native_action_from_target` / :func:`recovered_delta_native_action`)
+used by the ``goalabs``/``native_abs``/``native_n0`` "goal" target family.
 """
 
 from __future__ import annotations
@@ -44,84 +44,11 @@ from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.processor.pipeline import ActionProcessorStep, ObservationProcessorStep
 from lerobot.utils.constants import OBS_IMAGES, OBS_PREFIX, OBS_STATE
 
-# =============================================================================
-# Empirically-calibrated robosuite OSC_POSE native-delta convention
-# =============================================================================
-# Derived from lerobot/libero task_index=10 ("put the bowl on the plate"):
-# least-squares fit of native_action = scale * real_delta across ~4500
-# consecutive frame pairs (see project notes / TASK-006 for the calibration
-# script). Position fits cleanly in the WORLD frame (R^2=0.92 vs 0.04 for
-# body frame) -- this is the key empirical difference from Anvil's ee_rel
-# (UMI-style), which explicitly rotates translation into the EE's own body
-# frame (`body_delta = R_state.T @ world_delta`). Rotation is only weakly
-# constrained by this specific task's data (its orientation barely changes:
-# the 99th percentile rotation delta is ~0.019 rad) but is still better
-# explained by the world frame (R^2=0.49 over all frames, 0.69 restricted to
-# the larger-delta subset) than the body frame (R^2=0.11).
-NATIVE_POS_SCALE = 82.7763  # native_action_xyz = NATIVE_POS_SCALE * world_delta_xyz (metres)
-NATIVE_ROT_SCALE = 7.1523  # native_action_rot = NATIVE_ROT_SCALE * world_delta_axis_angle (radians)
-
 # Gripper action is a saturating open/close command, not a scaled delta --
 # confirmed via the env's own no-op action [0,0,0,0,0,0,-1] (hold pose, open
 # gripper): -1.0 = open, +1.0 = close.
 GRIPPER_OPEN_CMD = -1.0
 GRIPPER_CLOSE_CMD = 1.0
-
-
-def native_action_from_targets(
-    target_pos: np.ndarray,
-    target_rot6d: np.ndarray,
-    target_gripper: float,
-    current_pos: np.ndarray,
-    current_quat_xyzw: np.ndarray,
-    current_gripper: float,
-) -> np.ndarray:
-    """Convert an absolute Anvil EE target into LIBERO's native 7-dim delta action.
-
-    Pure function (no torch/env dependency) so it can be unit-tested directly.
-    """
-    world_delta_xyz = target_pos - current_pos
-    native_pos = world_delta_xyz * NATIVE_POS_SCALE
-
-    R_current = quat_to_matrix(current_quat_xyzw)
-    R_target = rot6d_to_matrix(target_rot6d)
-    R_delta_world = R_target @ R_current.T
-    world_delta_aa = matrix_to_axis_angle(R_delta_world)
-    native_rot = world_delta_aa * NATIVE_ROT_SCALE
-
-    # Push toward the target opening at max rate; robustly sign-agnostic
-    # since a wider gripper opening means larger |gripper_qpos| regardless
-    # of which finger's coordinate sign we track (see raw_state_to_anvil).
-    native_gripper = GRIPPER_CLOSE_CMD if abs(target_gripper) < abs(current_gripper) else GRIPPER_OPEN_CMD
-
-    return np.concatenate([native_pos, native_rot, [native_gripper]]).astype(np.float32)
-
-
-def native_action_from_world_delta(
-    delta_pos: np.ndarray,
-    delta_rot6d: np.ndarray,
-    target_gripper: float,
-    current_gripper: float,
-) -> np.ndarray:
-    """Convert an already-world-frame-delta Anvil action into LIBERO's native
-    7-dim delta action. Used only by the experimental ``ee_delta`` arm (see
-    ``anvil_sim.libero_convert.anvil_state_to_delta_action``) — unlike
-    :func:`native_action_from_targets`, there is no absolute target to
-    reconstruct, so no ``current_pos``/``current_quat_xyzw`` composition is
-    needed for position/rotation; ``current_gripper`` is only used for the
-    bang-bang gripper comparison.
-
-    Pure function (no torch/env dependency) so it can be unit-tested directly.
-    """
-    native_pos = delta_pos * NATIVE_POS_SCALE
-
-    R_delta_world = rot6d_to_matrix(delta_rot6d)
-    world_delta_aa = matrix_to_axis_angle(R_delta_world)
-    native_rot = world_delta_aa * NATIVE_ROT_SCALE
-
-    native_gripper = GRIPPER_CLOSE_CMD if abs(target_gripper) < abs(current_gripper) else GRIPPER_OPEN_CMD
-
-    return np.concatenate([native_pos, native_rot, [native_gripper]]).astype(np.float32)
 
 
 def absolute_native_action_from_target(
@@ -139,11 +66,7 @@ def absolute_native_action_from_target(
     (``control_mode="absolute"``), position is used as-is (metres) and
     orientation is interpreted directly as an axis-angle vector (radians) —
     "No scaling of values since these are absolute values" per the source
-    comment. This replaces :func:`native_action_from_targets`/
-    :func:`native_action_from_world_delta`'s ``NATIVE_POS_SCALE``/
-    ``NATIVE_ROT_SCALE`` reconstruction (whose rotation fit was only
-    R²=0.49) for the zero-calibration re-run of the ee_abs/ee_rel/ee_delta
-    ablations — see ``ZeroCalActionProcessorStep``.
+    comment — see ``ZeroCalActionProcessorStep``.
 
     ``gripper_mode``: see :func:`recovered_delta_native_action` — the same
     qpos-target vs native-command semantics split applies here (the
@@ -244,11 +167,9 @@ def recovered_delta_native_action(
 
 def rot6d_action_to_native(rot6d_action10: np.ndarray) -> np.ndarray:
     """Exact inverse of ``anvil_sim.libero_convert.native_action_to_rot6d``
-    — used by the experimental 5th arm ``native_rot6d``, which isolates
-    rot6d rotation encoding with ZERO calibration/approximation error
-    (unlike :func:`native_action_from_targets`/:func:`native_action_from_world_delta`,
-    which both apply ``NATIVE_POS_SCALE``/``NATIVE_ROT_SCALE``). Position and
-    gripper pass through unchanged; rotation is decoded via
+    — used by the ``native_rot6d`` arm, which isolates rot6d rotation
+    encoding with ZERO calibration/approximation error. Position and gripper
+    pass through unchanged; rotation is decoded via
     ``rot6d_to_matrix``/``matrix_to_axis_angle`` — exact, invertible math,
     with no notion of "current state" or "target" needed at all.
 
@@ -266,9 +187,9 @@ def axis_angle_action_to_rot6d(aa_action7: np.ndarray) -> np.ndarray:
     :func:`rot6d_action_to_native`, and identical math to
     ``anvil_sim.libero_convert.native_action_to_rot6d``.
 
-    Used by the ``goalabs_aa`` family (the axis-angle counterparts
-    ``native_abs``/``native_n0`` of the rot6d ``goalabs`` conditions
-    ``zerocal_goal_abs``/``zerocal_goal_world_n0``): those store the formal
+    Used by ``native_abs``/``native_n0`` (the axis-angle counterparts of the
+    rot6d ``goalabs`` conditions ``zerocal_goal_abs``/``zerocal_goal_world_n0``):
+    those store the formal
     goal ``G[t] = state[t] + native_delta[t]`` with its rotation as AXIS-ANGLE
     instead of rot6d, so the eval action step decodes it back to rot6d here
     and then runs the IDENTICAL abs / rel_world reconstruction and
@@ -335,12 +256,7 @@ class AnvilEEObsProcessorStep(ObservationProcessorStep):
     observation re-encoding used at training time — the policy was NOT
     trained on the raw 8-dim quat state, it was trained on:
 
-    - ``ee_abs`` / ``ee_delta``: ``ee_obs_abs_forward(state8)`` -> 10-dim
-      rot6d, absolute. Both use the same observation encoding — they only
-      differ in what the ACTION represents (see
-      :class:`AnvilEEActionProcessorStep`). ``ee_delta`` is an experimental
-      4th arm (see ``anvil_sim.libero_convert``), not part of Anvil's real
-      contract.
+    - ``ee_abs``: ``ee_obs_abs_forward(state8)`` -> 10-dim rot6d, absolute.
     - ``ee_rel``: ``ee_obs_rel_forward(state8, anchor=state8)`` -> 10-dim
       rot6d, self-anchored. Since the anchor IS the current observation, this
       is always the fixed vector ``[0,0,0, 1,0,0,0,1,0, gripper]`` (zero
@@ -349,20 +265,18 @@ class AnvilEEObsProcessorStep(ObservationProcessorStep):
       (``EERelTransform`` anchors every single-step observation to itself).
 
     ``last_anvil_state`` (the raw absolute 8-dim quat state, NOT the encoded
-    10-dim one above) is cached after every call so a paired
-    :class:`AnvilEEActionProcessorStep` can use it as the reference state for
-    ``ee_rel_inverse`` and for computing the native-delta action. Assumes
-    batch size 1 (this benchmark doesn't vectorize envs).
+    10-dim one above) is cached after every call — used by
+    :class:`ZeroCalActionProcessorStep` as the reference state for the goal
+    reconstruction, and as a standalone diagnostics state probe elsewhere.
+    Assumes batch size 1 (this benchmark doesn't vectorize envs).
     """
 
     action_type: str
     last_anvil_state: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.action_type not in ("ee_abs", "ee_rel", "ee_delta"):
-            raise ValueError(
-                f"action_type must be 'ee_abs', 'ee_rel', or 'ee_delta', got {self.action_type!r}"
-            )
+        if self.action_type not in ("ee_abs", "ee_rel"):
+            raise ValueError(f"action_type must be 'ee_abs' or 'ee_rel', got {self.action_type!r}")
 
     def observation(self, observation: dict) -> dict:
         processed = observation.copy()
@@ -393,7 +307,7 @@ class AnvilEEObsProcessorStep(ObservationProcessorStep):
 
         if self.action_type == "ee_rel":
             state10 = ee_obs_rel_forward(state8.reshape(1, 8), state8.reshape(1, 8))[0]
-        else:  # ee_abs and ee_delta share the same absolute obs encoding
+        else:  # ee_abs
             state10 = ee_obs_abs_forward(state8.reshape(1, 8))[0]
 
         processed[OBS_STATE] = torch.from_numpy(state10.astype(np.float32)).unsqueeze(0)
@@ -406,128 +320,16 @@ class AnvilEEObsProcessorStep(ObservationProcessorStep):
 
 
 @dataclass
-class AnvilEEActionProcessorStep(ActionProcessorStep):
-    """``env_postprocessor``: policy's 10-dim rot6d action -> LIBERO's native 7-dim action.
-
-    ``action_type`` is ``"ee_abs"``, ``"ee_rel"``, or the experimental
-    ``"ee_delta"`` (not part of Anvil's real contract — see
-    ``anvil_sim.libero_convert`` module docstring). For ``ee_rel`` the
-    policy output is first restored to absolute via
-    ``anvil_shared.ee_transform.ee_rel_inverse``. For ``ee_delta`` the policy
-    output already IS a world-frame delta (no absolute target to
-    reconstruct, no chunk anchor needed) — see
-    :func:`native_action_from_world_delta`.
-
-    IMPORTANT — the ``ee_rel_inverse`` reference state must be the
-    observation the model actually conditioned on when it predicted this
-    action's *chunk*, not the observation at the moment this individual
-    action is executed. ``ACTPolicy.select_action`` only calls
-    ``predict_action_chunk`` when its internal ``_action_queue`` is empty
-    (every ``n_action_steps`` calls); the other ``n_action_steps - 1`` calls
-    just pop a cached action without looking at the current observation at
-    all. Since training relativizes a whole action chunk against the single
-    observation at the chunk's start (``anvil_trainer.transforms.EERelTransform``),
-    using the fresh per-step observation as the reference here silently
-    drifts more and more within each chunk — this exactly matches the real
-    ``ee_runtime.ee_rel_restore_chunk(chunk, obs_t)`` contract, which also
-    takes one reference observation for the whole chunk, not one per action.
-    We can't see the policy's internal queue from here, so we track the
-    chunk boundary ourselves via a call counter synced to ``n_action_steps``.
-    """
-
-    action_type: str
-    obs_step: AnvilEEObsProcessorStep
-    n_action_steps: int = 1
-
-    _call_count: int = field(default=0, init=False, repr=False)
-    _chunk_anchor: np.ndarray | None = field(default=None, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        if self.action_type not in ("ee_abs", "ee_rel", "ee_delta"):
-            raise ValueError(
-                f"action_type must be 'ee_abs', 'ee_rel', or 'ee_delta', got {self.action_type!r}"
-            )
-
-    def reset_episode_state(self) -> None:
-        """Re-align chunk tracking with the policy's own replan schedule —
-        MUST be called at every episode start (real bug #5): the policy
-        replans at episode-local step 0 after ``policy.reset()``, but this
-        step's call counter used to run on ACROSS episodes, so unless an
-        episode's length happened to be a multiple of ``n_action_steps``,
-        every episode after the first reconstructed targets against a chunk
-        anchor captured at the WRONG time (initially even one from the
-        previous episode's scene). See ``eval_libero_ee``'s rollout wrapper.
-        """
-        self._call_count = 0
-        self._chunk_anchor = None
-
-    def action(self, action: torch.Tensor) -> torch.Tensor:
-        if self.obs_step.last_anvil_state is None:
-            raise RuntimeError(
-                "AnvilEEActionProcessorStep needs an observation processed by its "
-                "paired AnvilEEObsProcessorStep before the first action."
-            )
-        current_state = self.obs_step.last_anvil_state
-
-        if self._call_count % self.n_action_steps == 0:
-            self._chunk_anchor = current_state.copy()
-        self._call_count += 1
-
-        act10 = (action[0] if action.dim() > 1 else action).detach().cpu().numpy()
-
-        if self.action_type == "ee_rel":
-            act10 = ee_rel_inverse(act10.reshape(1, 10), self._chunk_anchor.reshape(1, 8))[0]
-            native = native_action_from_targets(
-                target_pos=act10[:3],
-                target_rot6d=act10[3:9],
-                target_gripper=float(act10[9]),
-                current_pos=current_state[:3],
-                current_quat_xyzw=current_state[3:7],
-                current_gripper=float(current_state[7]),
-            )
-        elif self.action_type == "ee_delta":
-            # Already a world-frame delta -- no absolute target to
-            # reconstruct, no chunk anchor involved.
-            native = native_action_from_world_delta(
-                delta_pos=act10[:3],
-                delta_rot6d=act10[3:9],
-                target_gripper=float(act10[9]),
-                current_gripper=float(current_state[7]),
-            )
-        else:  # ee_abs
-            # Converting the absolute target into a native step-delta DOES
-            # use the fresh current physical state, not the chunk anchor —
-            # this is "how far do I need to move from here-now", unrelated
-            # to how the model's own output was originally referenced.
-            native = native_action_from_targets(
-                target_pos=act10[:3],
-                target_rot6d=act10[3:9],
-                target_gripper=float(act10[9]),
-                current_pos=current_state[:3],
-                current_quat_xyzw=current_state[3:7],
-                current_gripper=float(current_state[7]),
-            )
-        return torch.from_numpy(native).unsqueeze(0)
-
-    def transform_features(self, features):
-        new_features = {ft: feats.copy() for ft, feats in features.items() if ft != FeatureType.ACTION}
-        new_features[FeatureType.ACTION] = {"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))}
-        return new_features
-
-
-@dataclass
 class NativeRot6dActionProcessorStep(ActionProcessorStep):
-    """``env_postprocessor`` for the experimental 5th arm ``native_rot6d``:
-    policy's 10-dim action (native's own position/gripper unchanged, rotation
-    packed as rot6d) -> LIBERO's native 7-dim action, via
-    :func:`rot6d_action_to_native`.
+    """``env_postprocessor`` for the ``native_rot6d`` arm: policy's 10-dim
+    action (native's own position/gripper unchanged, rotation packed as
+    rot6d) -> LIBERO's native 7-dim action, via :func:`rot6d_action_to_native`.
 
-    Unlike :class:`AnvilEEActionProcessorStep`, this needs no paired obs
-    processor, no ``current_state``, and no chunk-anchor tracking — the
-    decoding is a pure, self-contained format conversion with zero
-    calibration. The observation side for this arm reuses lerobot's own
-    stock ``LiberoProcessorStep`` unchanged (see ``eval_native_rot6d.py``),
-    since this arm's ``observation.state`` is byte-identical to native's.
+    This needs no paired obs processor, no ``current_state``, and no
+    chunk-anchor tracking — the decoding is a pure, self-contained format
+    conversion with zero calibration. The observation side for this arm
+    reuses lerobot's own stock ``LiberoProcessorStep`` unchanged, since this
+    arm's ``observation.state`` is byte-identical to native's.
     """
 
     def action(self, action: torch.Tensor) -> torch.Tensor:
@@ -598,7 +400,7 @@ class NativeHandActionProcessorStep(ActionProcessorStep):
 
     Per-step and stateless: the native command is a per-step delta, so there
     is no chunk anchor / running target (hence no ``reset_episode_state``
-    needed), matching how ``native``/``ee_delta`` are replayed "direct".
+    needed), matching how ``native`` is replayed "direct".
     """
 
     obs_step: NativeHandObsProcessorStep
@@ -619,27 +421,22 @@ class NativeHandActionProcessorStep(ActionProcessorStep):
         return new_features
 
 
-_ZERO_CAL_MODES = ("abs", "rel_world", "rel_hand", "rel_world_seq", "rel_hand_seq")
+_ZERO_CAL_MODES = ("abs", "rel_world", "rel_hand")
 
 
 @dataclass
 class ZeroCalActionProcessorStep(ActionProcessorStep):
-    """``env_postprocessor`` for the zero-calibration re-run of the
-    ee_abs/ee_rel/ee_delta ablations, using ``env.control_mode="absolute"``
-    (see :func:`absolute_native_action_from_target`) instead of
-    :func:`native_action_from_targets`/:func:`native_action_from_world_delta`'s
-    ``NATIVE_POS_SCALE``/``NATIVE_ROT_SCALE`` reconstruction. Pair with
-    :class:`AnvilEEObsProcessorStep` using ``action_type="ee_abs"`` (for
-    ``mode="abs"``/``"rel_world_seq"``) or ``action_type="ee_rel"`` (for
-    ``mode="rel_world"``/``"rel_hand"`` — the self-anchored single-step obs
-    encoding is frame-invariant, see ``test_obs_rel_world_matches_body_frame_when_self_anchored``,
+    """``env_postprocessor`` for the "goal" target family (``goalabs``/
+    ``native_abs``/``native_n0``), using ``env.control_mode="absolute"`` (see
+    :func:`absolute_native_action_from_target`) or ``"relative"`` (see
+    :func:`recovered_delta_native_action`) delivery — zero calibration either
+    way. Pair with :class:`AnvilEEObsProcessorStep` using ``action_type="ee_abs"``
+    (for ``mode="abs"``) or ``action_type="ee_rel"`` (for ``mode="rel_world"``/
+    ``"rel_hand"`` — the self-anchored single-step obs encoding is
+    frame-invariant, see ``test_obs_rel_world_matches_body_frame_when_self_anchored``,
     so ``ee_rel``'s existing obs encoding is reused unchanged for both).
 
-    Five modes. ``"abs"``/``"rel_world"``/``"rel_hand"``/``"rel_world_seq"``
-    were the 4 control-variable conditions of the original (zero-cal,
-    act-from-obs) 6th-round experiment; ``"rel_hand_seq"`` was added for the
-    7th-round "goal" target family (see ``libero_convert.py``'s module
-    docstring) to complete the 2x2 (world/hand x n-0/n-(n-1)) grid:
+    Three modes:
 
     - ``"abs"``: policy output IS the absolute target directly.
     - ``"rel_world"``: SE(3)-relative, WORLD frame, anchored to chunk start
@@ -648,42 +445,23 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
     - ``"rel_hand"``: SE(3)-relative, HAND frame, anchored to chunk start
       (n-0) — reconstruct via ``ee_rel_inverse``
       (``--action-type=ee_rel``).
-    - ``"rel_world_seq"``: per-step CONSECUTIVE world-frame delta (n-(n-1)).
-      No fixed anchor reconstruction is possible (each step's target
-      depends on the previous step's reconstructed target, not the
-      original chunk-start anchor), so this mode maintains a running
-      absolute target, accumulated one step at a time and reset at chunk
-      boundaries: ``new_pos = running_pos + delta_pos``,
-      ``new_R = R_delta @ R_running`` (see
-      ``anvil_sim.libero_convert.anvil_state_to_delta_action``'s
-      ``R_delta = R_next @ R_current.T`` convention).
-    - ``"rel_hand_seq"``: per-step CONSECUTIVE HAND-frame delta (n-(n-1)) —
-      same running-target accumulation as ``"rel_world_seq"``, but the
-      delta is expressed in the PREVIOUS running target's own frame:
-      ``new_pos = running_pos + R_running @ delta_pos``,
-      ``new_R = R_running @ R_delta`` (see
-      ``anvil_sim.libero_convert.convert_episode_goal_handseq_actions``'s
-      ``R_delta = R_prev.T @ R_next`` convention).
 
     ``deliver`` controls the FINAL step, after ``target_pos``/``target_rot6d``/
     ``target_gripper`` have been reconstructed by the branches above:
 
     - ``"absolute"`` (default): :func:`absolute_native_action_from_target`
       — feed the reconstructed target directly to
-      ``env.control_mode="absolute"``, zero scaling. This is the ORIGINAL
-      6th-round zero-cal behavior, unchanged, still used by the
-      ``zerocal_abs``/``zerocal_rel_world``/``zerocal_rel_hand``/
-      ``zerocal_rel_world_seq`` action types (numbers preserved).
+      ``env.control_mode="absolute"``, zero scaling.
     - ``"relative"``: :func:`recovered_delta_native_action` — subtract the
       CURRENT real state from the reconstructed target to recover a
       native-command-scale delta, clip to ``[-1, 1]``, and feed to
       ``env.control_mode="relative"``, letting robosuite's own
-      ``scale_action`` apply the true physical scale. Used by the 7th-round
-      ``zerocal_goal_*`` "goal" family (see ``libero_convert.py``'s module
-      docstring) — reconstructing an ABSOLUTE target and feeding it
-      directly (the ``"absolute"`` path) caused catastrophic failure there
-      because the reconstructed target is a formal ``state + native_delta``
-      composition, not a physically achievable pose by itself.
+      ``scale_action`` apply the true physical scale. Used by the "goal"
+      family (``zerocal_goal_*``, ``native_abs``, ``native_n0``) —
+      reconstructing an ABSOLUTE target and feeding it directly (the
+      ``"absolute"`` path) caused catastrophic failure there because the
+      reconstructed target is a formal ``state + native_delta`` composition,
+      not a physically achievable pose by itself.
     """
 
     mode: str
@@ -692,10 +470,10 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
     deliver: str = "absolute"
     gripper_mode: str = "target_qpos"  # "native_cmd" for the goalabs family — see recovered_delta_native_action
     # "rot6d" (default): policy output is the 10-dim rot6d layout the goalabs
-    # / ee_abs / ee_rel datasets store. "axis_angle": policy output is the
-    # 7-dim [pos, axis-angle, gripper] layout the goalabs_aa family stores
-    # (native_abs / native_n0) — decoded to rot6d up front via
-    # axis_angle_action_to_rot6d, after which every branch below is identical.
+    # dataset stores. "axis_angle": policy output is the 7-dim
+    # [pos, axis-angle, gripper] layout native_abs/native_n0 store — decoded
+    # to rot6d up front via axis_angle_action_to_rot6d, after which every
+    # branch below is identical.
     action_encoding: str = "rot6d"
     # rel_world / rel_hand reconstruction anchor. False (default): anchor to the
     # CHUNK-START pose (n-0), correct for the rot6d goalabs world-n0/hand-n0
@@ -712,9 +490,6 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
 
     _call_count: int = field(default=0, init=False, repr=False)
     _chunk_anchor: np.ndarray | None = field(default=None, init=False, repr=False)
-    _running_target: np.ndarray | None = field(
-        default=None, init=False, repr=False
-    )  # rel_world_seq / rel_hand_seq only
 
     def __post_init__(self) -> None:
         if self.mode not in _ZERO_CAL_MODES:
@@ -732,12 +507,14 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
 
     def reset_episode_state(self) -> None:
         """Re-align chunk tracking with the policy's replan schedule at every
-        episode start — see AnvilEEActionProcessorStep.reset_episode_state
-        (real bug #5). Also clears the seq modes' running-target accumulator,
-        which otherwise carried the previous episode's pose into the next."""
+        episode start (real bug #5): the policy replans at episode-local step
+        0 after ``policy.reset()``, but the call counter used to run on
+        ACROSS episodes, so unless an episode's length happened to be a
+        multiple of ``n_action_steps``, every episode after the first
+        reconstructed targets against a chunk anchor captured at the WRONG
+        time. See ``eval_libero_ee``'s rollout wrapper."""
         self._call_count = 0
         self._chunk_anchor = None
-        self._running_target = None
 
     def action(self, action: torch.Tensor) -> torch.Tensor:
         if self.obs_step.last_anvil_state is None:
@@ -754,9 +531,10 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
 
         act10 = (action[0] if action.dim() > 1 else action).detach().cpu().numpy()
         if self.action_encoding == "axis_angle":
-            # goalabs_aa family: 7-dim [pos, axis-angle, gripper] -> 10-dim
-            # rot6d, lossless (see axis_angle_action_to_rot6d). Every branch
-            # below then operates on rot6d exactly as for the goalabs family.
+            # native_abs / native_n0 family: 7-dim [pos, axis-angle, gripper]
+            # -> 10-dim rot6d, lossless (see axis_angle_action_to_rot6d).
+            # Every branch below then operates on rot6d exactly as for the
+            # goalabs family.
             act10 = axis_angle_action_to_rot6d(act10)
 
         # Chunk-start anchor (rot6d goalabs n-0) or per-frame anchor (axis-angle
@@ -767,27 +545,9 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
         elif self.mode == "rel_world":
             abs10 = ee_rel_world_inverse(act10.reshape(1, 10), anchor.reshape(1, 8))[0]
             target_pos, target_rot6d, target_gripper = abs10[:3], abs10[3:9], float(abs10[9])
-        elif self.mode == "rel_hand":
+        else:  # rel_hand
             abs10 = ee_rel_inverse(act10.reshape(1, 10), anchor.reshape(1, 8))[0]
             target_pos, target_rot6d, target_gripper = abs10[:3], abs10[3:9], float(abs10[9])
-        else:  # rel_world_seq / rel_hand_seq — accumulate consecutive deltas from the anchor
-            if chunk_start:
-                self._running_target = self._chunk_anchor.copy()
-            R_running = quat_to_matrix(self._running_target[3:7])
-            R_delta = rot6d_to_matrix(act10[3:9])
-            if self.mode == "rel_world_seq":
-                # R_delta = R_next @ R_current.T (see anvil_state_to_delta_action)
-                new_pos = self._running_target[:3] + act10[:3]
-                new_R = R_delta @ R_running  # R_next = R_delta @ R_current
-            else:  # rel_hand_seq
-                # R_delta = R_prev.T @ R_next (see convert_episode_goal_handseq_actions)
-                new_pos = self._running_target[:3] + R_running @ act10[:3]
-                new_R = R_running @ R_delta  # R_next = R_prev @ R_delta
-            new_gripper = float(act10[9])
-            self._running_target = np.concatenate(
-                [new_pos, matrix_to_quat(new_R), [new_gripper]]
-            ).astype(np.float32)
-            target_pos, target_rot6d, target_gripper = new_pos, matrix_to_rot6d(new_R), new_gripper
 
         if self.deliver == "absolute":
             native = absolute_native_action_from_target(

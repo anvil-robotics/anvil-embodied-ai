@@ -1,26 +1,10 @@
-# =============================================================================
-# LIBERO validation-harness spec — G1 recipe generalization (Diffusion arm, KEY).
-# Same native family (8-dim obs, lerobot-train raw) and same eval decode as
-# task11_native_n0_act.yaml, only policy_type flipped to diffusion.
-# Purpose: the decisive generalization check — task10 showed per-frame relative
-# (native_n0) is Diffusion-robust (98) while chunk-anchor(n-0) collapses (16).
-# This confirms the recipe holds on the rotation-HEAVY task11, i.e. is not
-# task10-only. Robust here (near task11 native-diffusion) => recipe generalizes.
-# =============================================================================
+# EE relative-position recipe (native_n0) on task11 (rotation-heavy), Diffusion — G1 generalization: 98, holds on the hardest-rotation task (report §3.6).
 
 name: task11-native-n0-diffusion
 task_index: 11
-env_suite: libero_goal
-env_task_id: 9
 dataset_group: native_n0
 train:
-  trainer: lerobot-train
   policy_type: diffusion
-  steps: 30000
-  batch_size: 16
 eval:
   action_type: native_n0
-  control_mode: relative
   n_episodes: 50
-gates:
-  gt_replay_margin: 15.0

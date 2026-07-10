@@ -22,18 +22,12 @@ from anvil_sim.studies.libero_ee.replay_adapter import _provider_mode
         # direct: stored form IS the per-step policy-output form
         ("native", "direct"),
         ("native_rot6d", "direct"),
-        ("ee_abs", "direct"),
-        ("ee_delta", "direct"),
-        ("zerocal_abs", "direct"),
+        ("native_hand", "direct"),
+        ("native_abs", "direct"),
+        ("native_n0", "direct"),
         ("zerocal_goal_abs", "direct"),
-        ("zerocal_rel_world_seq", "direct"),
-        ("zerocal_goal_world_seq", "direct"),
-        ("zerocal_goal_hand_seq", "direct"),
         # n-0 relative: stored is ABSOLUTE, policy output is anchor-relative
-        ("ee_rel", "rel_hand"),
-        ("zerocal_rel_hand", "rel_hand"),
         ("zerocal_goal_hand_n0", "rel_hand"),
-        ("zerocal_rel_world", "rel_world"),
         ("zerocal_goal_world_n0", "rel_world"),
     ],
 )

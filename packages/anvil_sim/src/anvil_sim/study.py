@@ -77,9 +77,7 @@ class ReplayAdapter:
 class Study:
     """A registered study plugin. See the module docstring for the split."""
 
-    name: str
-    # Legal dataset groups and the group used as the GT-replay baseline.
-    dataset_groups: frozenset[str]
+    # The group used as the GT-replay baseline.
     baseline_group: str
     # Every eval action type this study can evaluate/replay.
     eval_action_types: tuple[str, ...]
@@ -97,6 +95,12 @@ class Study:
     dataset_validate_skip: Callable[[BenchSpec], bool]
     gt_replay: GtReplayConfig
     replay_adapter: ReplayAdapter
+    # Fill any study-specific fields a spec left unset (mutates spec in
+    # place), called by load_spec after study resolution but before
+    # validate() — e.g. libero_ee derives env_suite/env_task_id from
+    # task_index and eval.control_mode from eval.action_type, so a spec
+    # need not repeat them explicitly.
+    fill_defaults: Callable[[BenchSpec], None]
 
 
 # One-line registry: study name -> zero-arg factory. Factories import their

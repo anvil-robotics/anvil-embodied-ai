@@ -7,31 +7,38 @@ gated pipeline where every cheap check runs BEFORE any expensive training —
 the codified lesson of experiments 1-8, where eval-path bugs invisible to
 unit tests and training loss burned multiple full training sweeps.
 
-Example::
+Example (minimal — most fields are derivable and can be omitted, see below)::
 
     # packages/anvil_sim/src/anvil_sim/studies/libero_ee/configs/task10_goal_abs_act.yaml
     name: task10-goal-abs-act
     task_index: 10
-    env_suite: libero_goal
-    env_task_id: 8
     dataset_group: goalabs
     train:
-      trainer: anvil-trainer
       action_type: ee_abs
       policy_type: act
-      steps: 50000
-      batch_size: 16
     eval:
       action_type: zerocal_goal_abs
-      control_mode: relative
       n_episodes: 10
-    gates:
-      gt_replay_margin: 15.0
 
-Validation encodes the treatment-legality lessons directly (e.g. the
-``deliver``/``control_mode`` pairing that Experiment 7 got wrong is checked
-against the eval action-type registry at load time, not discovered after a
-training sweep).
+Several fields are derived when omitted, so a spec need only state what makes
+it distinct:
+
+- ``train.trainer``: ``"anvil-trainer"`` if ``train.action_type`` is set,
+  else ``"lerobot-train"`` (:class:`TrainSpec.__post_init__`).
+- ``train.steps``: 50000 for ``policy_type: act``, 30000 for ``diffusion``
+  (:class:`TrainSpec.__post_init__`).
+- ``train.batch_size``: 16 (the :class:`TrainSpec` field default).
+- ``env_suite`` / ``env_task_id``: filled from ``task_index`` by the study's
+  ``Study.fill_defaults`` (e.g. libero_ee's task_index -> LIBERO's own
+  benchmark task_id mapping).
+- ``eval.control_mode``: filled from ``eval.action_type`` by the same hook
+  (the deliver<->control_mode mapping that Experiment 7 got wrong).
+- ``gates.gt_replay_margin``: 15.0 (the :class:`GateSpec` field default).
+
+Explicit values always override the derived ones. Validation encodes the
+treatment-legality lessons directly (e.g. the ``deliver``/``control_mode``
+pairing above is checked against the eval action-type registry at load
+time, not discovered after a training sweep).
 """
 
 from __future__ import annotations
@@ -67,23 +74,37 @@ def topic_root(study_name: str) -> Path:
 
 @dataclass
 class TrainSpec:
-    trainer: str = "anvil-trainer"
+    # Both left None by default and derived in __post_init__ — the presence
+    # of action_type determines the trainer, and policy_type determines the
+    # step count, so a spec need not repeat either explicitly:
+    #   trainer:  "anvil-trainer" if action_type else "lerobot-train"
+    #   steps:    50000 (act) / 30000 (diffusion)
+    trainer: str | None = None
     action_type: str | None = None  # anvil-trainer --action-type; None for lerobot-train
     policy_type: str = "act"
-    steps: int = 50000
+    steps: int | None = None
     batch_size: int = 16
-    # Reuse an existing checkpoint instead of training (e.g. world-seq reuses
-    # the ee_delta checkpoint). Path to .../pretrained_model.
+    # Reuse an existing checkpoint instead of training. Path to
+    # .../pretrained_model.
     reuse_checkpoint: str | None = None
     # Override the output dir (historical specs point at existing artifacts);
-    # default: model_zoo/bench/{spec.name}
+    # default: model_zoo/research/<study>/{spec.name}
     output_dir: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.trainer is None:
+            self.trainer = "anvil-trainer" if self.action_type else "lerobot-train"
+        if self.steps is None:
+            self.steps = 50000 if self.policy_type == "act" else 30000
 
 
 @dataclass
 class EvalSpec:
     action_type: str = "ee_abs"
-    control_mode: str = "relative"
+    # Left None by default and derived by the study's Study.fill_defaults
+    # (from the deliver<->control_mode mapping load_spec already validates
+    # explicit values against) — see study.py's _legality/_fill_defaults.
+    control_mode: str | None = None
     n_episodes: int = 10
 
 
@@ -100,11 +121,15 @@ class GateSpec:
 class BenchSpec:
     name: str
     task_index: int
-    env_suite: str
-    env_task_id: int
     dataset_group: str
     train: TrainSpec
     eval: EvalSpec
+    # Left None by default and derived by the study's Study.fill_defaults
+    # (e.g. libero_ee fills env_suite="libero_goal" and env_task_id from
+    # task_index) — see study.py's _fill_defaults. Guaranteed non-None by
+    # the time validate() runs.
+    env_suite: str | None = None
+    env_task_id: int | None = None
     gates: GateSpec = field(default_factory=GateSpec)
     source_path: str | None = None  # where the YAML was loaded from
     # Which registered study this spec belongs to (YAML key ``study``). Selects
@@ -199,8 +224,8 @@ def load_spec(path: Path | str) -> BenchSpec:
     spec = BenchSpec(
         name=raw["name"],
         task_index=raw["task_index"],
-        env_suite=raw["env_suite"],
-        env_task_id=raw["env_task_id"],
+        env_suite=raw.get("env_suite"),
+        env_task_id=raw.get("env_task_id"),
         dataset_group=raw["dataset_group"],
         train=_take(raw.get("train", {}), TrainSpec, "train"),
         eval=_take(raw.get("eval", {}), EvalSpec, "eval"),
@@ -208,5 +233,6 @@ def load_spec(path: Path | str) -> BenchSpec:
         source_path=str(path),
         study_name=raw.get("study", "libero_ee"),
     )
+    spec.study.fill_defaults(spec)
     spec.validate()
     return spec

@@ -1,24 +1,10 @@
-# =============================================================================
-# LIBERO validation-harness spec — native-family Diffusion coverage (E-diff).
-# Same native family (8-dim obs, lerobot-train raw) and same eval decode as
-# task10_native_abs_act.yaml, only policy_type flipped to diffusion.
-# Purpose: complete the ACT+Diffusion native-family matrix to decide the
-# EE relative-position recipe. This condition = absolute target (expect diffusion-robust, cf goal-abs).
-# =============================================================================
+# native-family control factor #2 (abs/rel flip vs native): absolute goal, axis-angle, Diffusion.
 
 name: task10-native-abs-diffusion
 task_index: 10
-env_suite: libero_goal
-env_task_id: 8
 dataset_group: native_abs
 train:
-  trainer: lerobot-train
   policy_type: diffusion
-  steps: 30000
-  batch_size: 16
 eval:
   action_type: native_abs
-  control_mode: relative
   n_episodes: 50
-gates:
-  gt_replay_margin: 15.0

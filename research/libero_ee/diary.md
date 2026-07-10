@@ -2,7 +2,9 @@
 
 _Companion to [`report.md`](report.md) (conclusions) — the chronological log, including the
 wrong turns. `§` references point to `report.md`; `experiments/<name>/` refers to this topic's
-`experiments/` dir (see [`README.md`](README.md))._
+`experiments/` dir (see [`README.md`](README.md)). Entries before the 2026-07-08 "n=50 confidence
+sweep" measured at low episode counts (n≤10, not stated per-entry below); the final n=50 numbers
+are in `report.md`._
 
 ---
 

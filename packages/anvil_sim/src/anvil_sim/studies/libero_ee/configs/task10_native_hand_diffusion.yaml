@@ -1,24 +1,10 @@
-# =============================================================================
-# LIBERO validation-harness spec — native-family Diffusion coverage (E-diff).
-# Same native family (8-dim obs, lerobot-train raw) and same eval decode as
-# task10_native_hand_act.yaml, only policy_type flipped to diffusion.
-# Purpose: complete the ACT+Diffusion native-family matrix to decide the
-# EE relative-position recipe. This condition = hand frame (frame x architecture).
-# =============================================================================
+# native-family control factor #4 (frame flip vs native): hand/body frame, Diffusion.
 
 name: task10-native-hand-diffusion
 task_index: 10
-env_suite: libero_goal
-env_task_id: 8
 dataset_group: native_hand
 train:
-  trainer: lerobot-train
   policy_type: diffusion
-  steps: 30000
-  batch_size: 16
 eval:
   action_type: native_hand
-  control_mode: relative
   n_episodes: 50
-gates:
-  gt_replay_margin: 15.0

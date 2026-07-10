@@ -68,47 +68,13 @@ def _validate_goalabs(spec: BenchSpec) -> dict:
     return {"identity": "goalabs->native command", "frames": n, "max_err": max_err}
 
 
-def _validate_goalabs_aa(spec: BenchSpec) -> dict:
-    """goalabs_aa family identity (axis-angle counterpart of _validate_goalabs):
-    decoding the stored 7-dim axis-angle goal back to rot6d and recovering a
-    native-delta against the SAME state must reproduce the native dataset's
-    own command to float precision — the round-trip identity for native_abs /
-    native_n0. If this fails, the axis-angle goal construction / decode is
-    wrong and no training will help."""
-    from anvil_sim.studies.libero_ee.libero_processor import (
-        axis_angle_action_to_rot6d,
-        recovered_delta_native_action,
-    )
-
-    goal = _load_local_episode(spec.dataset_root)
-    native = _load_local_episode(_native_dataset_root(spec))
-    n = min(len(goal["action"]), len(native["action"]))
-    max_err = 0.0
-    for t in range(n):
-        act7, state8 = goal["action"][t], goal["state"][t]
-        rot6d10 = axis_angle_action_to_rot6d(act7)
-        recovered = recovered_delta_native_action(
-            reconstructed_pos=rot6d10[:3],
-            reconstructed_rot6d=rot6d10[3:9],
-            reconstructed_gripper=float(rot6d10[9]),
-            current_state=state8.astype(np.float32),
-            current_gripper=float(state8[7]),
-            gripper_mode="native_cmd",
-        )
-        expected = np.clip(native["action"][t], -1.0, 1.0)
-        max_err = max(max_err, float(np.abs(recovered - expected).max()))
-    if max_err > _MATH_TOLERANCE:
-        raise RuntimeError(f"goalabs_aa identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
-    return {"identity": "axis-angle goalabs->native command", "frames": n, "max_err": max_err}
-
-
 def _validate_native_abs(spec: BenchSpec) -> dict:
     """native_abs identity (NATIVE-family axis-angle absolute goal): decoding
     the stored 7-dim axis-angle goal back to rot6d and recovering a native
     delta against the frame's OWN state (converted native->quat, since the obs
     column is now native 8-dim axis-angle) must reproduce the native dataset's
     own command to float precision. Same round-trip guarantee as
-    _validate_goalabs_aa, but for the native-family observation."""
+    _validate_goalabs, but for the native-family observation."""
     from anvil_sim.studies.libero_ee.libero_convert import raw_state_to_anvil
     from anvil_sim.studies.libero_ee.libero_processor import (
         axis_angle_action_to_rot6d,
@@ -175,54 +141,6 @@ def _validate_native_n0(spec: BenchSpec) -> dict:
     return {"identity": "native_n0 relativized goal -> native command", "frames": n, "max_err": max_err}
 
 
-def _validate_seq(spec: BenchSpec) -> dict:
-    """delta/delta_hand family identity: accumulating the stored per-step
-    deltas from the episode's first state must reproduce the achieved state
-    trajectory (the check that exposed Experiment 7's v2 anchor bug)."""
-    from anvil_shared.rotation import matrix_to_quat, quat_to_matrix, rot6d_to_matrix
-
-    data = _load_local_episode(spec.dataset_root)
-    hand_frame = spec.dataset_group == "delta_hand"
-    running = data["state"][0].copy()
-    max_err = 0.0
-    n = len(data["action"]) - 1
-    for t in range(n):
-        act10 = data["action"][t]
-        R_running = quat_to_matrix(running[3:7])
-        R_delta = rot6d_to_matrix(act10[3:9])
-        if hand_frame:
-            new_pos = running[:3] + R_running @ act10[:3]
-            new_r = R_running @ R_delta
-        else:
-            new_pos = running[:3] + act10[:3]
-            new_r = R_delta @ R_running
-        running = np.concatenate([new_pos, matrix_to_quat(new_r), [act10[9]]])
-        max_err = max(max_err, float(np.abs(running[:3] - data["state"][t + 1][:3]).max()))
-    if max_err > _MATH_TOLERANCE:
-        raise RuntimeError(f"seq accumulation failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
-    return {"identity": "seq accumulation -> state trajectory", "frames": n, "max_err": max_err}
-
-
-def _validate_act_from_obs(spec: BenchSpec) -> dict:
-    """abs/rel family definitional check: action[t] encodes state[t+1]
-    (act-from-obs); catches double-relativization-style dataset corruption
-    (real bug #2) at the data level."""
-    from anvil_shared.rotation import matrix_to_rot6d, quat_to_matrix
-
-    data = _load_local_episode(spec.dataset_root)
-    n = len(data["action"]) - 1
-    max_err = 0.0
-    for t in range(n):
-        nxt = data["state"][t + 1]
-        expected = np.concatenate(
-            [nxt[:3], matrix_to_rot6d(quat_to_matrix(nxt[3:7])), [nxt[7]]]
-        )
-        max_err = max(max_err, float(np.abs(data["action"][t] - expected).max()))
-    if max_err > _MATH_TOLERANCE:
-        raise RuntimeError(f"act-from-obs identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
-    return {"identity": "action[t] == encode(state[t+1])", "frames": n, "max_err": max_err}
-
-
 def _validate_native_hand(spec: BenchSpec) -> dict:
     """native_hand identity (world->hand->world round-trip, at the data
     level): rotating each stored hand-frame command back to the world frame
@@ -248,12 +166,7 @@ def _validate_native_hand(spec: BenchSpec) -> dict:
 
 MATH_VALIDATORS = {
     "goalabs": _validate_goalabs,
-    "goalabs_aa": _validate_goalabs_aa,
     "native_abs": _validate_native_abs,
     "native_n0": _validate_native_n0,
     "native_hand": _validate_native_hand,
-    "delta": _validate_seq,
-    "delta_hand": _validate_seq,
-    "abs": _validate_act_from_obs,
-    "rel": _validate_act_from_obs,  # rel stores the same absolute column (relativized at load time)
 }

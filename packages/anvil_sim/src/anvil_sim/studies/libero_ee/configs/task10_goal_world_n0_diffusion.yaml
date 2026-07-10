@@ -1,23 +1,11 @@
-# =============================================================================
-# LIBERO validation-harness spec — Experiment E2 (secondary): goal target,
-# world-frame n-0 relativized, DIFFUSION. Cross-architecture check of the
-# anchor-relative n-0 representation (ee_rel_world + diffusion is unproven;
-# a training/eval failure here is itself a finding).
-# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_goal_world_n0_diffusion.yaml
-# =============================================================================
+# goalabs family: world-frame chunk-anchor (n-0) relative goal, Diffusion — collapses to 16 (see report §3.6/§3.7, the Diffusion mode-collapse finding).
 
 name: task10-goal-world-n0-diffusion
 task_index: 10
-env_suite: libero_goal
-env_task_id: 8
 dataset_group: goalabs
 train:
-  trainer: anvil-trainer
   action_type: ee_rel_world
   policy_type: diffusion
-  steps: 30000
-  batch_size: 16
 eval:
   action_type: zerocal_goal_world_n0
-  control_mode: relative
   n_episodes: 50

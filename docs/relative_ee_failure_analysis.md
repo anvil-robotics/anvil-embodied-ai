@@ -5,6 +5,14 @@
 > **作者**：Patrick Hsu（Claude Code 協助分析）  
 > **症狀**：`ee_rel` checkpoint 推論出現「隨機、亂飛」動作，完全未嘗試接近物體
 
+> ⚠️ **根因結論已被後續實證研究取代**（見
+> [`research/libero_ee/report.md`](../research/libero_ee/report.md) §3.7「Mechanism」與 §8「Recipe」）。
+> 本文寫於實驗開始前（2026-06-18），下方的 H1（obs 絕對座標 + MEAN_STD 正規化造成 OOD，Diffusion
+> 在 OOD 條件下去噪出垃圾動作）**未獲後續 LIBERO 實證支持**：直接比對已訓練模型的交付指令分布顯示，
+> 崩潰的真正機制是 **Diffusion mode collapse**（chunk-anchor／body-frame 交付的指令幅度縮到示範分布的
+> ~1/3、變異縮到 ~1/2），而 target 幅度／OOD 本身經檢驗**已被排除**。本文保留的價值是 §1–§4 UMI／
+> Diffusion Policy 基線／`ee_rel` 三方程式碼層級比對，供理解問題脈絡；**根因與修法請以 report.md 為準**。
+
 ---
 
 ## 摘要

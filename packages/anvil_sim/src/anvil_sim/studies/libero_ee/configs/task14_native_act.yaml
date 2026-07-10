@@ -1,24 +1,10 @@
-# =============================================================================
-# LIBERO validation-harness spec — gold reference on the MEDIUM-rotation task
-# Experiment E3 third robustness point: task_index=14 "put the wine bottle on
-# top of the cabinet" (libero_goal task_id=2) has rot_rms 0.0125 rad/step —
-# midway between rotation-light task 10 (0.0082) and rotation-heavy task 11
-# (0.0258), and uses the SAME object (wine bottle) as task 11 for tighter
-# object-family control. Gives goal-abs-vs-native task-dependence a 3rd point.
-# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task14_native_act.yaml
-# =============================================================================
+# native-family reference on task14 (medium rotation) — report §7 robustness.
 
 name: task14-native-act
 task_index: 14
-env_suite: libero_goal
-env_task_id: 2
 dataset_group: native
 train:
-  trainer: lerobot-train
   policy_type: act
-  steps: 50000
-  batch_size: 16
 eval:
   action_type: native
-  control_mode: relative
   n_episodes: 50

@@ -87,8 +87,7 @@ class GtActionProvider:
     mode: str  # "direct" | "rel_hand" | "rel_world"
     obs_step: Any | None = None  # study obs step (None for "direct" without anchor needs)
     n_action_steps: int = 1
-    # "rot6d" (default) or "axis_angle": for the goalabs_aa family
-    # (native_abs / native_n0) the stored action is 7-dim [pos, aa, gripper];
+    # For native_abs / native_n0 the stored action is 7-dim [pos, aa, gripper];
     # the n-0 forward relativization runs on the shared rot6d machinery, so
     # decode -> forward -> re-encode keeps the provided "policy output" in the
     # same axis-angle layout the action step then decodes. The codec itself
@@ -96,7 +95,6 @@ class GtActionProvider:
     # ``encode`` maps the stored action -> 10-dim rot6d, ``decode`` maps the
     # relativized rot6d back to the stored layout. Both ``None`` == rot6d
     # identity (the default).
-    action_encoding: str = "rot6d"
     encode: Callable[[np.ndarray], np.ndarray] | None = None
     decode: Callable[[np.ndarray], np.ndarray] | None = None
     _call_count: int = field(default=0, init=False, repr=False)
@@ -183,7 +181,6 @@ def replay(
                 mode=provider_mode,
                 obs_step=obs_step,
                 n_action_steps=n_action_steps,
-                action_encoding=encoding,
                 encode=adapter.encode_to_rot6d if encoding == "axis_angle" else None,
                 decode=adapter.decode_from_rot6d if encoding == "axis_angle" else None,
             )

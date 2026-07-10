@@ -68,7 +68,7 @@ discriminating signal is the world-n0 collapse).
 
 _The original per-factor analysis, ledger, bug catalog, literature check and production backlog.
 Experiments 7 (§4) and the literature note (§5) are kept as originally written for the reasoning
-trail — read them with Part 1 and [`diary.md`](diary.md), plus the bug corrections above._
+trail — read them with Part 1 and [`diary.md`](diary.md), plus the bug corrections in §2/§6 below._
 
 ## 1. What this effort is
 
@@ -276,29 +276,11 @@ anvil_sim.studies.libero_ee.analysis.mechanism_analysis`.
 target's magnitude.
 
 ### Bottom line
-- **Frame dominates: world ≫ hand (−24).** Keep world-frame actions; body-frame is harder to learn
-  (contra UMI intuition).
-- **Encoding secondary: axis-angle > rot6d (−12) for ACT, neutral for Diffusion.**
-- **Relative > absolute (−8):** the native delta command beats the absolute-goal formulation once
-  observation/encoding are held fixed — the sign is opposite to the confounded comparison.
-- **Anchor ≈ no effect (−2), and not independently isolable** in the command family (true n-0 needs
-  chunk-aware training).
-- **Across tasks & architectures, `native` (world-frame delta command, relative delivery) is the
-  most reliable** — which is what production already uses. `goal-abs` is a task-specific,
-  obs-dependent option, not a blanket upgrade.
-- **Architecture (§3.6): Diffusion tolerates the representation choice** (native family 98–100 on
-  all flips); the ONE Diffusion-killer is **chunk-anchor (n-0) re-encoding** (world-n0 → 16). This
-  is the crux of the production recipe (§8): true per-frame relative works on both ACT and
-  Diffusion; chunk-anchored relative does not.
-- **Generalization (§3.6, G1): the recipe is not task10-only** — per-frame relative holds on the
-  rotation-heavy task11 on Diffusion (`native_n0` 98 ≈ `native` 96).
-- **Mechanism (§3.7, G2): the collapse is Diffusion mode collapse** — the chunk-anchor policy's
-  delivered commands shrink to ~⅓ magnitude / ~½ spread of the demos (attenuated marginal), while
-  target *magnitude* is NOT the cause (a checked-and-refuted dead end). ACT survives by regressing
-  the conditional mean.
-- **Standing caveat:** task10 primary (task11/14 for robustness); task10 is near-ceiling for
-  Diffusion so its Diffusion cells don't discriminate — the discriminating Diffusion signal is the
-  world-n0 collapse vs the native family.
+
+See Part 1's "Solid conclusions" (points 2–6, 8) and the closing "Caveats" line — the per-factor
+findings (frame/encoding/relative/anchor), the anchor/architecture story, the generalization (G1)
+and mechanism (G2) pins, and the standing caveats are all stated there in full with §-pointers;
+§3.1–3.7 above (and §3.6/§3.7 in particular) is the detailed evidence behind them.
 
 ## 4. Experiment 7 (original text): "negative result" — SUPERSEDED
 

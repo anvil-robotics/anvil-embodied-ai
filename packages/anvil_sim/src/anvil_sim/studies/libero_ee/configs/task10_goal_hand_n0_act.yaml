@@ -1,22 +1,11 @@
-# =============================================================================
-# LIBERO validation-harness spec — Experiments 7-8: goal target, hand-frame n-0 relativized, ACT (30% after bug #4 fix)
-# Historical experiment re-expressed as a bench spec (see
-# packages/anvil_sim/README.md for the experiment's full story).
-# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_goal_hand_n0_act.yaml
-# =============================================================================
+# goalabs family: hand-frame chunk-anchor (n-0) relative goal.
 
 name: task10-goal-hand-n0-act
 task_index: 10
-env_suite: libero_goal
-env_task_id: 8
 dataset_group: goalabs
 train:
-  trainer: anvil-trainer
   action_type: ee_rel
   policy_type: act
-  steps: 50000
-  batch_size: 16
 eval:
   action_type: zerocal_goal_hand_n0
-  control_mode: relative
   n_episodes: 50

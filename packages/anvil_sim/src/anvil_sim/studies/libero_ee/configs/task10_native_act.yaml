@@ -1,21 +1,10 @@
-# =============================================================================
-# LIBERO validation-harness spec — Experiment 1 gold reference: native delta command, ACT (80%)
-# Historical experiment re-expressed as a bench spec (see
-# packages/anvil_sim/README.md for the experiment's full story).
-# Run: uv run --package anvil-sim anvil-sim-bench run configs/libero_bench/task10_native_act.yaml
-# =============================================================================
+# native-family reference: raw command, world frame, relative delivery, ACT.
 
 name: task10-native-act
 task_index: 10
-env_suite: libero_goal
-env_task_id: 8
 dataset_group: native
 train:
-  trainer: lerobot-train
   policy_type: act
-  steps: 50000
-  batch_size: 16
 eval:
   action_type: native
-  control_mode: relative
   n_episodes: 50
