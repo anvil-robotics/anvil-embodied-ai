@@ -9,6 +9,123 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from ..config.schema import DEFAULT_DATA_CONFIG, DataConfig
 
 
+def _patch_resume_video_continuation(dataset: LeRobotDataset) -> None:
+    """
+    Work around a chunk-continuation bug in lerobot 0.5.1: after
+    LeRobotDataset.resume(), LeRobotDatasetMetadata.latest_episode is None
+    (never restored from existing metadata). Two independent pieces of
+    lerobot's own code branch on this same None sentinel, but need OPPOSITE
+    behavior on resume:
+
+    - dataset_metadata.py's _save_episode_metadata() correctly and
+      intentionally treats `latest_episode is None` + existing episodes as
+      "we are resuming — open a new parquet metadata file" (to avoid
+      overwriting the existing one). This is correct and must not be touched.
+    - dataset_writer.py's _save_episode_video() uses the SAME sentinel to
+      decide whether to start a brand-new video chunk file. On resume this
+      needlessly opens a new video file for the very first post-resume
+      episode, even when the existing file is nowhere near the size cap —
+      exactly the same continuation behavior that happens for every OTHER
+      episode once latest_episode is populated for real.
+
+    Fix: for the first save_episode() call after resume only, synthesize a
+    `latest_episode`-shaped dict (sourced from `meta.episodes[-1]`, one
+    entry per camera, added lazily as each camera's video is processed) so
+    the video-continuation check succeeds and appends to the existing file.
+    Immediately before the metadata write for that same episode runs, reset
+    `latest_episode` back to None so the parquet-file-continuation logic is
+    completely unaffected and still correctly opens a new metadata file.
+    After that first episode, `latest_episode` is populated for real by
+    lerobot's own code and both patches become permanent no-ops.
+
+    No-ops entirely for a fresh (non-resumed) dataset, where `meta.episodes`
+    is empty/None and this bug cannot occur.
+
+    WARNING — depends on private lerobot internals, not a stable public API:
+    This function monkeypatches two PRIVATE, underscore-prefixed methods —
+    `dataset.writer._save_episode_video` and `dataset.meta.save_episode`'s
+    internal branching on `meta.latest_episode` — that are internal
+    implementation details of the third-party `lerobot` package, not a
+    contract lerobot guarantees to keep stable across versions. This repo
+    currently pins `lerobot~=0.5.0` (see
+    packages/mcap_converter/pyproject.toml). If that pin is ever bumped
+    (including a patch/minor bump within the `~=0.5.0` range, or a move to
+    0.6.x+), this function MUST be re-verified against the new version's
+    `dataset_writer.py` (`_save_episode_video`) and `dataset_metadata.py`
+    (`save_episode` / `latest_episode` handling) source, since lerobot could
+    silently rename or restructure these internals without any warning from
+    a normal `uv sync` — the failure mode would only surface later, either
+    as a silent behavioral regression (extra video chunk files reappear) or
+    a `KeyError`/`AttributeError` at conversion time.
+
+    `tests/unit/mcap_converter/test_resume_video_continuation.py` is the
+    regression test that would catch a real behavioral break here, and it
+    catches more than it might seem at first:
+    - If lerobot renames or removes `_save_episode_video` entirely, the line
+      `original_save_episode_video = dataset.writer._save_episode_video`
+      above would raise `AttributeError` immediately when this function
+      runs — a loud, immediate failure, not a silent one. The regression
+      test would fail too (as would every `--resume` conversion), so this
+      class of drift is well covered.
+    - The narrower, genuinely NOT-fully-covered case is a subtler internal
+      change: `_save_episode_video`/`save_episode` keep their names and
+      signatures, but lerobot alters what `latest_episode` needs to contain
+      or how it's consumed internally (e.g. adds/renames a required key
+      beyond `chunk_index`/`file_index`/`to_timestamp`, or changes the
+      None-sentinel semantics this patch relies on). That WOULD still be
+      caught by this regression test (it asserts resumed vs. single-pass
+      video file counts match, so wrong/missing keys or broken continuation
+      logic would surface as a count mismatch or an exception) — but only
+      when the test suite is actually run against the new lerobot version.
+      Nothing in `uv sync` or normal CI dependency resolution would trigger
+      that test run automatically on a version bump, so the real risk is
+      process (bumping the pin without re-running/re-verifying this
+      specific test against it), not a fundamental blind spot in the test
+      itself.
+    """
+    meta = dataset.meta
+    if meta.episodes is None or len(meta.episodes) == 0:
+        return  # fresh dataset — nothing to patch
+
+    state = {"needs_reset": False}
+
+    original_save_episode_video = dataset.writer._save_episode_video
+
+    def patched_save_episode_video(video_key, episode_index, temp_path=None):
+        chunk_key = f"videos/{video_key}/chunk_index"
+        file_key = f"videos/{video_key}/file_index"
+        # NOTE: to_timestamp is also required here — the continuation branch
+        # of lerobot's _save_episode_video() reads
+        # latest_episode[f"videos/{video_key}/to_timestamp"][0] to compute
+        # the running duration offset for the next episode. This key was
+        # missing from the originally specified fix and was discovered while
+        # testing (KeyError without it); it belongs to the same
+        # meta.episodes[-1] row as chunk_index/file_index, so it is added
+        # here using the same lazy, per-camera, list-wrapped pattern.
+        to_timestamp_key = f"videos/{video_key}/to_timestamp"
+        if meta.latest_episode is None or chunk_key not in meta.latest_episode:
+            last_episode = meta.episodes[-1]
+            if meta.latest_episode is None:
+                meta.latest_episode = {}
+                state["needs_reset"] = True
+            meta.latest_episode[chunk_key] = [last_episode[chunk_key]]
+            meta.latest_episode[file_key] = [last_episode[file_key]]
+            meta.latest_episode[to_timestamp_key] = [last_episode[to_timestamp_key]]
+        return original_save_episode_video(video_key, episode_index, temp_path=temp_path)
+
+    dataset.writer._save_episode_video = patched_save_episode_video
+
+    original_meta_save_episode = meta.save_episode
+
+    def patched_meta_save_episode(*args, **kwargs):
+        if state["needs_reset"]:
+            meta.latest_episode = None
+            state["needs_reset"] = False
+        return original_meta_save_episode(*args, **kwargs)
+
+    meta.save_episode = patched_meta_save_episode
+
+
 class LeRobotWriter:
     """
     Write data to LeRobot v3.0 format dataset
@@ -299,11 +416,13 @@ class LeRobotWriter:
         Returns:
             LeRobotDataset instance ready to accept add_frame / save_episode calls
         """
-        return LeRobotDataset.resume(
+        dataset = LeRobotDataset.resume(
             repo_id=self.repo_id,
             root=str(self.output_dir),
             vcodec=self.vcodec,
         )
+        _patch_resume_video_continuation(dataset)
+        return dataset
 
     def __repr__(self) -> str:
         return f"LeRobotWriter(output_dir='{self.output_dir}', repo_id='{self.repo_id}')"
