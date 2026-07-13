@@ -31,15 +31,6 @@ Key options:
 | `--task` | Task name for the dataset | `manipulation` |
 | `--push-to-hub` | Upload to HuggingFace Hub after conversion | |
 
-### mcap-inspect
-
-Analyze MCAP file structure and message types.
-
-```bash
-mcap-inspect /path/to/file.mcap
-mcap-inspect /path/to/file.mcap --topic /joint_states --format json
-```
-
 ### mcap-to-video
 
 Extract image topics from MCAP files directly to MP4 videos.
@@ -49,12 +40,12 @@ mcap-to-video -i recording.mcap -o ./videos
 mcap-to-video -i recording.mcap --scan-only
 ```
 
-### dataset-validate
+### dataset-valid
 
 Validate a converted LeRobot dataset by loading and reading frames.
 
 ```bash
-dataset-validate --root /path/to/dataset
+dataset-valid --root /path/to/dataset
 ```
 
 ### mcap-upload
@@ -131,8 +122,7 @@ mcap_converter/
 │   └── writer.py      # LeRobot dataset writing
 ├── cli/
 │   ├── convert.py     # mcap-convert
-│   ├── inspect.py     # mcap-inspect
-│   ├── validate.py    # dataset-validate
+│   ├── validate.py    # dataset-valid
 │   ├── upload.py      # mcap-upload
 │   └── video.py       # mcap-to-video
 ├── config/

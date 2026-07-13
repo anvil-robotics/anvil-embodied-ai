@@ -64,6 +64,24 @@ OUTPUTS = SMOKE_ROOT / "outputs"
 MCAP_ROOT = FIXTURES / "test-session"
 
 
+def _mcap_input_copy() -> Path:
+    """A persistent, gitignored copy of the committed test-session fixture
+    under outputs/, reused (not recreated) across scenarios and reruns.
+
+    mcap-valid's default report now writes inside its `-i` input's own
+    resolved location, not cwd — so Step 1 pointing `-i` at MCAP_ROOT
+    directly would write mcap_valid_reports/ into the tracked fixture tree
+    on every smoke test run. All scenarios/steps use this copy instead of
+    MCAP_ROOT so mcap-valid and mcap-convert see the same episode paths
+    (needed for --quality-report path matching in resolve_quality_skip_paths).
+    """
+    dest = OUTPUTS / "mcap_input" / MCAP_ROOT.name
+    if not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(MCAP_ROOT, dest)
+    return dest
+
+
 # ── Scenario definition ──────────────────────────────────────────────────────
 
 @dataclass
@@ -91,12 +109,13 @@ class Scenario:
 # under outputs/ to keep artifacts separate.
 # Delta scenarios share the SAME dataset as their base (afo/cmd) — step 1 is a no-op.
 _MCAP_NAME = MCAP_ROOT.name  # "test-session"
+_MCAP_INPUT = _mcap_input_copy()  # gitignored copy of MCAP_ROOT — see _mcap_input_copy docstring
 
 SCENARIOS: dict[str, Scenario] = {
     "afo": Scenario(
         key="afo",
         label="AFO absolute",
-        mcap_root=MCAP_ROOT,
+        mcap_root=_MCAP_INPUT,
         dataset_dir=OUTPUTS / "datasets" / "afo" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "afo" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "afo" / "raw",
@@ -106,7 +125,7 @@ SCENARIOS: dict[str, Scenario] = {
     "cmd": Scenario(
         key="cmd",
         label="CMD absolute",
-        mcap_root=MCAP_ROOT,
+        mcap_root=_MCAP_INPUT,
         dataset_dir=OUTPUTS / "datasets" / "cmd" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "cmd" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "cmd" / "raw",
@@ -116,7 +135,7 @@ SCENARIOS: dict[str, Scenario] = {
     "cmd_delta_obs_t": Scenario(
         key="cmd_delta_obs_t",
         label="CMD delta_obs_t",
-        mcap_root=MCAP_ROOT,
+        mcap_root=_MCAP_INPUT,
         dataset_dir=OUTPUTS / "datasets" / "cmd" / _MCAP_NAME,  # shared with cmd
         train_out=OUTPUTS / "model_zoo" / "cmd_delta_obs_t" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "cmd_delta_obs_t" / "raw",
@@ -127,7 +146,7 @@ SCENARIOS: dict[str, Scenario] = {
     "cmd_delta_sequential": Scenario(
         key="cmd_delta_sequential",
         label="CMD delta_sequential",
-        mcap_root=MCAP_ROOT,
+        mcap_root=_MCAP_INPUT,
         dataset_dir=OUTPUTS / "datasets" / "cmd" / _MCAP_NAME,  # shared with cmd
         train_out=OUTPUTS / "model_zoo" / "cmd_delta_sequential" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "cmd_delta_sequential" / "raw",
@@ -187,6 +206,22 @@ def run_step_convert(sc: Scenario, force: bool) -> StepResult:
     if expected.exists() and not force:
         return StepResult(ok=True, duration_s=0.0, artifact=sc.dataset_dir, notes="cached")
 
+    # mcap-convert now requires a mcap-valid quality report to exist first.
+    # All scenarios share the same mcap_root, so one report is generated once
+    # and reused across scenarios/reruns.
+    report_path = OUTPUTS / "mcap_valid_reports" / f"{sc.mcap_root.name}.json"
+    if force or not report_path.exists():
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        valid_rc = _run([
+            "uv", "run", "mcap-valid",
+            "-i", str(sc.mcap_root),
+            "--format", "json",
+            "--output", str(report_path),
+        ])
+        if valid_rc != 0:
+            return StepResult(ok=False, duration_s=0.0, artifact=report_path,
+                              notes=f"mcap-valid exit {valid_rc}")
+
     t0 = time.monotonic()
     rc = _run([
         "uv", "run", "mcap-convert",
@@ -194,6 +229,7 @@ def run_step_convert(sc: Scenario, force: bool) -> StepResult:
         "-o", str(sc.dataset_dir.parent),
         "--config", str(sc.convert_config),
         "--robot-type", "anvil_openarm",
+        "--quality-report", str(report_path),
     ])
     dt = time.monotonic() - t0
 

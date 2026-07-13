@@ -47,11 +47,11 @@ dev = [
 
 [project.scripts]
 mcap-convert = "mcap_converter.cli.convert:main"
-mcap-inspect = "mcap_converter.cli.inspect:main"
-dataset-validate = "mcap_converter.cli.validate:main"
+dataset-valid = "mcap_converter.cli.validate:main"
 hf-upload = "mcap_converter.cli.upload:main"
 mcap-to-video = "mcap_converter.cli.video:main"
 merge-datasets = "mcap_converter.cli.merge_datasets:main"
+mcap-valid = "mcap_converter.cli.mcap_valid:main"
 
 [project.urls]
 Homepage = "https://github.com/anvil-robotics/anvil-embodied-ai"
