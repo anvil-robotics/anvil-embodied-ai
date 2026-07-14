@@ -1,0 +1,13 @@
+# afo_relative: SAME afo_abs_h1 dataset/target (the real observed future EE
+# pose, not a recorded/reconstructed command), same relative_converted
+# delivery as native_ctrlgoal_relconv. Isolates commanded-vs-achieved as a
+# variable independent of delivery-mode bugs. See research/libero_ee/stage1-closeout.md.
+
+name: task10-afo-relative-act
+task_index: 10
+dataset_group: afo_abs_h1
+train:
+  policy_type: act
+eval:
+  action_type: afo_relative
+  n_episodes: 50

@@ -191,6 +191,68 @@ def native_delta_to_goal(anvil_state8: np.ndarray, native_delta7: np.ndarray) ->
     return np.concatenate([goal_pos, matrix_to_quat(R_goal), [goal_gripper]]).astype(np.float32)
 
 
+OSC_OUTPUT_MAX_POS = 0.05
+OSC_OUTPUT_MAX_ROT = 0.5
+"""robosuite OSC_POSE's own ``output_max`` for position (metres) / rotation
+(radians) (``osc_pose.json`` / ``osc.py`` constructor defaults, LIBERO loads
+this config unmodified) — confirmed the correct, exact factor
+``scale_action()`` uses to convert a normalized ``[-1,1]`` command into a
+real physical delta before ``goal_position = current_position + delta``
+(``robosuite/utils/control_utils.py``). This is the ONE place it is
+legitimate to hardcode robosuite's scale, now that it is verified (not
+assumed) to be the real conversion factor — see :func:`native_delta_to_ctrlgoal`.
+"""
+
+
+def native_delta_to_ctrlgoal(anvil_state8: np.ndarray, native_delta7: np.ndarray) -> np.ndarray:
+    """Reconstruct the controller's OWN internal absolute target — ``goal =
+    state + native_delta * output_max`` — the historically-correct formula
+    :func:`native_delta_to_goal` abandoned (its docstring's "v1").
+
+    Unlike :func:`native_delta_to_goal`'s formal, unscaled composition, this
+    IS a physically meaningful absolute pose: ``native_delta`` is scaled by
+    robosuite's own ``output_max`` before being added to the real state, so
+    the result is exactly the ``goal_position``/``goal_orientation``
+    robosuite's OSC controller would itself compute internally from this
+    same recorded delta (see ``robosuite/controllers/osc.py``'s
+    ``set_goal``). Intended for the ``native_ctrlgoal`` dataset group,
+    delivered via ``env.control_mode="absolute"`` with ZERO further scaling
+    — a diagnostic for whether absolute delivery itself is sound (see
+    ``research/libero_ee/stage1-closeout.md``), independent of the drift-fragile
+    recovered-delta path :func:`native_delta_to_goal`/``native_abs`` uses.
+
+    Args:
+        anvil_state8: Anvil ``[x,y,z,qx,qy,qz,qw,gripper]`` state at time t.
+        native_delta7: LIBERO's own recorded ``[Δxyz,Δaxis-angle,gripper]``
+            command at time t (``NATIVE_ACTION_DIM``).
+
+    Returns:
+        Anvil ``[x,y,z,qx,qy,qz,qw,gripper]``-shaped array — a genuine
+        absolute pose in the SAME physical units as ``anvil_state8``.
+    """
+    delta = np.clip(native_delta7[:6], -1.0, 1.0)
+    goal_pos = anvil_state8[:3] + delta[:3] * OSC_OUTPUT_MAX_POS
+    R_state = quat_to_matrix(anvil_state8[3:7])
+    R_goal = axis_angle_to_matrix(delta[3:6] * OSC_OUTPUT_MAX_ROT) @ R_state
+    goal_gripper = native_delta7[6]
+    return np.concatenate([goal_pos, matrix_to_quat(R_goal), [goal_gripper]]).astype(np.float32)
+
+
+def convert_episode_ctrlgoal_states(anvil_states: np.ndarray, native_actions: np.ndarray) -> np.ndarray:
+    """Derive the per-step scaled controller-goal trajectory for one episode
+    — see :func:`native_delta_to_ctrlgoal`. Shared building block for the
+    ``native_ctrlgoal`` dataset group; encoded to the stored 7-dim
+    axis-angle action column by the EXISTING
+    :func:`convert_episode_goal_aa_actions` (it operates on any Anvil
+    absolute-goal-state trajectory, regardless of how the goal was
+    constructed — no new encoder needed).
+    """
+    n = anvil_states.shape[0]
+    return np.stack(
+        [native_delta_to_ctrlgoal(anvil_states[t], native_actions[t]) for t in range(n)]
+    ).astype(np.float32)
+
+
 def convert_episode_goal_states(anvil_states: np.ndarray, native_actions: np.ndarray) -> np.ndarray:
     """Derive the per-step absolute goal trajectory ``G[t]`` (Anvil 8-dim
     state layout) for one episode — see :func:`native_delta_to_goal`. Shared
@@ -358,6 +420,51 @@ def convert_episode_native_hand_actions(
     ).astype(np.float32)
 
 
+AFO_ABS_HORIZONS = (1, 5, 10)
+"""Lookahead horizons (in frames) swept for the ``afo_abs`` action-from-
+observation family — see the AFO plan (``research/libero_ee/stage1-closeout.md``)."""
+
+
+def afo_abs_action(future_anvil_state8: np.ndarray, native_gripper_cmd: float) -> np.ndarray:
+    """Action-from-observation absolute-pose target for one frame: the
+    ACTUAL FUTURE OBSERVED EE pose (``future_anvil_state8``, ``h`` frames
+    ahead), encoded as the 7-dim axis-angle action via
+    :func:`goal_state_to_axis_angle_action` — reused unchanged (it already
+    encodes any absolute Anvil EE state as this layout; here the "goal" is a
+    real observed future pose, not a formal ``native_delta`` composition
+    like ``native_abs``/``goalabs``).
+
+    UMI decomposition: only the EE pose (position + rotation) is
+    obs-derived — the gripper channel is overwritten with the RAW RECORDED
+    native command (``native_gripper_cmd``), never the observed future
+    gripper qpos, so only the pose channel's *source* changes vs the
+    recorded-command families.
+    """
+    action7 = goal_state_to_axis_angle_action(future_anvil_state8)
+    action7[6] = native_gripper_cmd
+    return action7
+
+
+def convert_episode_afo_abs_actions(
+    anvil_states: np.ndarray, native_actions: np.ndarray, horizon: int
+) -> np.ndarray:
+    """AFO absolute-pose action column for one episode at lookahead
+    ``horizon``: frame ``t``'s target is the observed pose at ``t+horizon``
+    (see :func:`afo_abs_action`). Returns only ``len(anvil_states) - horizon``
+    rows — episodes are ``horizon`` frames SHORTER than the source, dropped
+    (not clamped) by the caller, since there is no valid future observation
+    for the last ``horizon`` frames. A ``min(t+horizon, N-1)`` clamp would
+    instead collapse those frames toward a degenerate near-final-pose target
+    and bias the horizon sweep toward larger ``horizon`` looking artificially
+    easy — dropping trades a smaller dataset for an unbiased one, the right
+    trade for a comparison study.
+    """
+    n = anvil_states.shape[0] - horizon
+    return np.stack(
+        [afo_abs_action(anvil_states[t + horizon], float(native_actions[t][6])) for t in range(n)]
+    ).astype(np.float32)
+
+
 LIBERO_IMAGE_RESOLUTION = [256, 256]  # [width, height] — LIBERO's native camera resolution
 
 
@@ -447,6 +554,8 @@ def _make_writer(output_dir: Path, repo_id: str) -> LeRobotWriter:
 ALL_DATASET_GROUPS = frozenset(
     {
         "native", "native_hand", "native_rot6d", "native_abs", "native_n0", "goalabs",
+        "native_ctrlgoal",
+        *(f"afo_abs_h{h}" for h in AFO_ABS_HORIZONS),
     }
 )
 """All dataset groups :func:`convert` can write. See its ``only`` parameter."""
@@ -538,6 +647,16 @@ def convert(
         if "native_n0" in groups
         else None
     )
+    # native_ctrlgoal: NATIVE-family (8-dim native obs, plain lerobot-train),
+    # action = the controller's OWN scaled internal goal (see
+    # native_delta_to_ctrlgoal) — a genuine absolute pose, unlike native_abs's
+    # formal unscaled composition. Reuses _make_native_dataset unchanged.
+    native_ctrlgoal_dir = output_root / f"libero-task{task_index}-native-ctrlgoal"
+    dataset_native_ctrlgoal = (
+        _make_native_dataset(native_ctrlgoal_dir, f"anvil/libero-task{task_index}-native-ctrlgoal")
+        if "native_ctrlgoal" in groups
+        else None
+    )
     writer_goalabs = (
         _make_writer(goalabs_dir, f"anvil/libero-task{task_index}-goalabs")
         if "goalabs" in groups
@@ -546,6 +665,18 @@ def convert(
     dataset_goalabs = (
         writer_goalabs.create_dataset(joint_names={}, camera_names=CAMERA_NAMES) if writer_goalabs else None
     )
+
+    # afo_abs_h{1,5,10}: action-from-observation absolute-pose targets (see
+    # convert_episode_afo_abs_actions). Same 8-dim native observation + 7-dim
+    # axis-angle action schema as native_abs/native_n0 (reuses
+    # _make_native_dataset unchanged); only the action VALUES differ (the
+    # real future observed pose instead of a formal state+native_delta goal).
+    afo_abs_dirs = {h: output_root / f"libero-task{task_index}-afo-abs-h{h}" for h in AFO_ABS_HORIZONS}
+    afo_abs_datasets = {
+        h: _make_native_dataset(afo_abs_dirs[h], f"anvil/libero-task{task_index}-afo-abs-h{h}")
+        for h in AFO_ABS_HORIZONS
+        if f"afo_abs_h{h}" in groups
+    }
 
     total_frames = 0
     idx = 0
@@ -577,6 +708,22 @@ def convert(
         # convert_episode_goal_n0_aa_actions.
         action_native_abs = convert_episode_goal_aa_actions(goal_states)
         action_native_n0 = convert_episode_goal_n0_aa_actions(goal_states, anvil_states)
+
+        # native_ctrlgoal: the controller's own SCALED internal goal, encoded
+        # via the same axis-angle encoder native_abs uses (it's generic over
+        # any Anvil absolute-goal-state trajectory).
+        ctrlgoal_states = convert_episode_ctrlgoal_states(anvil_states, native_actions)
+        action_native_ctrlgoal = convert_episode_goal_aa_actions(ctrlgoal_states)
+
+        # afo_abs: obs-derived absolute-pose target per requested horizon.
+        # Episodes with fewer than horizon+1 frames are skipped for that
+        # horizon (see convert_episode_afo_abs_actions — never happens for
+        # task10's ~93-frame episodes, guarded anyway for correctness).
+        action_afo_abs = {
+            h: convert_episode_afo_abs_actions(anvil_states, native_actions, h)
+            for h in afo_abs_datasets
+            if len(ep_items) > h
+        }
 
         for t, item in enumerate(ep_items):
             images = {
@@ -619,6 +766,12 @@ def convert(
                 "task": task_text,
                 **images_native,
             }
+            frame_native_ctrlgoal = {
+                "observation.state": raw_states[t],
+                "action": action_native_ctrlgoal[t],
+                "task": task_text,
+                **images_native,
+            }
             # goalabs: observation.state is still the ACTUAL observed state
             # trajectory (anvil_states, what the policy conditions on and what
             # n-0 anchor transforms read) — only the action target is the
@@ -639,14 +792,33 @@ def convert(
                 dataset_native_abs.add_frame(frame_native_abs)
             if dataset_native_n0 is not None:
                 dataset_native_n0.add_frame(frame_native_n0)
+            if dataset_native_ctrlgoal is not None:
+                dataset_native_ctrlgoal.add_frame(frame_native_ctrlgoal)
             if dataset_goalabs is not None:
                 dataset_goalabs.add_frame(frame_goalabs)
+            # afo_abs: NATIVE 8-dim observation (raw_states, unchanged),
+            # action is the obs-derived absolute-pose target — drop (don't
+            # write) each episode's last `h` frames, no valid future
+            # observation exists for them (see convert_episode_afo_abs_actions).
+            for h, dataset in afo_abs_datasets.items():
+                valid_n = len(ep_items) - h
+                if t < valid_n:
+                    frame_afo_abs = {
+                        "observation.state": raw_states[t],
+                        "action": action_afo_abs[h][t],
+                        "task": task_text,
+                        **images_native,
+                    }
+                    dataset.add_frame(frame_afo_abs)
 
         for dataset in (
             dataset_native, dataset_native_hand, dataset_native_rot6d,
-            dataset_native_abs, dataset_native_n0, dataset_goalabs,
+            dataset_native_abs, dataset_native_n0, dataset_native_ctrlgoal, dataset_goalabs,
         ):
             if dataset is not None:
+                dataset.save_episode()
+        for h, dataset in afo_abs_datasets.items():
+            if len(ep_items) > h:
                 dataset.save_episode()
         total_frames += len(ep_items)
         log.info(
@@ -664,8 +836,12 @@ def convert(
         dataset_native_abs.finalize()
     if dataset_native_n0 is not None:
         dataset_native_n0.finalize()
+    if dataset_native_ctrlgoal is not None:
+        dataset_native_ctrlgoal.finalize()
     if writer_goalabs is not None:
         writer_goalabs.finalize(dataset_goalabs)
+    for dataset in afo_abs_datasets.values():
+        dataset.finalize()
 
     dir_by_group = {
         "native": native_dir,
@@ -673,7 +849,9 @@ def convert(
         "native_rot6d": native_rot6d_dir,
         "native_abs": native_abs_dir,
         "native_n0": native_n0_dir,
+        "native_ctrlgoal": native_ctrlgoal_dir,
         "goalabs": goalabs_dir,
+        **{f"afo_abs_h{h}": afo_abs_dirs[h] for h in AFO_ABS_HORIZONS},
     }
     return {
         "task_index": task_index,

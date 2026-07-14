@@ -1,0 +1,14 @@
+# native_ctrlgoal: reconstructs the controller's OWN scaled internal goal
+# (state + native_delta * output_max) -- a genuine absolute pose, delivered
+# via env.control_mode="absolute" with zero further scaling. Diagnostic:
+# does absolute delivery itself work, independent of afo_abs's target
+# construction? See research/libero_ee/stage1-closeout.md, Experiment A.
+
+name: task10-native-ctrlgoal-act
+task_index: 10
+dataset_group: native_ctrlgoal
+train:
+  policy_type: act
+eval:
+  action_type: native_ctrlgoal
+  n_episodes: 50

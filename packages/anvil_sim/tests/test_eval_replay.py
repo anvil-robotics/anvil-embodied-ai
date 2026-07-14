@@ -13,7 +13,13 @@ from anvil_shared.rotation import axis_angle_to_matrix, matrix_to_quat, matrix_t
 
 from anvil_sim.eval_replay import GtActionProvider
 from anvil_sim.studies.libero_ee.libero_processor import AnvilEEObsProcessorStep
-from anvil_sim.studies.libero_ee.replay_adapter import _provider_mode
+from anvil_sim.studies.libero_ee.replay_adapter import (
+    _DIVERGENCE_POS_THRESHOLD,
+    _DIVERGENCE_ROT_THRESHOLD,
+    _provider_mode,
+    _state_divergence,
+    build_replay_adapter,
+)
 
 
 @pytest.mark.parametrize(
@@ -107,3 +113,43 @@ def test_rel_provider_requires_observation_first():
     provider = GtActionProvider(mode="rel_world", obs_step=obs_step, n_action_steps=1)
     with pytest.raises(RuntimeError, match="observation"):
         provider(_abs10([0.1, 0.0, 0.0], [0.0, 0.0, 0.0], 0.02))
+
+
+# --- state_divergence: moved (behavior-preserving) from an inline
+# eval_replay.replay() computation into the study ReplayAdapter, so the
+# generic harness no longer hardcodes the EE-encoding layout. These tests
+# lock down that the extraction changed nothing.
+
+
+def test_state_divergence_zero_when_states_match():
+    quat0 = matrix_to_quat(axis_angle_to_matrix(np.array([0.1, -0.05, 0.2])))
+    demo_state = np.array([0.3, -0.1, 0.5, 0.1, -0.05, 0.2, 0.02], dtype=np.float32)
+    actual_state8 = np.array([0.3, -0.1, 0.5, *quat0, 0.02], dtype=np.float32)
+
+    pos_err, rot_err = _state_divergence(demo_state, actual_state8)
+    assert pos_err == pytest.approx(0.0, abs=1e-6)
+    assert rot_err == pytest.approx(0.0, abs=1e-6)
+
+
+def test_state_divergence_reports_real_position_and_rotation_offsets():
+    quat0 = matrix_to_quat(np.eye(3))  # actual: identity rotation
+    demo_state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, np.pi / 2, 0.02], dtype=np.float32)  # 90deg about z
+    actual_state8 = np.array([0.01, 0.0, 0.0, *quat0, 0.02], dtype=np.float32)  # 1cm off, no rotation
+
+    pos_err, rot_err = _state_divergence(demo_state, actual_state8)
+    assert pos_err == pytest.approx(0.01, abs=1e-6)
+    assert rot_err == pytest.approx(np.pi / 2, abs=1e-6)
+
+
+def test_replay_adapter_thresholds_are_robosuite_osc_output_max():
+    """The 'notable divergence' bar reuses robosuite OSC_POSE's own
+    output_max (see libero_convert.py) — a principled scale, not arbitrary."""
+    from anvil_sim.studies.libero_ee.libero_convert import OSC_OUTPUT_MAX_POS, OSC_OUTPUT_MAX_ROT
+
+    assert _DIVERGENCE_POS_THRESHOLD == OSC_OUTPUT_MAX_POS
+    assert _DIVERGENCE_ROT_THRESHOLD == OSC_OUTPUT_MAX_ROT
+
+    adapter = build_replay_adapter()
+    assert adapter.divergence_pos_threshold == OSC_OUTPUT_MAX_POS
+    assert adapter.divergence_rot_threshold == OSC_OUTPUT_MAX_ROT
+    assert adapter.state_divergence is _state_divergence

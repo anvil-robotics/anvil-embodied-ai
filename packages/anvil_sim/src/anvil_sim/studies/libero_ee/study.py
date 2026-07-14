@@ -31,7 +31,7 @@ NATIVE_EVAL_TYPES = ("native", "native_rot6d")
 # deliver -> the env.control_mode it REQUIRES. Feeding a treatment through the
 # wrong mode is exactly the class of mistake that produced Experiment 7's
 # first 0% sweep; specs violating this fail at load time.
-_REQUIRED_CONTROL_MODE = {"relative": "relative", "absolute": "absolute"}
+_REQUIRED_CONTROL_MODE = {"relative": "relative", "absolute": "absolute", "relative_converted": "relative"}
 
 # lerobot/libero's global task_index -> libero.libero's own benchmark task_id
 # (see libero_convert.py:LIBERO_ENV_TASK_ID for why these don't line up by a
@@ -41,7 +41,10 @@ _ENV_TASK_ID_BY_TASK_INDEX = {10: 8, 11: 9, 14: 2}
 # Dataset groups whose action column is the Anvil-native (not Anvil-EE-writer)
 # schema, so the generic mcap dataset-validate stage does not apply.
 _DATASET_VALIDATE_SKIP = frozenset(
-    {"native", "native_hand", "native_rot6d", "native_abs", "native_n0"}
+    {
+        "native", "native_hand", "native_rot6d", "native_abs", "native_n0", "native_ctrlgoal",
+        "afo_abs_h1", "afo_abs_h5", "afo_abs_h10",
+    }
 )
 
 
@@ -125,6 +128,11 @@ def _legality(spec: BenchSpec) -> list[str]:
     if spec.eval.action_type not in valid_eval:
         errors.append(f"eval.action_type {spec.eval.action_type!r} not in {sorted(valid_eval)}")
 
+    # INVARIANT: deliver mode and env.control_mode must be paired correctly —
+    # feeding a treatment through the wrong control_mode is exactly the
+    # mistake that produced Experiment 7's first 0% sweep (silent, no crash,
+    # only visible as a training/eval result). See stage1-closeout.md and
+    # research/libero_ee/ARCHITECTURE.md.
     if spec.eval.action_type in _ZERO_CAL_ACTION_TYPES:
         deliver = _ZERO_CAL_ACTION_TYPES[spec.eval.action_type][2]
         required = _REQUIRED_CONTROL_MODE[deliver]
@@ -143,6 +151,39 @@ def _legality(spec: BenchSpec) -> list[str]:
 
 def _is_baseline(spec: BenchSpec) -> bool:
     return spec.eval.action_type in NATIVE_EVAL_TYPES and spec.dataset_group == "native"
+
+
+# Ledger `status` classification — see research/libero_ee/stage1-closeout.md
+# for the doubts each flag points at. Deliberately conservative: anything not
+# listed here (native, native_hand, native_rot6d, and any future validated
+# addition) surfaces as "—", i.e. no caveat attached.
+_CONDITION_STATUS: dict[str, str] = {
+    # Structurally locked to per_frame_anchor=True at convert time; a true
+    # chunk-start (n-0) anchor was never actually tested. Not "provisional" —
+    # definitively invalid as an n-0 test. See report.md §3.4 / diary.md.
+    "native_n0": "⛔ invalid",
+    # Absolute-vs-relative + goal-family + AFO/ctrlgoal results carry open
+    # doubts: does absolute delivery generalize past this one reconstruction
+    # formula, and is `relative_converted`'s reliance on robosuite's
+    # `output_max` a LIBERO-only workaround? Both unresolved pending Stage 2.
+    "native_abs": "⚠ provisional",
+    "zerocal_goal_abs": "⚠ provisional",
+    "zerocal_goal_world_n0": "⚠ provisional",
+    "zerocal_goal_hand_n0": "⚠ provisional",
+    "native_ctrlgoal": "⚠ provisional",
+    "native_ctrlgoal_relconv": "⚠ provisional",
+    "afo_abs_h1": "⚠ provisional",
+    "afo_abs_h5": "⚠ provisional",
+    "afo_abs_h10": "⚠ provisional",
+    "afo_abs_rel_h1": "⚠ provisional",
+    "afo_abs_rel_h5": "⚠ provisional",
+    "afo_abs_rel_h10": "⚠ provisional",
+    "afo_relative": "⚠ provisional",
+}
+
+
+def _condition_status(spec: BenchSpec) -> str:
+    return _CONDITION_STATUS.get(spec.eval.action_type, "—")
 
 
 def _dataset_validate_skip(spec: BenchSpec) -> bool:
@@ -189,6 +230,7 @@ def build_libero_ee_study() -> Study:
         eval_command=_eval_command,
         dataset_validate_skip=_dataset_validate_skip,
         fill_defaults=_fill_defaults,
+        condition_status=_condition_status,
         gt_replay=GtReplayConfig(
             baseline_action_type="native",
             baseline_control_mode="relative",

@@ -5,11 +5,13 @@ so it succeeds on **both ACT and Diffusion**? Answered in sim via the gated `anv
 
 **Start here:** [`report.md`](report.md) — conclusions + the production recipe. Timeline and wrong
 turns: [`diary.md`](diary.md). Harness itself: [`../../docs/simulation.md`](../../docs/simulation.md).
+**Stage 1 close-out** (what's validated/ruled-out/still-open before branching to a new
+simulation backend): [`stage1-closeout.md`](stage1-closeout.md).
 
 ## Layout
 
 ```
-report.md   diary.md   README.md          # tracked write-ups (this guide)
+report.md   diary.md   README.md   stage1-closeout.md   # tracked write-ups (this guide)
 ledger/     RESULTS.md, results.json       # every run's headline numbers (regenerable)
 experiments/<name>/                        # one dir per treatment (spec name):
     stage_status.json, <stage>.log,
@@ -43,6 +45,7 @@ in the package: `packages/anvil_sim/src/anvil_sim/studies/libero_ee/`.
 | §7 rotation robustness (task10/14/11) | `ledger/RESULTS.md` rows across `task10/11/14` |
 | GT-replay gate caught 5 eval-path bugs (diary) | `experiments/<name>/gt-replay/`, `replay/baseline-task<N>/` |
 | a diary `[exp]` entry | `experiments/<matching-name>/` |
+| ⚠/⛔ provisional/invalid flags on `native_abs`/`native_n0`/`goal-*`/`native_ctrlgoal*` | [`stage1-closeout.md`](stage1-closeout.md) — the consolidated open-doubts log |
 
 ## Reproduce
 

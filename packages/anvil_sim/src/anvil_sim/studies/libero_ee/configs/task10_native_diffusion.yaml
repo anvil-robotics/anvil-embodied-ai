@@ -7,4 +7,4 @@ train:
   policy_type: diffusion
 eval:
   action_type: native
-  n_episodes: 10
+  n_episodes: 50

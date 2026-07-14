@@ -136,6 +136,87 @@ def test_clear_stage_cache_only_touches_forced_eval(monkeypatch, tmp_path):
     assert not spec.eval_output_dir.exists()
 
 
+def test_replay_baseline_cache_key_includes_n_episodes(monkeypatch, tmp_path):
+    """Bug fixed 2026-07-13: the old cache key was task_index-only, so a
+    baseline computed at one n_episodes silently gated every later condition
+    run at a different n_episodes. Two specs differing only in n_episodes
+    must each compute (and cache under) their OWN baseline."""
+    monkeypatch.chdir(tmp_path)
+    calls: list[int] = []
+
+    def fake_replay(**kwargs):
+        calls.append(kwargs["n_episodes"])
+        summary = {"pc_success": 100.0, "n_episodes": kwargs["n_episodes"]}
+        # Mirror eval_replay.replay()'s own side effect (creates output_dir and
+        # writes replay_info.json there) so the cache-reuse path under test
+        # (_replay_baseline checking info_path.exists()) behaves realistically.
+        output_dir = kwargs["output_dir"]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "replay_info.json").write_text(json.dumps(summary))
+        return summary
+
+    monkeypatch.setattr("anvil_sim.eval_replay.replay", fake_replay)
+
+    spec_n10 = _spec()
+    spec_n10.eval.n_episodes = 10
+    spec_n49 = _spec()
+    spec_n49.eval.n_episodes = 49
+
+    baseline_10 = bench_runner._replay_baseline(spec_n10)
+    baseline_49 = bench_runner._replay_baseline(spec_n49)
+
+    assert baseline_10["n_episodes"] == 10
+    assert baseline_49["n_episodes"] == 49
+    assert calls == [10, 49]  # both actually computed; neither reused the other's cache
+
+    dir10 = bench_runner.topic_root(spec_n10.study_name) / "replay" / f"baseline-task{spec_n10.task_index}-n10"
+    dir49 = bench_runner.topic_root(spec_n49.study_name) / "replay" / f"baseline-task{spec_n49.task_index}-n49"
+    assert dir10.exists() and dir49.exists()
+
+    # Re-requesting either n_episodes now hits its OWN cache (no recompute).
+    calls.clear()
+    bench_runner._replay_baseline(spec_n10)
+    assert calls == []
+
+
+def test_clear_stage_cache_gt_replay_removes_matching_baseline_dir(monkeypatch, tmp_path):
+    """--force-stage gt-replay must drop the cached baseline for THIS spec's
+    n_episodes, or _replay_baseline keeps returning the stale number."""
+    monkeypatch.chdir(tmp_path)
+    spec = _spec()
+    baseline_dir = (
+        bench_runner.topic_root(spec.study_name) / "replay"
+        / f"baseline-task{spec.task_index}-n{spec.eval.n_episodes}"
+    )
+    baseline_dir.mkdir(parents=True)
+    (baseline_dir / "replay_info.json").write_text("{}")
+
+    bench_runner._clear_stage_cache("train", spec)  # unaffected stage: no-op
+    assert baseline_dir.exists()
+
+    bench_runner._clear_stage_cache("gt-replay", spec)
+    assert not baseline_dir.exists()
+
+
+def test_record_surfaces_condition_status_in_ledger(monkeypatch, tmp_path):
+    """The ledger's `status` column comes from the study's own classification
+    (e.g. "⚠ provisional") — bench_runner just surfaces whatever the study
+    returns, never hardcodes it. `_spec()`'s eval.action_type
+    ("zerocal_goal_abs") is one of libero_ee's flagged conditions."""
+    monkeypatch.chdir(tmp_path)
+    spec = _spec()
+    spec.run_dir.mkdir(parents=True)
+    (spec.run_dir / "stage_status.json").write_text(json.dumps({
+        "eval": {"status": "passed", "info": {"pc_success": 100.0}},
+    }))
+
+    stage_record(spec)
+    ledger = _ledger_dir(spec.study_name)
+    results = json.loads((ledger / "results.json").read_text())
+    assert results[0]["status"] == "⚠ provisional"
+    assert "⚠ provisional" in (ledger / "RESULTS.md").read_text()
+
+
 def test_record_upserts_ledger_and_regenerates_md(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     spec = _spec()

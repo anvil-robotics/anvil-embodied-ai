@@ -63,6 +63,16 @@ class ReplayAdapter:
     - ``action_encoding(action_type)`` -> ``"rot6d" | "axis_angle"``.
     - ``encode_to_rot6d`` / ``decode_from_rot6d`` — the codec the provider
       applies around the shared rot6d n-0 machinery for axis-angle families.
+    - ``divergence_pos_threshold`` / ``divergence_rot_threshold`` — the
+      per-step "notable divergence" bar for ``replay()``'s
+      ``state_divergence_first_exceed_t`` diagnostic (metres / radians; a
+      study-specific scale, e.g. LIBERO/robosuite's OSC ``output_max``).
+    - ``state_divergence(demo_state, actual_state)`` -> ``(pos_err,
+      rot_err)`` — the per-step metric comparing the dataset's recorded
+      state at frame t against the sim's actually-reached state; the layout
+      of both arrays (which indices are position/rotation, and in what
+      rotation representation) is study-specific, so the harness never
+      hardcodes it.
     """
 
     make_processors: Callable[[str, int], tuple[Any, Any, Any]]
@@ -71,6 +81,9 @@ class ReplayAdapter:
     action_encoding: Callable[[str], str]
     encode_to_rot6d: Callable[[np.ndarray], np.ndarray]
     decode_from_rot6d: Callable[[np.ndarray], np.ndarray]
+    divergence_pos_threshold: float
+    divergence_rot_threshold: float
+    state_divergence: Callable[[np.ndarray, np.ndarray], tuple[float, float]]
 
 
 @dataclass(frozen=True)
@@ -101,6 +114,13 @@ class Study:
     # task_index and eval.control_mode from eval.action_type, so a spec
     # need not repeat them explicitly.
     fill_defaults: Callable[[BenchSpec], None]
+    # Optional per-condition status label surfaced verbatim in the ledger's
+    # `status` column (e.g. "⚠ provisional", "⛔ invalid") — purely
+    # informational, never affects gating. Keeps bench_runner backend
+    # agnostic: the classification of which findings are settled vs. open
+    # lives in the study (see stage1-closeout.md for libero_ee's), not the
+    # harness. None (the default) -> "—".
+    condition_status: Callable[[BenchSpec], str] | None = None
 
 
 # One-line registry: study name -> zero-arg factory. Factories import their

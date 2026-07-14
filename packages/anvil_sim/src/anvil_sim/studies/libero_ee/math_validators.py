@@ -103,6 +103,51 @@ def _validate_native_abs(spec: BenchSpec) -> dict:
     return {"identity": "native_abs goal -> native command", "frames": n, "max_err": max_err}
 
 
+def _validate_native_ctrlgoal(spec: BenchSpec) -> dict:
+    """native_ctrlgoal identity: decoding the stored 7-dim axis-angle
+    controller-goal back to rot6d and inverting the SCALED construction
+    (subtract the frame's own state, then divide by robosuite's own
+    ``output_max``) must reproduce the native dataset's own command to float
+    precision. Unlike ``_validate_native_abs`` (which recovers via
+    ``recovered_delta_native_action``'s UNSCALED subtraction, correct for the
+    formal goal family), this identity divides by ``OSC_OUTPUT_MAX_POS``/
+    ``OSC_OUTPUT_MAX_ROT`` since ``native_delta_to_ctrlgoal``'s goal is
+    genuinely scaled, not a formal composition. Tautological w.r.t.
+    ``state[t]``, like the other validators here — proves convert math, not
+    rollout robustness (see ``research/libero_ee/stage1-closeout.md``)."""
+    from anvil_shared.rotation import matrix_to_axis_angle, quat_to_matrix, rot6d_to_matrix
+
+    from anvil_sim.studies.libero_ee.libero_convert import (
+        OSC_OUTPUT_MAX_POS,
+        OSC_OUTPUT_MAX_ROT,
+        raw_state_to_anvil,
+    )
+    from anvil_sim.studies.libero_ee.libero_processor import axis_angle_action_to_rot6d
+
+    goal = _load_local_episode(spec.dataset_root)
+    native = _load_local_episode(_native_dataset_root(spec))
+    n = min(len(goal["action"]), len(native["action"]))
+    max_err = 0.0
+    for t in range(n):
+        anvil8 = raw_state_to_anvil(goal["state"][t].astype(np.float32))
+        rot6d10 = axis_angle_action_to_rot6d(goal["action"][t].astype(np.float32))
+        recovered_pos_delta = (rot6d10[:3] - anvil8[:3]) / OSC_OUTPUT_MAX_POS
+        R_state = quat_to_matrix(anvil8[3:7].astype(np.float64))
+        R_goal = rot6d_to_matrix(rot6d10[3:9].astype(np.float64))
+        recovered_rot_delta = matrix_to_axis_angle(R_goal @ R_state.T) / OSC_OUTPUT_MAX_ROT
+        recovered_gripper = float(rot6d10[9])
+        recovered = np.concatenate([recovered_pos_delta, recovered_rot_delta, [recovered_gripper]])
+        expected = np.clip(native["action"][t], -1.0, 1.0)
+        max_err = max(max_err, float(np.abs(recovered - expected).max()))
+    if max_err > _MATH_TOLERANCE:
+        raise RuntimeError(f"native_ctrlgoal identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
+    return {
+        "identity": "native_ctrlgoal goal -> native command (scaled inverse)",
+        "frames": n,
+        "max_err": max_err,
+    }
+
+
 def _validate_native_n0(spec: BenchSpec) -> dict:
     """native_n0 identity (NATIVE-family n-0 relativized goal): un-relativizing
     the stored 7-dim axis-angle action against the frame's OWN (native->quat)
@@ -164,9 +209,57 @@ def _validate_native_hand(spec: BenchSpec) -> dict:
     return {"identity": "hand->world command == native", "frames": n, "max_err": max_err}
 
 
+def _validate_afo_abs(spec: BenchSpec) -> dict:
+    """afo_abs identity: unlike native_abs/native_n0/goalabs (formal
+    ``state + native_delta`` compositions, validated against the NATIVE
+    dataset's own recorded command), afo_abs's target is the REAL OBSERVED
+    future pose -- so its identity is decoding the stored 7-dim axis-angle
+    action back to rot6d and confirming the POSITION/ROTATION channels
+    reproduce the native dataset's OWN state trajectory ``horizon`` frames
+    ahead (read from the native dataset, which has the full untruncated
+    episode -- afo_abs's own state/action columns are `horizon` frames
+    shorter per episode, see convert_episode_afo_abs_actions). The GRIPPER
+    channel is checked separately against the native dataset's RECORDED
+    command (the UMI decomposition -- gripper is never obs-derived)."""
+    from anvil_sim.studies.libero_ee.libero_convert import (
+        anvil_state_to_abs_action,
+        raw_state_to_anvil,
+    )
+    from anvil_sim.studies.libero_ee.libero_processor import axis_angle_action_to_rot6d
+
+    horizon = int(spec.dataset_group.rsplit("_h", 1)[1])
+    afo = _load_local_episode(spec.dataset_root)
+    native = _load_local_episode(_native_dataset_root(spec))
+    n = len(afo["action"])
+    if len(native["action"]) < n + horizon:
+        raise RuntimeError(
+            f"afo_abs (h={horizon}) identity: native episode too short "
+            f"({len(native['action'])} frames) to check {n} afo frames at horizon {horizon}"
+        )
+    max_err = 0.0
+    for t in range(n):
+        rot6d10 = axis_angle_action_to_rot6d(afo["action"][t].astype(np.float32))
+        future_anvil8 = raw_state_to_anvil(native["state"][t + horizon].astype(np.float32))
+        expected10 = anvil_state_to_abs_action(future_anvil8)
+        pose_err = float(np.abs(rot6d10[:9] - expected10[:9]).max())
+        gripper_err = abs(float(afo["action"][t][6]) - float(native["action"][t][6]))
+        max_err = max(max_err, pose_err, gripper_err)
+    if max_err > _MATH_TOLERANCE:
+        raise RuntimeError(f"afo_abs (h={horizon}) identity failed: max_err={max_err:.2e} > {_MATH_TOLERANCE}")
+    return {
+        "identity": f"afo_abs h={horizon} -> observed future pose + native gripper",
+        "frames": n,
+        "max_err": max_err,
+    }
+
+
 MATH_VALIDATORS = {
     "goalabs": _validate_goalabs,
     "native_abs": _validate_native_abs,
     "native_n0": _validate_native_n0,
     "native_hand": _validate_native_hand,
+    "native_ctrlgoal": _validate_native_ctrlgoal,
+    "afo_abs_h1": _validate_afo_abs,
+    "afo_abs_h5": _validate_afo_abs,
+    "afo_abs_h10": _validate_afo_abs,
 }

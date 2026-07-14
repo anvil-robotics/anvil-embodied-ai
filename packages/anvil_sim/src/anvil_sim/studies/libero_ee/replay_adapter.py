@@ -10,6 +10,8 @@ stored-action -> policy-output mode map, and the axis-angle rot6d codec.
 
 from __future__ import annotations
 
+import numpy as np
+from anvil_shared.rotation import axis_angle_to_matrix, matrix_to_axis_angle, quat_to_matrix
 from lerobot.processor import PolicyProcessorPipeline
 
 from anvil_sim.studies.libero_ee.eval_libero_ee import (
@@ -18,6 +20,7 @@ from anvil_sim.studies.libero_ee.eval_libero_ee import (
     _ZERO_CAL_ACTION_TYPES,
     _make_anvil_env_pre_post_processors,
 )
+from anvil_sim.studies.libero_ee.libero_convert import OSC_OUTPUT_MAX_POS, OSC_OUTPUT_MAX_ROT
 from anvil_sim.studies.libero_ee.libero_processor import (
     AnvilEEObsProcessorStep,
     NativeRot6dActionProcessorStep,
@@ -97,6 +100,34 @@ def _make_state_probe() -> AnvilEEObsProcessorStep:
     return AnvilEEObsProcessorStep(action_type="ee_abs")
 
 
+# The largest physical delta a single relative-mode step can command (robosuite
+# OSC_POSE's own output_max — see libero_convert.OSC_OUTPUT_MAX_POS/ROT), reused
+# as the "notable divergence" bar for eval_replay.replay()'s per-step
+# state_divergence_first_exceed_t diagnostic. Moved here (from a module-level
+# constant in the generic eval_replay.py) so the harness doesn't hardcode a
+# LIBERO/robosuite-specific scale — see research/libero_ee/ARCHITECTURE.md.
+_DIVERGENCE_POS_THRESHOLD = OSC_OUTPUT_MAX_POS
+_DIVERGENCE_ROT_THRESHOLD = OSC_OUTPUT_MAX_ROT
+
+
+def _state_divergence(demo_state: np.ndarray, actual_state8: np.ndarray) -> tuple[float, float]:
+    """Per-step (pos_err, rot_err) between the dataset's recorded state at
+    this frame (``demo_state``, EE-writer layout [pos(3), axis-angle(3),
+    gripper]) and the sim's actually-reached state (``actual_state8``, the
+    state_probe's [pos(3), quat(4), gripper] layout). Moved verbatim from
+    eval_replay.replay()'s inline computation (behavior-preserving) so the
+    EE-encoding assumptions live behind this study adapter, not the generic
+    harness loop — see research/libero_ee/ARCHITECTURE.md."""
+    demo_pos = demo_state[:3]
+    pos_err = float(np.linalg.norm(actual_state8[:3] - demo_pos))
+    demo_aa = demo_state[3:6].astype(np.float64)
+    R_demo = axis_angle_to_matrix(demo_aa)
+    R_actual = quat_to_matrix(actual_state8[3:7].astype(np.float64))
+    rel_aa = matrix_to_axis_angle(R_actual @ R_demo.T)
+    rot_err = float(np.linalg.norm(rel_aa))
+    return pos_err, rot_err
+
+
 def build_replay_adapter() -> ReplayAdapter:
     return ReplayAdapter(
         make_processors=_make_replay_processors,
@@ -105,4 +136,7 @@ def build_replay_adapter() -> ReplayAdapter:
         action_encoding=_action_encoding,
         encode_to_rot6d=axis_angle_action_to_rot6d,
         decode_from_rot6d=rot6d_action_to_native,
+        divergence_pos_threshold=_DIVERGENCE_POS_THRESHOLD,
+        divergence_rot_threshold=_DIVERGENCE_ROT_THRESHOLD,
+        state_divergence=_state_divergence,
     )

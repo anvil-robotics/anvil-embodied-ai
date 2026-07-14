@@ -105,6 +105,67 @@ _ZERO_CAL_ACTION_TYPES = {
     # 8-dim native passthrough, never AnvilEEObsProcessorStep.)
     "native_abs": ("ee_abs", "abs", "relative", "native_cmd"),
     "native_n0": ("ee_rel", "rel_world", "relative", "native_cmd"),
+    # native_ctrlgoal — reconstructs the controller's OWN scaled internal
+    # goal (see libero_convert.native_delta_to_ctrlgoal: state + native_delta
+    # * output_max), a GENUINE absolute pose in the same physical units as
+    # observation.state (unlike native_abs's formal, unscaled composition).
+    # Delivered "absolute" with ZERO further scaling, since the target is
+    # already physical. Diagnostic: separates "is absolute delivery itself
+    # sound" from "is the afo_abs target's magnitude/construction the
+    # problem" — see research/libero_ee/stage1-closeout.md.
+    "native_ctrlgoal": ("ee_abs", "abs", "absolute", "native_cmd"),
+    # afo_abs_h{1,5,10} — action-FROM-OBSERVATION absolute-pose family (see
+    # libero_convert.convert_episode_afo_abs_actions): the stored action is
+    # the REAL observed EE pose h frames ahead (not a formal
+    # state+native_delta composition like native_abs), so unlike native_abs
+    # it delivers "absolute" directly (zero calibration, no recovered-delta
+    # step needed — the target IS a physically achievable pose) rather than
+    # "relative". Gripper is the RAW RECORDED native command (UMI
+    # decomposition — only the EE pose is obs-derived), same "native_cmd"
+    # convention as native_abs/goalabs.
+    "afo_abs_h1": ("ee_abs", "abs", "absolute", "native_cmd"),
+    "afo_abs_h5": ("ee_abs", "abs", "absolute", "native_cmd"),
+    "afo_abs_h10": ("ee_abs", "abs", "absolute", "native_cmd"),
+    # afo_abs_rel_h{1,5,10} — SAME afo_abs dataset/target construction (the
+    # stored action is still the real observed future EE pose; nothing about
+    # what's being LEARNED changes), only the DELIVERY differs: instead of
+    # feeding the raw absolute pose to the env (absolute_native_action_from_target),
+    # deliver="relative" recovers a delta against the CURRENT real state
+    # (recovered_delta_native_action, matrix_to_axis_angle(target_R @
+    # current_R.T)) — exactly native_abs's delivery path, reused unchanged.
+    # RESULT: GT-replay 0%, WORSE than plain afo_abs's 8.2% — because the
+    # recovered delta here is a REAL metres/radians value (unlike native_abs's
+    # already-command-scale formal delta), and recovered_delta_native_action
+    # applies no rescale, so the controller's own scale_action() double-scales
+    # it. (The original comment here attributed afo_abs's 8.2% to an
+    # axis-angle theta=pi singularity — directly tested and disproved, see
+    # research/libero_ee/stage1-closeout.md; kept only as a historical marker that
+    # this variant was built under that now-superseded theory.) mode stays
+    # "abs" (no anchor composition either way; only "deliver" flips).
+    "afo_abs_rel_h1": ("ee_abs", "abs", "relative", "native_cmd"),
+    "afo_abs_rel_h5": ("ee_abs", "abs", "relative", "native_cmd"),
+    "afo_abs_rel_h10": ("ee_abs", "abs", "relative", "native_cmd"),
+    # native_ctrlgoal_relconv — SAME native_ctrlgoal dataset/target
+    # (state[t] + native_delta[t]*output_max), only the DELIVERY differs:
+    # deliver="relative_converted" recovers a real metres/radians delta
+    # against the LIVE current state, THEN divides by output_max (unlike
+    # afo_abs_rel_h*'s deliver="relative", which applies no rescale and
+    # double-scales) to produce the normalized command, fed via
+    # env.control_mode="relative". Diagnostic: does this two-step physical
+    # conversion pipeline itself work — should algebraically recover
+    # ~clip(native_delta[t]) and reproduce close to native's own ~60%
+    # GT-replay baseline, since native_ctrlgoal's target IS exactly
+    # state[t]+native_delta[t]*output_max. See research/libero_ee/stage1-closeout.md.
+    "native_ctrlgoal_relconv": ("ee_abs", "abs", "relative_converted", "native_cmd"),
+    # afo_relative — SAME afo_abs_h1 dataset/target (the real observed future
+    # EE pose, NOT a recorded/reconstructed command), same relative_converted
+    # delivery as native_ctrlgoal_relconv above. Isolates "commanded vs.
+    # achieved" as a variable independent of delivery-mode bugs: this target
+    # is already only ~20-30% of a full commanded motion (the measured
+    # per-step convergence ratio), so converting+delivering it is expected to
+    # systematically undershoot relative to native_ctrlgoal_relconv — the
+    # discount applied a second time by the controller.
+    "afo_relative": ("ee_abs", "abs", "relative_converted", "native_cmd"),
 }
 
 # Zero-cal goal action types whose stored/predicted action carries its
@@ -112,7 +173,13 @@ _ZERO_CAL_ACTION_TYPES = {
 # — the ONLY difference from their rot6d counterparts. Consumed by
 # _make_anvil_env_pre_post_processors here and by the GT-replay provider in
 # eval_replay to decode/re-encode around the shared rot6d n-0 machinery.
-_AXIS_ANGLE_ACTION_TYPES = frozenset({"native_abs", "native_n0"})
+_AXIS_ANGLE_ACTION_TYPES = frozenset(
+    {
+        "native_abs", "native_n0", "native_ctrlgoal", "native_ctrlgoal_relconv",
+        "afo_abs_h1", "afo_abs_h5", "afo_abs_h10",
+        "afo_abs_rel_h1", "afo_abs_rel_h5", "afo_abs_rel_h10", "afo_relative",
+    }
+)
 
 
 def _load_policy_from_checkpoint(cfg: PreTrainedConfig):

@@ -1,0 +1,15 @@
+# native_ctrlgoal_relconv: SAME native_ctrlgoal dataset/target (the controller's
+# own scaled internal goal), delivered via a two-step physical conversion
+# (recover a real metres/radians delta against the LIVE state, divide by
+# output_max, deliver via genuine env.control_mode="relative") instead of raw
+# absolute delivery. Diagnostic: does this conversion pipeline itself work?
+# See research/libero_ee/stage1-closeout.md.
+
+name: task10-native-ctrlgoal-relconv-act
+task_index: 10
+dataset_group: native_ctrlgoal
+train:
+  policy_type: act
+eval:
+  action_type: native_ctrlgoal_relconv
+  n_episodes: 50

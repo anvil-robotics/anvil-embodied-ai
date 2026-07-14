@@ -1,0 +1,14 @@
+# AFO (action-from-observation) absolute-pose family: obs-derived future EE
+# pose at horizon h=1, gripper = raw recorded native command (UMI
+# decomposition), ACT. Independent second reference alongside afo_native
+# (deferred) -- horizon-swept POC to decide go/no-go on absolute-EE-target
+# representations. See research/libero_ee/stage1-closeout.md.
+
+name: task10-afo-abs-h1-act
+task_index: 10
+dataset_group: afo_abs_h1
+train:
+  policy_type: act
+eval:
+  action_type: afo_abs_h1
+  n_episodes: 50

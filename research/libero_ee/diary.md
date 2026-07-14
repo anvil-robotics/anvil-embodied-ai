@@ -110,3 +110,36 @@ extended the harness / a representation · `[insight]` conclusion or reversal.
   (attenuated marginal), with ~3× longer episodes; the robust policy reproduces the demo
   distribution. ACT survives by regressing the conditional mean. New analysis module
   `packages/anvil_sim/src/anvil_sim/studies/libero_ee/analysis/mechanism_analysis.py`; artifacts under `research/libero_ee/analysis/`.
+
+### 2026-07-14 (Stage 1 close-out)
+- `[infra]` Continuing the AFO/OAA absolute-delivery thread past `afo-plan.md`'s last snapshot:
+  implemented `native_ctrlgoal` (the historically-correct scaled `state+native_delta×output_max`
+  reconstruction) and a new `relative_converted` delivery (subtract live state, ÷ `output_max`,
+  clip, deliver relative). `[result]` `native_ctrlgoal_relconv` GT-replay **87.76%**, `afo_relative`
+  (same delivery, observation-derived target) **77.55%** — both exceed even the corrected native
+  baseline. `[bug]` **stale-baseline gate**: `bench_runner._replay_baseline` cached the GT-replay
+  baseline keyed on `task_index` alone, so an n=10 baseline (60.0%, dated 2026-07-07) was silently
+  reused to gate every later n=49/50 condition. `[fix]` cache key now includes `n_episodes`
+  (`baseline-task{N}-n{n_episodes}`); fresh n=49 native baseline = **71.43%**.
+- `[insight]` The 87.76% number, read against the corrected 71.43% baseline, is still
+  *unexplained* — `native_ctrlgoal` should at most match `native` if it truly reconstructs the
+  controller's own goal, not beat it by ~16pp. Flagged as **Doubt 1**, not resolved.
+- `[insight]` `relative_converted`'s entire mechanism depends on `output_max`, a robosuite-OSC
+  hardware constant — flagged as **Doubt 2**: unknown whether it transfers to a real controller
+  or is purely a LIBERO-simulation workaround.
+- `[fix]` `afo_abs_h1`'s 8.2% failure was earlier (wrongly) attributed to an axis-angle θ=π
+  singularity — directly tested and disproved (`orientation_error()` depends only on relative
+  angle; round-trip exact to 1e-16 near θ=π). True root cause still not fully confirmed
+  (delivery-level, not construction-level; per-step alignment during chunk execution never
+  checked).
+- `[infra]` Added per-step `state_pos_err`/`state_rot_err` divergence logging to
+  `eval_replay.replay()` (previously only t=0 was checked) and confirmed GT-replay is genuinely
+  closed-loop (`env.step()` really advances physics every step; `observation` is never reset to a
+  dataset-recorded value).
+- `[infra]` Cleanup pass: added a `status` column to the ledger (surfaced from a new
+  `Study.condition_status` hook, so bench_runner stays study-agnostic); moved the per-step
+  divergence metric + its "notable divergence" thresholds out of the generic `eval_replay.py` and
+  behind `ReplayAdapter` (`packages/anvil_sim/src/anvil_sim/ARCHITECTURE.md` documents the
+  harness/study seam and what's still coupled); consolidated the hard-won config-guard invariants
+  with `# INVARIANT:` tags; retired `afo-plan.md` (never committed) into
+  [`stage1-closeout.md`](stage1-closeout.md), the new single close-out doc for this investigation.

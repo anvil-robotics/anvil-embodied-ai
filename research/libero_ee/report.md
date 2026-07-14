@@ -2,6 +2,12 @@
 
 _Anvil embodied-AI · task TASK-006 · branch `feat/ee-libero-benchmark`_
 
+> **Flags used below** (added 2026-07-14, see
+> [`stage1-closeout.md`](stage1-closeout.md) for the full reasoning): **⚠ Provisional** — the
+> result stands but its interpretation carries an open doubt not yet resolved in this harness.
+> **⛔ Invalid** — the result should not be read as testing what its name claims (a known,
+> settled issue, not an open doubt).
+
 ---
 
 # Part 1 — Summary
@@ -20,8 +26,8 @@ holding the observation (8-dim native state) AND the trainer (`lerobot-train` ra
 | — (reference: world-frame delta command, relative delivery) | `native` | **88** | — |
 | #4 frame → hand | `native_hand` | 64 | **−24** |
 | #1 encoding → rot6d | `native_rot6d` | 76 | **−12** |
-| #2 abs/rel → absolute goal | `native_abs` | 80 | **−8** |
-| #3 anchor → n-0 | `native_n0` | 86 | −2 |
+| #2 abs/rel → absolute goal | `native_abs` ⚠ | 80 | **−8** |
+| #3 anchor → n-0 | `native_n0` ⛔ | 86 | −2 |
 
 **Factor magnitude: frame (−24) ≫ encoding (−12) > abs/rel (−8) > anchor (≈0).**
 
@@ -56,7 +62,9 @@ rot6d-OK + recovered-delta relative delivery.** Production's `ee_rel` fails beca
 worst choices — **body frame + chunk-anchor (n-0)** — and chunk-anchor is exactly the Diffusion
 killer; the fix is world-frame + per-frame anchor, not abandoning relative. Full recipe + rationale
 in Part 2 §8. **Caveats:** n=50, `libero_goal` only; task10 is near-ceiling for Diffusion (the
-discriminating signal is the world-n0 collapse).
+discriminating signal is the world-n0 collapse). Several individual conditions cited above carry
+their own open doubts flagged inline (⚠/⛔) — see [`stage1-closeout.md`](stage1-closeout.md) for
+the consolidated list.
 
 ---
 
@@ -103,12 +111,12 @@ episodes (experiment E1); deprecated and `seq` rows remain at n=10 (noted). task
 |---|---|---|---|---|
 | `native` | native delta command, WORLD frame, relative delivery (gold reference) | **88** | 100 | 50 / 10 |
 | `native_rot6d` | native family, action rot6d (#1 encoding flip) | **76** | 100 | 50 / 10 |
-| `native_abs` | native family, absolute goal `state+native_delta` (aa) (#2 abs/rel flip) | **80** | **98** | 50 |
-| `native_n0` | native family, goal per-frame-relativized (aa) (#3 anchor flip) | **86** | **98** | 50 |
+| `native_abs` ⚠ | native family, absolute goal `state+native_delta` (aa) (#2 abs/rel flip) | **80** | **98** | 50 |
+| `native_n0` ⛔ | native family, goal per-frame-relativized (aa) (#3 anchor flip) | **86** | **98** | 50 |
 | `native_hand` | native command rotated to HAND (body) frame (#4 frame flip) | **64** | **98** | 50 |
-| `goal-abs` | formal `state+native_delta`, recovered-delta relative delivery (goal family, 10-dim obs) | **94** | **98** | 50 |
-| `goal-world-n0` | goal target, world-frame anchor-relative (n-0), relative | **82** | **16** | 50 |
-| `goal-hand-n0` | goal target, hand-frame anchor-relative (n-0), relative | **76** | — | 50 |
+| `goal-abs` ⚠ | formal `state+native_delta`, recovered-delta relative delivery (goal family, 10-dim obs) | **94** | **98** | 50 |
+| `goal-world-n0` ⚠ | goal target, world-frame anchor-relative (n-0), relative | **82** | **16** | 50 |
+| `goal-hand-n0` ⚠ | goal target, hand-frame anchor-relative (n-0), relative | **76** | — | 50 |
 | `goal-world-seq` | real consecutive states (n-(n-1)), **absolute** delivery | 50 | — | 10 |
 | `goal-hand-seq` | real consecutive states, hand frame, **absolute** delivery | 30 | — | 10 |
 | ~~`ee_abs`~~ (deprecated) | Anvil act-from-obs absolute pose, calibrated | 40 | 50 | 10 |
@@ -144,8 +152,8 @@ encoding. Only same-family, single-variable flips are clean. All numbers task10,
 | — (reference: aa, delta, world, n-(n-1), relative) | `native` | **88** | — | baseline 60 |
 | #4 frame → hand | `native_hand` | 64 | **−24** | 71 (healthy) |
 | #1 encoding → rot6d | `native_rot6d` | 76 | **−12** | 60 (healthy) |
-| #2 abs/rel → absolute goal | `native_abs` | 80 | **−8** | 86 (healthy) |
-| #3 anchor → n-0 | `native_n0` | 86 | **−2** | 60 (healthy) |
+| #2 abs/rel → absolute goal | `native_abs` ⚠ | 80 | **−8** | 86 (healthy) |
+| #3 anchor → n-0 | `native_n0` ⛔ | 86 | **−2** | 60 (healthy) |
 
 Every condition's GT-replay ≈ the native baseline, so the eval paths execute ground truth
 correctly and each gap is a genuine **learnability** difference, not an eval artifact. **Factor
@@ -162,7 +170,14 @@ different obs: world-n0 82 vs hand-n0 76, +6 — same direction, smaller.)
 Diffusion** (100=100). Cross-task: the penalty **shrinks as rotation grows** (task14 −14, task11
 only −2) — opposite the naive expectation.
 
-### 3.3 Absolute vs relative target — **relative wins, −8** (sign-corrected)
+### 3.3 Absolute vs relative target — **relative wins, −8** (sign-corrected) ⚠ Provisional
+
+> **⚠ Provisional.** `native_abs`'s absolute-goal construction and the later
+> `native_ctrlgoal_relconv` absolute-delivery result (see
+> [`stage1-closeout.md`](stage1-closeout.md) Doubt 1) are not yet confirmed to generalize past
+> this one reconstruction formula — read this section's "relative wins" conclusion as
+> LIBERO/robosuite-specific until Stage 2 cross-validates it.
+
 `native` (relative delta command) 88 vs `native_abs` (absolute goal `state+native_delta`, same
 command, recovered-delta relative delivery) 80. **The relative command beats the absolute-goal
 formulation by 8pp.**
@@ -172,7 +187,13 @@ formulation by 8pp.**
 > goal family's richer 10-dim observation, not the absolute representation. This is exactly why
 > same-family isolation was necessary.
 
-### 3.4 Anchor — n-(n-1) vs n-0: **≈ none (−2), and not independently isolable in this family**
+### 3.4 Anchor — n-(n-1) vs n-0: **≈ none (−2), and not independently isolable in this family** ⛔ Invalid (`native_n0`)
+
+> **⛔ Invalid.** `native_n0` was structurally locked to `per_frame_anchor=True` at convert time
+> (see the "static column" point below), so it never actually tested a real chunk-start (n-0)
+> anchor. Its numbers stand as data but do not answer the n-(n-1)-vs-n-0 question — see
+> [`stage1-closeout.md`](stage1-closeout.md).
+
 `native` (n-(n-1)) 88 vs `native_n0` (n-0) 86 — no meaningful effect. But the deeper finding is
 structural: **a true chunk-start (n-0) anchor cannot be encoded in a static `lerobot-train`
 dataset column**, because chunks exist only at inference. A per-frame-consistent "n-0"
@@ -184,7 +205,14 @@ surfaced by a chunk-anchor eval bug — native_n0 GT-replay healthy at n_action_
 n=100 — fixed by anchoring the eval reconstruction per-frame to match the per-frame training
 target; `ZeroCalActionProcessorStep.per_frame_anchor`.)
 
-### 3.5 Secondary cross-checks (goal family — different 10-dim obs, NOT clean single-flips)
+### 3.5 Secondary cross-checks (goal family — different 10-dim obs, NOT clean single-flips) ⚠ Provisional
+
+> **⚠ Provisional / reframed.** The `goal` family's target construction (`state +
+> native_delta`, UNSCALED) was later discovered to carry no consistent physical unit — a
+> coincidental cancellation trick that happens to be recoverable to floating-point precision,
+> not a genuine absolute pose in `observation.state`'s units. The numbers below stand, but do
+> NOT read them as an "absolute pose" test — see [`stage1-closeout.md`](stage1-closeout.md).
+
 These use the anvil-trainer 10-dim observation, so read them as directional, not as clean isolations:
 - **Delivery is not a free flip.** Formal-goal targets (`goal-abs`, `n-0`) are unscaled → recovered-delta
   **relative** is correct (goal-abs 94, world-n0 82). Consecutive-`seq` targets are physical-unit →
@@ -206,8 +234,8 @@ Diffusion are the earlier n=10 runs):
 |---|---|---|
 | `native` (world, delta command, per-step) | 88 | 100 |
 | `native_rot6d` (→ rot6d) | 76 | 100 |
-| `native_abs` (→ absolute goal) | 80 | 98 |
-| `native_n0` (→ per-frame relative) | 86 | 98 |
+| `native_abs` ⚠ (→ absolute goal) | 80 | 98 |
+| `native_n0` ⛔ (→ per-frame relative) | 86 | 98 |
 | `native_hand` (→ hand frame) | 64 | 98 |
 
 Two findings:
@@ -372,7 +400,7 @@ ledger) with zero hand-written scripts — the harness's end-to-end acceptance o
 |---|---|---|---|
 | `native` | 88 | **90** | 80 |
 | `native_rot6d` | 76 | 76 | 78 |
-| `goal-abs` | **94** | 72 | 76 |
+| `goal-abs` ⚠ | **94** | 72 | 76 |
 | goal-abs − native | +6 | −18 | −4 |
 
 **Finding.** `goal-abs`'s task10 lead over native (+6) **does not generalize and is not even
@@ -421,7 +449,10 @@ policy on both ACT and Diffusion.
   not clearing the chunk-anchor state; no `/eval/episode_start` subscription — the analog of sim
   bug #5) is fixed on `fix/inference-episode-reset`.
 
-**Open questions for the production rebuild (out of scope for this sim branch):**
+**Open questions for the production rebuild (out of scope for this sim branch)** — see also
+[`stage1-closeout.md`](stage1-closeout.md) for the Stage 1 close-out's own open doubts (which
+absolute-delivery/`native_ctrlgoal` results this sim branch produced AFTER this section was
+written, and why they're flagged provisional rather than settled):
 - **Controller delivery** — whether the real controller wants a per-step incremental command or an
   absolute pose. Sim's `control_mode="absolute"` diverges open-loop (E5, not run) but that is
   robosuite-OSC-specific; answer it on the real controller, not LIBERO.

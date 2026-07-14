@@ -71,6 +71,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# The per-step "notable divergence" thresholds and the state_divergence metric
+# itself are STUDY-specific (a physical scale + an EE-encoding layout) — they
+# now live on the passed-in `adapter` (ReplayAdapter.divergence_pos_threshold/
+# divergence_rot_threshold/state_divergence), not as module constants here, so
+# this generic replay loop doesn't hardcode a LIBERO/robosuite-specific scale.
+# See research/libero_ee/ARCHITECTURE.md.
+
 
 @dataclass
 class GtActionProvider:
@@ -121,26 +128,32 @@ class GtActionProvider:
 
 
 def load_episode_actions(dataset_root: Path) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Return (episode_actions, episode_first_states) in episode order.
+    """Return (episode_actions, episode_states) in episode order.
 
     ``episode_actions[k]`` is an (T_k, action_dim) array of the stored
-    action column; ``episode_first_states[k]`` is frame 0's
-    ``observation.state`` (for the init-state alignment diagnostic).
+    action column; ``episode_states[k]`` is the FULL (T_k, state_dim)
+    ``observation.state`` trajectory for that episode — frame 0 is used for
+    the init-state alignment diagnostic, every frame for the per-step
+    divergence trace (see :func:`replay`). Previously only frame 0 was
+    retained (everything else was read off disk and discarded), which made
+    a per-step sim-vs-demo divergence check structurally impossible; this
+    keeps the whole trajectory instead.
     """
     ds = LeRobotDataset(repo_id="local", root=str(dataset_root))
     hf = ds.hf_dataset.select_columns(["episode_index", "action", "observation.state"]).with_format(None)
     episodes: dict[int, list] = {}
-    first_states: dict[int, np.ndarray] = {}
+    states: dict[int, list] = {}
     for ep_idx, action, state in zip(
         hf["episode_index"], hf["action"], hf["observation.state"], strict=True
     ):
         ep = int(ep_idx)
         if ep not in episodes:
             episodes[ep] = []
-            first_states[ep] = np.asarray(state, dtype=np.float32)
+            states[ep] = []
         episodes[ep].append(np.asarray(action, dtype=np.float32))
+        states[ep].append(np.asarray(state, dtype=np.float32))
     order = sorted(episodes)
-    return [np.stack(episodes[k]) for k in order], [first_states[k] for k in order]
+    return [np.stack(episodes[k]) for k in order], [np.stack(states[k]) for k in order]
 
 
 def replay(
@@ -157,7 +170,7 @@ def replay(
 ) -> dict:
     """Run the open-loop GT replay and return the summary dict (also
     written to ``output_dir/replay_info.json``)."""
-    episode_actions, episode_first_states = load_episode_actions(dataset_root)
+    episode_actions, episode_states = load_episode_actions(dataset_root)
     n_episodes = min(n_episodes, len(episode_actions))
 
     env_cfg = LiberoEnvConfig(task=task, task_ids=[task_id], control_mode=control_mode)
@@ -192,24 +205,36 @@ def replay(
                     step.reset_episode_state()
             observation, _ = env.reset(seed=ep)
             success = False
-            init_state_pos_err = None
             actions = episode_actions[ep]
+            demo_states = episode_states[ep]
             steps_run = 0
             env_max = env.call("_max_episode_steps")[0]
             limit = min(len(actions), max_steps or env_max)
+            # Per-step sim-actual-state vs. dataset-recorded-state-at-that-frame
+            # divergence trace. GT-replay is confirmed genuinely closed-loop
+            # (env.step() really advances physics every step; current_state is
+            # NEVER reset to a dataset-recorded value — see
+            # research/libero_ee/stage1-closeout.md) so this tracks REAL divergence
+            # between the sim's actually-reached trajectory and the original
+            # demo, not a repeated re-sync. t=0's entry is exactly the old
+            # init_state_pos_err/init_state_rot_err diagnostic, generalized to
+            # every subsequent step.
+            state_divergence: list[dict] = []
 
             for t in range(limit):
                 obs_proc = preprocess_observation(observation)
                 obs_proc = add_envs_task(env, obs_proc)
-                if t == 0:
-                    # Diagnostics only: how closely does this env reset's fixed
-                    # init state match the dataset episode's first frame?
-                    state_probe.observation(dict(obs_proc))
-                    if state_probe.last_anvil_state is not None:
-                        demo_pos = episode_first_states[ep][:3]
-                        init_state_pos_err = float(
-                            np.linalg.norm(state_probe.last_anvil_state[:3] - demo_pos)
-                        )
+                # Diagnostics only, independent of the treatment pipeline (uses
+                # state_probe, not obs_step, so this works even for action
+                # types with no obs_step at all, e.g. "native").
+                state_probe.observation(dict(obs_proc))
+                step_pos_err = None
+                step_rot_err = None
+                if state_probe.last_anvil_state is not None and t < len(demo_states):
+                    step_pos_err, step_rot_err = adapter.state_divergence(
+                        demo_states[t], state_probe.last_anvil_state
+                    )
+                state_divergence.append({"t": t, "pos_err": step_pos_err, "rot_err": step_rot_err})
                 obs_proc = env_pre(obs_proc)
 
                 provided = provider(actions[t])
@@ -225,6 +250,8 @@ def replay(
                             "stored": actions[t].tolist(),
                             "provided": provided.tolist(),
                             "native_cmd": action_numpy[0].tolist(),
+                            "state_pos_err": step_pos_err,
+                            "state_rot_err": step_rot_err,
                         }
                     )
                     + "\n"
@@ -237,6 +264,19 @@ def replay(
                 if bool(np.asarray(terminated).flatten()[0]) or bool(np.asarray(truncated).flatten()[0]):
                     break
 
+            init_state_pos_err = state_divergence[0]["pos_err"] if state_divergence else None
+            init_state_rot_err = state_divergence[0]["rot_err"] if state_divergence else None
+            pos_errs = [d["pos_err"] for d in state_divergence if d["pos_err"] is not None]
+            rot_errs = [d["rot_err"] for d in state_divergence if d["rot_err"] is not None]
+            first_exceed_t = next(
+                (
+                    d["t"] for d in state_divergence
+                    if (d["pos_err"] or 0.0) > adapter.divergence_pos_threshold
+                    or (d["rot_err"] or 0.0) > adapter.divergence_rot_threshold
+                ),
+                None,
+            )
+
             per_episode.append(
                 {
                     "episode": ep,
@@ -244,12 +284,23 @@ def replay(
                     "steps": steps_run,
                     "gt_steps": len(actions),
                     "init_state_pos_err": init_state_pos_err,
+                    "init_state_rot_err": init_state_rot_err,
+                    "state_pos_err_mean": float(np.mean(pos_errs)) if pos_errs else None,
+                    "state_pos_err_max": float(np.max(pos_errs)) if pos_errs else None,
+                    "state_rot_err_mean": float(np.mean(rot_errs)) if rot_errs else None,
+                    "state_rot_err_max": float(np.max(rot_errs)) if rot_errs else None,
+                    "state_divergence_first_exceed_t": first_exceed_t,
                 }
             )
             log.info(
-                "episode %d/%d: success=%s steps=%d init_pos_err=%s",
+                "episode %d/%d: success=%s steps=%d init_pos_err=%s init_rot_err=%s "
+                "pos_err_max=%s rot_err_max=%s first_exceed_t=%s",
                 ep + 1, n_episodes, success, steps_run,
                 f"{init_state_pos_err:.4f}" if init_state_pos_err is not None else "n/a",
+                f"{init_state_rot_err:.4f}" if init_state_rot_err is not None else "n/a",
+                f"{max(pos_errs):.4f}" if pos_errs else "n/a",
+                f"{max(rot_errs):.4f}" if rot_errs else "n/a",
+                first_exceed_t if first_exceed_t is not None else "n/a",
             )
 
     close_envs(envs)

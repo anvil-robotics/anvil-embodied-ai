@@ -1,0 +1,14 @@
+# afo_abs, RELATIVE delivery variant: same afo_abs_h1 dataset/target (the
+# observed future EE pose) as task10_afo_abs_h1_act.yaml -- only the eval
+# delivery differs (recovered-delta "relative" instead of raw "absolute"),
+# decoupling the target-representation question from the delivery-mechanism
+# question. See research/libero_ee/stage1-closeout.md.
+
+name: task10-afo-abs-rel-h1-act
+task_index: 10
+dataset_group: afo_abs_h1
+train:
+  policy_type: act
+eval:
+  action_type: afo_abs_rel_h1
+  n_episodes: 50

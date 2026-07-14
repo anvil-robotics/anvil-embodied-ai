@@ -165,6 +165,64 @@ def recovered_delta_native_action(
     return np.concatenate([native_delta_pos, native_delta_rot, [native_gripper]]).astype(np.float32)
 
 
+def relconv_native_action_from_target(
+    target_pos: np.ndarray,
+    target_rot6d: np.ndarray,
+    target_gripper: float,
+    current_state: np.ndarray,
+    current_gripper: float,
+    gripper_mode: str = "target_qpos",
+) -> np.ndarray:
+    """Convert an absolute Anvil EE target into a genuine
+    ``env.control_mode="relative"`` command via a two-step PHYSICAL
+    conversion — distinct from both existing delivery functions:
+
+    - :func:`absolute_native_action_from_target` feeds the target directly
+      via ``control_mode="absolute"`` — confirmed correct in isolation
+      (matching units, no scale needed) but empirically fails to track
+      (``native_ctrlgoal``/``afo_abs`` GT-replay, ~8-14%, mechanism
+      undiagnosed — see ``research/libero_ee/stage1-closeout.md``).
+    - :func:`recovered_delta_native_action` subtracts the current state but
+      applies NO scale factor — correct ONLY for
+      ``native_delta_to_goal``'s formal, already-command-scale composition;
+      applied to a genuine physical-unit target it double-scales (confirmed:
+      the ``afo_abs_rel_h1`` 0% failure).
+
+    This function is for a genuine physical-unit absolute target (e.g.
+    ``native_ctrlgoal``, ``afo_abs``): recover a REAL metres/radians delta
+    against the LIVE current state, then divide by robosuite's own
+    ``output_max`` (the confirmed exact command<->physical conversion
+    factor, see ``anvil_sim.libero_convert.OSC_OUTPUT_MAX_POS``/
+    ``OSC_OUTPUT_MAX_ROT``) to produce the normalized command
+    ``scale_action()`` expects, THEN clip to ``[-1, 1]``. Delivered via
+    ``env.control_mode="relative"`` — the command goes straight to
+    ``scale_action()``, not composed onto current state as an absolute goal.
+
+    Pure function (no torch/env dependency) so it can be unit-tested directly.
+    """
+    from anvil_sim.studies.libero_ee.libero_convert import OSC_OUTPUT_MAX_POS, OSC_OUTPUT_MAX_ROT
+
+    current_pos = current_state[:3]
+    current_R = quat_to_matrix(current_state[3:7])
+    target_R = rot6d_to_matrix(target_rot6d)
+
+    real_delta_pos = target_pos - current_pos
+    native_delta_pos = np.clip(real_delta_pos / OSC_OUTPUT_MAX_POS, -1.0, 1.0)
+
+    real_delta_rot = matrix_to_axis_angle(target_R @ current_R.T)
+    native_delta_rot = np.clip(real_delta_rot / OSC_OUTPUT_MAX_ROT, -1.0, 1.0)
+
+    if gripper_mode == "native_cmd":
+        native_gripper = float(np.clip(target_gripper, -1.0, 1.0))
+    elif gripper_mode == "target_qpos":
+        native_gripper = (
+            GRIPPER_CLOSE_CMD if abs(target_gripper) < abs(current_gripper) else GRIPPER_OPEN_CMD
+        )
+    else:
+        raise ValueError(f"gripper_mode must be 'target_qpos' or 'native_cmd', got {gripper_mode!r}")
+    return np.concatenate([native_delta_pos, native_delta_rot, [native_gripper]]).astype(np.float32)
+
+
 def rot6d_action_to_native(rot6d_action10: np.ndarray) -> np.ndarray:
     """Exact inverse of ``anvil_sim.libero_convert.native_action_to_rot6d``
     — used by the ``native_rot6d`` arm, which isolates rot6d rotation
@@ -461,7 +519,20 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
       reconstructing an ABSOLUTE target and feeding it directly (the
       ``"absolute"`` path) caused catastrophic failure there because the
       reconstructed target is a formal ``state + native_delta`` composition,
-      not a physically achievable pose by itself.
+      not a physically achievable pose by itself. Applying THIS delivery to
+      a genuine physical-unit target (``native_ctrlgoal``, ``afo_abs``)
+      instead double-scales it (confirmed: ``afo_abs_rel_h1`` 0% — see
+      ``"relative_converted"`` below for the correct handling of that case).
+    - ``"relative_converted"``: :func:`relconv_native_action_from_target` —
+      for a GENUINE physical-unit target (unlike the formal-composition
+      family above): subtract the current real state to get a real
+      metres/radians delta, THEN divide by robosuite's own ``output_max``
+      (the confirmed exact command<->physical factor) to produce the
+      normalized command, clip to ``[-1, 1]``, feed via
+      ``env.control_mode="relative"``. Diagnostic for whether a two-step
+      physical conversion avoids the undiagnosed ``"absolute"``-delivery
+      failure seen for ``native_ctrlgoal``/``afo_abs`` — see
+      ``research/libero_ee/stage1-closeout.md``.
     """
 
     mode: str
@@ -492,10 +563,17 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
     _chunk_anchor: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        # INVARIANT: mode/deliver/gripper_mode/action_encoding are a closed
+        # set of strings threaded through action()'s if/elif chains below with
+        # no else-raise — an unrecognized value would otherwise silently fall
+        # through to the wrong branch instead of failing at construction.
+        # See research/libero_ee/ARCHITECTURE.md.
         if self.mode not in _ZERO_CAL_MODES:
             raise ValueError(f"mode must be one of {_ZERO_CAL_MODES}, got {self.mode!r}")
-        if self.deliver not in ("absolute", "relative"):
-            raise ValueError(f"deliver must be 'absolute' or 'relative', got {self.deliver!r}")
+        if self.deliver not in ("absolute", "relative", "relative_converted"):
+            raise ValueError(
+                f"deliver must be 'absolute', 'relative', or 'relative_converted', got {self.deliver!r}"
+            )
         if self.gripper_mode not in ("target_qpos", "native_cmd"):
             raise ValueError(
                 f"gripper_mode must be 'target_qpos' or 'native_cmd', got {self.gripper_mode!r}"
@@ -504,6 +582,15 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
             raise ValueError(
                 f"action_encoding must be 'rot6d' or 'axis_angle', got {self.action_encoding!r}"
             )
+        if self.mode == "abs" and self.per_frame_anchor:
+            # INVARIANT: mode="abs" never reads `anchor` (see action() below)
+            # -- True here would silently do nothing rather than what the
+            # caller presumably intended, so reject it instead of accepting
+            # it as a structural no-op. Also means per_frame_anchor/L are
+            # both no-ops for every mode="abs" condition (native_ctrlgoal*,
+            # afo_*, native_abs) — confirmed empirically, not just by this
+            # guard. See research/libero_ee/ARCHITECTURE.md.
+            raise ValueError("per_frame_anchor has no effect when mode='abs' (leave it False)")
 
     def reset_episode_state(self) -> None:
         """Re-align chunk tracking with the policy's replan schedule at every
@@ -554,6 +641,15 @@ class ZeroCalActionProcessorStep(ActionProcessorStep):
                 target_pos=target_pos,
                 target_rot6d=target_rot6d,
                 target_gripper=target_gripper,
+                current_gripper=float(current_state[7]),
+                gripper_mode=self.gripper_mode,
+            )
+        elif self.deliver == "relative_converted":
+            native = relconv_native_action_from_target(
+                target_pos=target_pos,
+                target_rot6d=target_rot6d,
+                target_gripper=target_gripper,
+                current_state=current_state,
                 current_gripper=float(current_state[7]),
                 gripper_mode=self.gripper_mode,
             )
