@@ -162,7 +162,7 @@ class TaskOverrideTransform(Transform):
 
 
 # =============================================================================
-# EERelTransform — SE(3) relative EE actions
+# EERelativeTransform — SE(3) relative EE actions
 # =============================================================================
 
 
@@ -176,7 +176,7 @@ def _patch_obs_state_shape_8n_to_10n(
 ) -> None:
     """Patch dataset_to_policy_features to report observation.state as 10-dim/arm.
 
-    Shared by EEAbsTransform and EERelTransform — both convert obs.state from
+    Shared by EEAbsTransform and EERelativeTransform — both convert obs.state from
     quaternion layout (8 dims/arm) to rot6d layout (10 dims/arm), so the policy
     must be initialised with the correct (larger) input dimension.
 
@@ -267,11 +267,82 @@ class EEAbsTransform(Transform):
 
 
 # =============================================================================
-# EERelTransform
+# EEDeltaTransform
 # =============================================================================
 
 
-class EERelTransform(Transform):
+class EEDeltaTransform(Transform):
+    """Convert absolute EE obs from quaternion layout (8n) to rot6d layout (10n)
+    for the baked-delta ``ee_delta`` action_type.
+
+    ``action`` is NOT transformed here — it is already a baked per-frame
+    Delta(n-(n-1)) value, written to disk by mcap_converter
+    (``action_encoding="delta"``) at convert time, one arm-relativization
+    per frame against the immediately-preceding real state. Re-applying any
+    action-side relativization here would silently double-transform every
+    sample; ``action`` passes through completely unchanged, exactly as
+    EEAbsTransform already does for its own action column.
+
+    Structurally this mirrors EEAbsTransform's obs handling (layout
+    conversion only, no relativization) — NOT EERelativeTransform's obs
+    handling (which also relativizes obs against a chunk anchor). This is a
+    deliberate match to LIBERO's ``native`` convention: observation.state
+    stays absolute; only ``action`` carries the delta representation.
+
+    obs: 8 dims/arm (quat layout) → 10 dims/arm (rot6d layout), absolute
+    action: 10 dims/arm (rot6d layout), unchanged — already a baked delta
+    """
+
+    def __init__(self) -> None:
+        self._first_apply: bool = True
+
+    @property
+    def name(self) -> str:
+        return "ee_delta"
+
+    def is_enabled(self, config: TrainingConfig) -> bool:
+        return config.is_ee_delta
+
+    def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
+        import torch
+        from anvil_shared.ee_transform import ee_obs_abs_forward
+
+        if "observation.state" not in item:
+            return item
+
+        obs_full = item["observation.state"]  # (T, 8*n_arms) or (8*n_arms,)
+        obs_np = obs_full.detach().cpu().numpy().astype("float64")
+
+        obs_abs_np = ee_obs_abs_forward(obs_np)  # (..., 10*n_arms)
+        item["observation.state"] = torch.tensor(obs_abs_np, dtype=torch.float32)
+        # item["action"] is left untouched — already the baked Delta(n-(n-1))
+        # target written by mcap_converter; no double-transform here.
+
+        if self._first_apply:
+            n_arms = obs_np.shape[-1] // 8
+            log.info(
+                "[ee_delta] active — %d arm(s), obs (8n quat) → (10n rot6d, absolute); "
+                "action untouched (baked per-frame Delta(n-(n-1)) from mcap_converter)",
+                n_arms,
+            )
+            self._first_apply = False
+
+        return item
+
+    def patch_metadata(self, config: TrainingConfig, runner: Any = None) -> None:
+        """Patch lerobot's dataset_to_policy_features to report 10-dim obs shape."""
+        if not config.is_ee_delta:
+            return
+        _patch_obs_state_shape_8n_to_10n(config, runner)
+        log.info("[ee_delta] patched dataset_to_policy_features: obs.state 8n→10n/arm")
+
+
+# =============================================================================
+# EERelativeTransform
+# =============================================================================
+
+
+class EERelativeTransform(Transform):
     """Convert absolute EE obs and actions to SE(3)-relative representation.
 
     Both observation.state and action are anchored to the SAME current EE pose
@@ -287,14 +358,14 @@ class EERelTransform(Transform):
 
     @property
     def name(self) -> str:
-        return "ee_rel"
+        return "ee_relative"
 
     def is_enabled(self, config: TrainingConfig) -> bool:
-        return config.is_ee_rel
+        return config.is_ee_relative
 
     def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
         import torch
-        from anvil_shared.ee_transform import ee_obs_rel_forward, ee_rel_forward, n_arms_from_dims
+        from anvil_shared.ee_transform import ee_obs_relative_forward, ee_relative_forward, n_arms_from_dims
 
         if "action" not in item or "observation.state" not in item:
             return item
@@ -319,13 +390,13 @@ class EERelTransform(Transform):
             raise DataIntegrityError(str(exc)) from exc
 
         # Transform obs: (T, 8*n) → (T, 10*n) relative to anchor
-        obs_rel_np = ee_obs_rel_forward(obs_np, anchor_np)
+        obs_rel_np = ee_obs_relative_forward(obs_np, anchor_np)
 
         # Transform action: (horizon, 10*n) relative to anchor
         single = action_np.ndim == 1
         if single:
             action_np = action_np[None, :]
-        delta_np = ee_rel_forward(action_np, anchor_np)
+        delta_np = ee_relative_forward(action_np, anchor_np)
         if single:
             delta_np = delta_np[0]
 
@@ -334,7 +405,7 @@ class EERelTransform(Transform):
 
         if self._first_apply:
             log.info(
-                "[ee_rel] active — %d arm(s), obs (8n abs) → (10n rel), action (abs rot6d) → SE(3) relative",
+                "[ee_relative] active — %d arm(s), obs (8n abs) → (10n rel), action (abs rot6d) → SE(3) relative",
                 n_arms,
             )
             self._first_apply = False
@@ -348,7 +419,7 @@ class EERelTransform(Transform):
         relative layout) after this transform. The policy must be initialised with
         the correct input dimension.
         """
-        if not config.is_ee_rel:
+        if not config.is_ee_relative:
             return
         _patch_obs_state_shape_8n_to_10n(config, runner)
-        log.info("[ee_rel] patched dataset_to_policy_features: obs.state 8n→10n/arm")
+        log.info("[ee_relative] patched dataset_to_policy_features: obs.state 8n→10n/arm")

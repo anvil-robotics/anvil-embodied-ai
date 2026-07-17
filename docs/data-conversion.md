@@ -8,28 +8,42 @@ Convert MCAP recordings into LeRobot v3.0 datasets.
 
 ## mcap-convert
 
-Pick the config that matches your recording setup:
+Configs live under `configs/mcap_converter/`, split by schema version — see
+`configs/mcap_converter/v1.0/README.md` / `v1.1/README.md` for the full explanation, and
+`claude_docs/mcap-converter-encoding-refactor-plan.md` for the versioning/migration design.
+Pick a **v1.1** config for any new conversion.
 
-### Joint-space configs
+### v1.1 — current schema (use these)
 
-Output lands in `<output-dir>/joint-space/<input-dir-name>/`.
-
-| Config | Teleop mode | Arms | `observation.state` | `action` |
-|--------|-------------|------|---------------------|---------|
-| `openarm_bimanual.yaml` | Leader-follower | Bimanual | `(16,)` joint positions | Leader joint positions |
-| `openarm_bimanual_quest.yaml` | Quest VR | Bimanual | `(16,)` joint positions | Command topics |
-| `openarm_joint_bimanual.yaml` | Quest VR | Bimanual | `(16,)` joint positions | Command topics |
-| `openarm_single_quest.yaml` | Quest VR | Single (right) | `(8,)` joint positions | Command topics |
-| `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | `(8,)` joint positions | Observation lookahead |
-
-### EE Cartesian configs
-
-Output lands in `<output-dir>/ee-space/<input-dir-name>/`.
+Output lands in `<output-dir>/<joint|ee>-space/<input-dir-name>/` (or `ee-delta-space/`
+for `action_encoding: delta` configs).
 
 | Config | Teleop mode | Arms | `observation.state` | `action` |
 |--------|-------------|------|---------------------|---------|
-| `openarm_ee_bimanual.yaml` | Quest VR | Bimanual | `(16,)` xyz+quat+gripper ×2 | `(20,)` xyz+rot6d+gripper ×2 |
-| `openarm_ee_left.yaml` | Quest VR | Left only | `(8,)` xyz+quat+gripper | `(10,)` xyz+rot6d+gripper |
+| `v1.1/openarm_joint_bimanual.yaml` | Quest VR | Bimanual | `(16,)` joint positions | Command topics |
+| `v1.1/openarm_ee_bimanual.yaml` | Quest VR | Bimanual | `(16,)` xyz+quat+gripper ×2 | `(20,)` xyz+rot6d+gripper ×2 |
+| `v1.1/openarm_ee_bimanual_16x9.yaml` | Quest VR | Bimanual | same as above | same as above (16:9 cameras) |
+| `v1.1/openarm_ee_left.yaml` | Quest VR | Left only | `(8,)` xyz+quat+gripper | `(10,)` xyz+rot6d+gripper |
+
+**EE Cartesian format:**
+
+```
+observation.state per arm (8 dims): [x, y, z, qx, qy, qz, qw, gripper]
+action         per arm (10 dims): [x, y, z, r0, r1, r2, r3, r4, r5, gripper]
+```
+
+The action uses [6D rotation representation](https://arxiv.org/abs/1812.07035) for regression stability. `action_encoding: absolute` (the default) is act-from-obs — `action[t] = ee_pose[t]`; the future prediction window is applied by LeRobot's `delta_timestamps` at train time. `action_encoding: delta` instead bakes a per-frame Delta(n-(n-1)) target at convert time — see `claude_docs/mcap-converter-encoding-refactor-plan.md`. `observation_encoding` (`quaternion`/`rot6d`/`axis_angle`) independently controls `observation.state`'s rotation representation.
+
+### v1.0 — legacy, pre-unification schema (not directly usable — migrate first)
+
+| Config | Teleop mode | Arms | Notes |
+|--------|-------------|------|-------|
+| `v1.0/openarm_bimanual.yaml` | Leader-follower | Bimanual | action from leader-prefixed `joint_states` |
+| `v1.0/openarm_bimanual_quest.yaml` | Quest VR | Bimanual | topic-keyed `action_topics` — superseded by `v1.1/openarm_joint_bimanual.yaml` |
+| `v1.0/openarm_single_quest.yaml` | Quest VR | Single (right) | topic-keyed `action_topics` |
+| `v1.0/openarm_single_quest_afo.yaml` | Quest VR | Single (right) | topic-keyed `action_topics` + `action_from_observation` |
+
+These predate `data_space`/`observation_topics`/EE support entirely and are rejected outright by the current loader's strict mode. Run `dataset-config-migrate` on one first (see `configs/mcap_converter/v1.0/README.md`), or use the already-migrated `v1.1/openarm_joint_bimanual.yaml` directly for the Quest-bimanual case.
 
 **EE Cartesian format:**
 
@@ -42,25 +56,20 @@ The action uses [6D rotation representation](https://arxiv.org/abs/1812.07035) f
 
 ---
 
-**action_from_observation** — used by `openarm_single_quest_afo.yaml` when `/follower_*/commands` was not recorded. Instead of reading from command topics, the converter derives actions from the follower's own joint positions shifted N frames forward in time. Enable in your conversion config YAML:
-
-```yaml
-action_from_observation: true
-action_from_observation_n: 10 # action[t] = observation.state[t + n] (default n=10, ≈333ms at 30fps)
-```
+**action_from_observation** — a `v1.0`-only mechanism (`v1.0/openarm_single_quest_afo.yaml`), used when `/follower_*/commands` was not recorded: instead of reading from command topics, the converter derived actions from the follower's own joint positions shifted N frames forward in time. **No longer accepted by the current loader** (`action_from_observation`/`action_from_observation_n` have no field-level equivalent in the current schema — `dataset-config-migrate` drops them, see `configs/mcap_converter/v1.0/README.md`). For a current joint config, use empty `action_topics: {}` instead — EE mode's own act-from-obs convention (`action[t] = observation.state[t]`, future window applied by LeRobot's `delta_timestamps` at train time) already works the same way for joint mode.
 
 ```bash
 # Joint space — output: data/datasets/joint-space/my-sessions/
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
-  --config configs/mcap_converter/openarm_bimanual_quest.yaml \
+  --config configs/mcap_converter/v1.1/openarm_joint_bimanual.yaml \
   --output-dir data/datasets \
   --fps 30
 
 # EE Cartesian — output: data/datasets/ee-space/my-sessions/
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
-  --config configs/mcap_converter/openarm_ee_bimanual.yaml \
+  --config configs/mcap_converter/v1.1/openarm_ee_bimanual.yaml \
   --output-dir data/datasets
 ```
 
@@ -83,12 +92,12 @@ uv run mcap-convert \
 
 ---
 
-## dataset-validate
+## dataset-valid
 
 Validate a converted dataset — runs 5 structural checks.
 
 ```bash
-uv run dataset-validate --root data/datasets/my-sessions
+uv run dataset-valid --root data/datasets/my-sessions
 ```
 
 Expected: 5 checks all showing `[OK]`.

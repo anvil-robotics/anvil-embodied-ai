@@ -2,7 +2,7 @@
 
 Covers:
   1. EE dataset + ee_abs    → passes
-  2. EE dataset + ee_rel    → passes
+  2. EE dataset + ee_rel    → passes ("ee_rel" legacy alias for "ee_relative")
   3. EE dataset + joint_abs → DataIntegrityError
   4. Joint dataset + ee_abs → DataIntegrityError
   5. Joint dataset + joint_abs → passes
@@ -104,10 +104,13 @@ class TestActionTypeDatasetMatch:
                 cfg.validate_action_space()
 
     def test_joint_dataset_ee_rel_raises(self):
+        """"ee_rel" legacy alias is normalized to "ee_relative" before validation,
+        so the error message reports the canonical name."""
         with tempfile.TemporaryDirectory() as tmp:
             _write_info(Path(tmp), _joint_state_names(), _joint_action_names())
             cfg = _make_config(tmp, "ee_rel")
-            with pytest.raises(DataIntegrityError, match="ee_rel.*joint-space"):
+            assert cfg.action_type == "ee_relative"
+            with pytest.raises(DataIntegrityError, match="ee_relative.*joint-space"):
                 cfg.validate_action_space()
 
     def test_joint_dataset_joint_abs_passes(self):

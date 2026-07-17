@@ -1,7 +1,8 @@
-"""Smoke tests for the ee_rel transform pipeline.
+"""Smoke tests for the ee_relative transform pipeline (formerly named "ee_rel";
+"ee_rel" remains a permanent legacy alias for action_type, see test_enabled_for_ee_rel).
 
 Covers:
-  1. EERelTransform.apply — obs 8n→10n, action shape preserved
+  1. EERelativeTransform.apply — obs 8n→10n, action shape preserved
   2. C2 regression: n_obs_steps detection via model.config (not model directly)
   3. C1 regression: queue prefill shape for n_obs_steps=1,2,3
   4. patch_metadata — obs.state shape 8n→10n in dataset_to_policy_features
@@ -16,7 +17,7 @@ import numpy as np
 import pytest
 
 from anvil_trainer.config import TrainingConfig
-from anvil_trainer.transforms import EERelTransform
+from anvil_trainer.transforms import EERelativeTransform
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -51,15 +52,15 @@ def _make_action_tensor(horizon: int, n_arms: int, rng: np.random.Generator):
     return torch.tensor(data)
 
 
-# ── 1. EERelTransform.apply ───────────────────────────────────────────────────
+# ── 1. EERelativeTransform.apply ───────────────────────────────────────────────────
 
-class TestEERelTransformApply:
+class TestEERelativeTransformApply:
     def _apply(self, n_arms: int, n_obs_steps: int = 2, horizon: int = 16):
         import torch
 
         rng = np.random.default_rng(0)
         cfg = _make_config()
-        t = EERelTransform()
+        t = EERelativeTransform()
 
         obs = _make_obs_tensor(n_obs_steps, n_arms, rng)
         action = _make_action_tensor(horizon, n_arms, rng)
@@ -88,7 +89,7 @@ class TestEERelTransformApply:
 
         rng = np.random.default_rng(1)
         cfg = _make_config()
-        t = EERelTransform()
+        t = EERelativeTransform()
         obs = _make_obs_tensor(3, n_arms=1, rng=rng)
         action = _make_action_tensor(16, n_arms=1, rng=rng)
         out = t.apply({"observation.state": obs, "action": action}, cfg)
@@ -102,20 +103,26 @@ class TestEERelTransformApply:
     def test_missing_keys_passthrough(self):
         """Item without 'action' key is returned unchanged (no crash)."""
         cfg = _make_config()
-        t = EERelTransform()
+        t = EERelativeTransform()
         item: dict[str, Any] = {"task": "demo"}
         out = t.apply(item, cfg)
         assert out == item
 
     def test_not_enabled_for_ee_abs(self):
-        """EERelTransform reports disabled for ee_abs config."""
+        """EERelativeTransform reports disabled for ee_abs config."""
         cfg = _make_config("ee_abs")
-        t = EERelTransform()
+        t = EERelativeTransform()
         assert not t.is_enabled(cfg)
 
+    def test_enabled_for_ee_relative(self):
+        cfg = _make_config("ee_relative")
+        assert EERelativeTransform().is_enabled(cfg)
+
     def test_enabled_for_ee_rel(self):
+        """"ee_rel" is a permanent legacy alias for "ee_relative" — must behave identically."""
         cfg = _make_config("ee_rel")
-        assert EERelTransform().is_enabled(cfg)
+        assert cfg.action_type == "ee_relative"
+        assert EERelativeTransform().is_enabled(cfg)
 
 
 # ── 2. C2 regression: n_obs_steps detection ──────────────────────────────────
@@ -164,7 +171,7 @@ class TestQueuePrefillShape:
 
     @staticmethod
     def _run_prefill(n_obs_steps: int, n_arms: int = 1):
-        """Simulate _prefill_ee_rel_queue logic and return the queue."""
+        """Simulate _prefill_ee_relative_queue logic and return the queue."""
         torch = pytest.importorskip("torch", reason="torch not installed")
 
         state_dim = 10 * n_arms
@@ -250,7 +257,7 @@ class TestPatchMetadataShapeChange:
         from lerobot.datasets.feature_utils import dataset_to_policy_features as _orig
 
         cfg = _make_config()
-        t = EERelTransform()
+        t = EERelativeTransform()
 
         features = {
             "observation.state": {"shape": input_shape, "dtype": "float32", "names": None},
@@ -289,13 +296,13 @@ class TestPatchMetadataShapeChange:
         assert obs_shape is not None
         assert obs_shape[0] == 20, f"Expected 20, got {obs_shape[0]}"
 
-    def test_non_ee_rel_config_skips_patch(self):
+    def test_non_ee_relative_config_skips_patch(self):
         """patch_metadata is a no-op for ee_abs — does not modify the function."""
         import lerobot.datasets.feature_utils as _feat_utils
         from lerobot.datasets.feature_utils import dataset_to_policy_features as _orig
 
         cfg = _make_config("ee_abs")
-        t = EERelTransform()
+        t = EERelativeTransform()
         t.patch_metadata(cfg)
 
         # Function should be unchanged

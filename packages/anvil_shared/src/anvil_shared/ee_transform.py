@@ -14,14 +14,35 @@ Bimanual: state (16,), action (20,) — left arm first, right arm second.
 
 Public API
 ----------
-n_arms_from_dims(state_dim, action_dim)      → int
-ee_rel_forward(action_abs, state)            → np.ndarray   abs → rel action (training)
-ee_rel_inverse(action_rel, state)            → np.ndarray   rel → abs action (inference/eval)
-ee_obs_rel_forward(obs_abs, anchor)          → np.ndarray   abs obs (8n) → rel obs (10n)
-ee_obs_abs_forward(obs_abs)                  → np.ndarray   abs obs (8n quat) → abs obs (10n rot6d)
-ee_action_to_poses(action_abs, n_arms)       → list[dict]   for CommandedEEPose
-ee_rot6d_to_quat_layout(actions_10)         → np.ndarray   (T,10n) rot6d → (T,8n) quat
-ee_quat_layout_names(rot6d_names)            → list[str]    feature name conversion
+n_arms_from_dims(state_dim, action_dim)        → int
+ee_relative_forward(action_abs, state)         → np.ndarray   abs → rel action (training) [BODY-frame, n-0 mechanism]
+ee_relative_inverse(action_rel, state)         → np.ndarray   rel → abs action (inference/eval) [BODY-frame, n-0 mechanism]
+ee_delta_forward(action_abs, state)            → np.ndarray   abs → delta action (training) [WORLD-frame, n-(n-1) mechanism]
+ee_delta_inverse(delta, state)                 → np.ndarray   delta → abs action (inference/eval) [WORLD-frame, n-(n-1) mechanism]
+ee_obs_relative_forward(obs_abs, anchor)       → np.ndarray   abs obs (8n) → rel obs (10n)
+ee_obs_abs_forward(obs_abs)                    → np.ndarray   abs obs (8n quat) → abs obs (10n rot6d)
+ee_action_to_poses(action_abs, n_arms)         → list[dict]   for CommandedEEPose
+ee_rot6d_to_quat_layout(actions_10)            → np.ndarray   (T,10n) rot6d → (T,8n) quat
+ee_quat_layout_names(rot6d_names)              → list[str]    feature name conversion
+
+Body-frame vs. world-frame — do not confuse these two pairs
+-------------------------------------------------------------
+``ee_relative_forward``/``ee_relative_inverse`` implement the **Relative (n-0)**
+mechanism (chunk-anchor relativization, UMI-style): translation and rotation are
+BOTH expressed in the anchor state's own local/body frame
+(``R_state.T @ (...)``). This is the diagnosed root cause of the real-hardware
+jitter failure; kept only for the existing ``ee_relative`` action_type.
+
+``ee_delta_forward``/``ee_delta_inverse`` implement the **Delta (n-(n-1))**
+mechanism (per-frame anchor): translation and rotation are BOTH expressed in
+the WORLD frame (no rotation by the anchor state at all for translation;
+extrinsic/left-multiply composition for rotation), verified to match
+robosuite 1.4.0's own ``OperationalSpaceController`` composition exactly
+(``goal_orientation = delta_rotation @ current_orientation``,
+``goal_position = current_position + delta``) — the same delivery convention
+LIBERO's validated ``native`` condition relies on. These are NOT thin wrappers
+around the relative-pair's per-sample branch: the two pairs use genuinely
+different composition formulas, not just a different anchor.
 """
 from __future__ import annotations
 
@@ -65,7 +86,7 @@ def n_arms_from_dims(state_dim: int, action_dim: int) -> int:
     return n
 
 
-def ee_rel_forward(
+def ee_relative_forward(
     action_abs: np.ndarray,
     state: np.ndarray,
 ) -> np.ndarray:
@@ -138,13 +159,13 @@ def ee_rel_forward(
     return result
 
 
-def ee_rel_inverse(
+def ee_relative_inverse(
     action_rel: np.ndarray,
     state: np.ndarray,
 ) -> np.ndarray:
     """Restore SE(3)-relative EE actions to absolute representation.
 
-    Inverse of :func:`ee_rel_forward`.  Used at inference time to convert
+    Inverse of :func:`ee_relative_forward`.  Used at inference time to convert
     model outputs back to absolute EE poses before publishing.
 
     Per arm:
@@ -207,7 +228,159 @@ def ee_rel_inverse(
     return result
 
 
-def ee_obs_rel_forward(obs_abs: np.ndarray, anchor: np.ndarray) -> np.ndarray:
+def ee_delta_forward(
+    action_abs: np.ndarray,
+    state: np.ndarray,
+) -> np.ndarray:
+    """Convert absolute EE actions to per-frame WORLD-frame delta representation.
+
+    This is the forward transform for the Delta (n-(n-1)) mechanism: each
+    target is relative to the immediately-preceding real state (per-frame
+    anchor), never a fixed chunk-start anchor. Unlike :func:`ee_relative_forward`
+    (body-frame, UMI-style), BOTH translation and rotation here are expressed
+    in the WORLD frame — verified to match robosuite 1.4.0's own
+    ``OperationalSpaceController`` composition (``control_utils.py``):
+    ``goal_orientation = delta_rotation @ current_orientation`` (left-multiply,
+    extrinsic) and ``goal_position = current_position + delta`` (raw addition).
+
+    Per arm:
+        delta_xyz = act_xyz - state_xyz                   (WORLD-frame translation — no
+                                                             rotation by state at all)
+        R_delta   = R_action @ R_state.T                   (WORLD-frame/extrinsic rotation)
+        gripper   = act_gripper  (passthrough — kept in absolute space, not relativised)
+
+    Self-anchor first-frame convention: calling with ``action_abs == state``
+    (in absolute-pose terms) yields a zero translation delta and identity
+    rot6d ``[1,0,0,0,1,0]`` — this degenerates identically whether body-frame
+    or world-frame, so the existing identity-delta test precedent transfers
+    unchanged (see ``test_identity_state_identity_action_zero_delta`` and its
+    ``ee_delta_forward`` analogue).
+
+    Parameters
+    ----------
+    action_abs:
+        Absolute EE actions in rot6d encoding. Shape ``(..., 10 * n_arms)``.
+    state:
+        EE observation state to anchor against — for Delta(n-(n-1)) this is
+        the immediately-preceding real frame's state, NOT a fixed chunk
+        anchor (that distinction lives entirely in what the caller passes
+        here, not in this function). Either ``(8 * n_arms,)`` (single
+        reference, broadcasts) or ``(..., 8 * n_arms)`` (per-sample, same
+        leading dims as ``action_abs``) — both are handled uniformly via
+        numpy broadcasting, no branching needed (translation is a plain
+        subtraction; rotation composition via ``@`` broadcasts a bare
+        ``(3, 3)`` against a stack of ``(..., 3, 3)`` matrices natively).
+
+    Returns
+    -------
+    np.ndarray
+        Delta actions with the same shape as ``action_abs``.
+    """
+    action_abs = np.asarray(action_abs, dtype=np.float64)
+    state = np.asarray(state, dtype=np.float64)
+
+    action_dim = action_abs.shape[-1]
+    state_dim = state.shape[-1]
+    n_arms = n_arms_from_dims(state_dim, action_dim)
+
+    result = action_abs.copy()
+
+    for arm in range(n_arms):
+        s0 = arm * EE_STATE_DIM_PER_ARM
+        a0 = arm * EE_ACTION_DIM_PER_ARM
+
+        state_xyz = state[..., s0:s0 + 3]
+        state_quat = state[..., s0 + 3:s0 + 7]
+        act_xyz = action_abs[..., a0:a0 + 3]
+        act_r6d = action_abs[..., a0 + 3:a0 + 9]
+
+        # WORLD-frame translation: plain difference, no rotation by state.
+        result[..., a0:a0 + 3] = act_xyz - state_xyz
+
+        # WORLD-frame/extrinsic rotation: R_delta = R_action @ R_state.T.
+        Rs_action = rot6ds_to_matrices(act_r6d)         # (..., 3, 3)
+        Rs_state = quats_to_matrices(state_quat)        # (..., 3, 3) — broadcasts if state is (3,3)
+        Rs_state_T = Rs_state.swapaxes(-2, -1)          # (..., 3, 3)
+        Rs_delta = Rs_action @ Rs_state_T                # (..., 3, 3) — numpy broadcasts (3,3) @ (...,3,3)
+
+        result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_delta)
+        # gripper unchanged (already copied via .copy())
+
+    return result
+
+
+def ee_delta_inverse(
+    delta: np.ndarray,
+    state: np.ndarray,
+) -> np.ndarray:
+    """Restore a per-frame WORLD-frame delta to absolute EE actions.
+
+    Exact inverse of :func:`ee_delta_forward`. This is the composition Item 2's
+    decoupled delta-mode publish loop uses at inference time: given the
+    freshest observed ``state`` (``R_obs``/``obs_xyz``) and the model's
+    predicted delta, compute the absolute target to publish.
+
+    Per arm:
+        abs_xyz = state_xyz + delta_xyz                    (WORLD-frame; matches robosuite's
+                                                              own ``goal_position = current + delta``)
+        R_abs   = R_delta @ R_state                         (WORLD-frame/extrinsic; matches
+                                                              robosuite's own
+                                                              ``goal_orientation = delta_rotation
+                                                              @ current_orientation``)
+        gripper = delta_gripper  (passthrough — was kept absolute during forward transform)
+
+    Algebraic check: substituting the forward formula,
+    ``R_delta @ R_state = (R_action @ R_state.T) @ R_state = R_action``
+    (since ``R_state`` is orthonormal, ``R_state.T @ R_state = I``) — confirmed
+    exact inverse, no asymmetry between forward and inverse composition order.
+
+    Parameters
+    ----------
+    delta:
+        Delta EE actions (rot6d encoding). Shape ``(..., 10 * n_arms)``.
+    state:
+        The state to restore against — at inference time, the FRESHEST
+        observed state at publish time (not a stale chunk-generation-time
+        anchor). Either ``(8 * n_arms,)`` or ``(..., 8 * n_arms)``.
+
+    Returns
+    -------
+    np.ndarray
+        Absolute EE actions (rot6d encoded), same shape as ``delta``.
+    """
+    delta = np.asarray(delta, dtype=np.float64)
+    state = np.asarray(state, dtype=np.float64)
+
+    action_dim = delta.shape[-1]
+    state_dim = state.shape[-1]
+    n_arms = n_arms_from_dims(state_dim, action_dim)
+
+    result = delta.copy()
+
+    for arm in range(n_arms):
+        s0 = arm * EE_STATE_DIM_PER_ARM
+        a0 = arm * EE_ACTION_DIM_PER_ARM
+
+        state_xyz = state[..., s0:s0 + 3]
+        state_quat = state[..., s0 + 3:s0 + 7]
+        delta_xyz = delta[..., a0:a0 + 3]
+        delta_r6d = delta[..., a0 + 3:a0 + 9]
+
+        # WORLD-frame translation: plain addition.
+        result[..., a0:a0 + 3] = state_xyz + delta_xyz
+
+        # WORLD-frame/extrinsic rotation: R_abs = R_delta @ R_state.
+        Rs_delta = rot6ds_to_matrices(delta_r6d)        # (..., 3, 3)
+        Rs_state = quats_to_matrices(state_quat)        # (..., 3, 3)
+        Rs_abs = Rs_delta @ Rs_state                     # (..., 3, 3) — broadcasts (3,3) case natively
+
+        result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_abs)
+        # gripper unchanged
+
+    return result
+
+
+def ee_obs_relative_forward(obs_abs: np.ndarray, anchor: np.ndarray) -> np.ndarray:
     """Convert absolute EE observations to SE(3)-relative, rot6d layout.
 
     Matches UMI's obs relativisation: ``T_rel = inv(T_anchor) @ T_obs``.

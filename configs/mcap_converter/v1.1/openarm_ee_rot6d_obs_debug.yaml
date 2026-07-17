@@ -1,0 +1,59 @@
+# =============================================================================
+# OpenArm MCAP to LeRobot — EE Cartesian, rot6d OBSERVATION encoding, single
+# right arm — DEBUG TEMPLATE
+# =============================================================================
+#
+# Exercises `observation_encoding: "rot6d"` through the real CLI (not just unit
+# tests) — see claude_docs/mcap-converter-encoding-refactor-plan.md Part 3.
+# Every other shipped EE config defaults to "quaternion" (byte-identical to
+# pre-refactor behavior); this is the first config that actually selects a
+# different on-disk observation.state rotation representation.
+#
+# KNOWN LIMITATION (deliberate, documented in the design doc): only
+# mcap_converter is rotation-encoding-aware as of this pass. A dataset
+# converted with this config passes mcap-convert cleanly (confirmed: correct
+# 10-dim observation.state), but `anvil-gt-replay --encoding absolute` on it
+# currently CRASHES with ValueError (n_arms_from_dims hardcodes 8-dim
+# quaternion state) — a loud failure, not a silent wrong answer, which is the
+# acceptable shape of this scope boundary. Not trainable either —
+# anvil_trainer/anvil_eval/the ROS2 inference stack still hard-assume
+# quaternion observation.state on disk. This config exists to prove the
+# conversion-side math is correct, not to produce a dataset ready for use.
+#
+# Topic/camera layout matches tests/smoke/fixtures/ee-session/{0001..0005}/,
+# same as openarm_ee_delta_debug.yaml:
+#
+#   uv run mcap-convert \
+#     -i tests/smoke/fixtures/ee-session \
+#     -o /tmp/ee-rot6d-obs-debug \
+#     --config configs/mcap_converter/v1.1/openarm_ee_rot6d_obs_debug.yaml
+#
+# Output (per frame):
+#   observation.state  float32 (10,)  = [x,y,z, r0..r5, gripper]   (rot6d, NOT quaternion)
+#   action             float32 (10,)  = [x,y,z, rot6d(6), gripper] (always rot6d, unrelated knob)
+# =============================================================================
+
+schema_version: "1.1"
+data_space: "ee"
+
+action_encoding: "absolute"
+
+# The only field that distinguishes this file from openarm_ee_left.yaml.
+observation_encoding: "rot6d"
+
+observation_topics:
+  right: "/ee_pose_right"
+
+action_topics: {}
+
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed": "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed": "chest"
+
+image_resolution: [640, 480]

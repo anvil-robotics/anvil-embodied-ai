@@ -63,6 +63,27 @@ MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
 
 If `Control Loop` hits 30 Hz, the setup is ready for real hardware.
 
+### EE-mode fake hardware (`ee_delta` / `ee_relative` / `ee_abs`)
+
+By default the fake-hardware mock is joint-space only. Set `EE_MODE=true` to
+switch it to EE-space: the mock publishes `CommandedEEPose` observations on
+`/ee_pose_<arm>` and, critically, **echoes each received command on
+`/commanded_ee_<arm>` straight back as the next published observation**
+(`next_ee_pose ≈ last_received_command`) — this closed-loop feedback is what
+actually exercises the decoupled delta-mode publish loop's self-correction
+(`absolute_target = obs_pose ∘ delta`), not just topic wiring.
+
+```bash
+EE_MODE=true CONFIG_FILE=./configs/lerobot_control/inference_ee.yaml \
+MODEL_PATH=$(pwd)/model_zoo/ee-space/my-dataset/checkpoints/last \
+./scripts/run_inference.sh --fake-hardware --profile inference up --build
+```
+
+Explicitly out of scope: real actuation dynamics, physical velocity/latency
+limits, sensor latency — the echo is instantaneous and perfect. This
+validates software timing/composition correctness only, never physical
+behavior; it is not a substitute for real-hardware validation.
+
 ## Production (Real Robot)
 
 ```bash

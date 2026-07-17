@@ -12,6 +12,7 @@
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>control_msgs</exec_depend>
+  <exec_depend>anvil_msgs</exec_depend>
   <!-- cv_bridge removed - using custom image converter to avoid NumPy conflicts -->
 
   <test_depend>ament_copyright</test_depend>

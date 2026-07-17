@@ -115,7 +115,9 @@ class EvalRecorderNode(Node):
         self._action_type: str = (
             self.get_parameter("action_type").get_parameter_value().string_value
         )
-        self._is_ee: bool = self._action_type in ("ee_abs", "ee_rel")
+        # "ee_rel" is a permanent legacy alias for "ee_relative" — accept both
+        # since this ROS param is not routed through normalize_action_type().
+        self._is_ee: bool = self._action_type in ("ee_abs", "ee_relative", "ee_rel")
         self._dataset_fps: float = (
             self.get_parameter("dataset_fps").get_parameter_value().double_value
         )

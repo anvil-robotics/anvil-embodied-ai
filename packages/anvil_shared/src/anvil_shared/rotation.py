@@ -15,6 +15,14 @@ This is preferred over Euler / quaternion for regression targets in
 diffusion policies because it has no discontinuities and is easy to
 reconstruct (Gram-Schmidt of the first two columns + cross product for
 the third).
+
+The axis-angle representation is a 3-vector ``angle * unit_axis`` (a.k.a. rotation vector /
+Rodrigues vector). Unlike rot6d, extracting it FROM a matrix has two genuine numerical
+singularities — ``angle ≈ 0`` (axis undefined; handled by returning the zero vector
+directly) and ``angle ≈ π`` (the direct skew-symmetric extraction is a 0/0 division there;
+handled by recovering the axis from the diagonal of ``(R + I) / 2`` instead, which equals
+``axis ⊗ axis`` at that angle). Going the other direction (axis-angle → matrix, via
+Rodrigues' rotation formula) has no singularity at any angle.
 """
 from __future__ import annotations
 
@@ -239,3 +247,141 @@ def rot6ds_to_matrices(r6ds) -> np.ndarray:
 
     b3 = np.cross(b1, b2)  # (..., 3)
     return np.stack([b1, b2, b3], axis=-1)  # (..., 3, 3)
+
+
+# =============================================================================
+# Axis-angle utilities
+# =============================================================================
+
+_AXIS_ANGLE_NEAR_ZERO = 1e-8
+_AXIS_ANGLE_NEAR_PI = np.pi - 1e-6
+
+
+def matrix_to_axis_angle(R) -> np.ndarray:
+    """Convert a 3×3 rotation matrix to an axis-angle vector (``angle * unit_axis``).
+
+    Two degenerate regimes are handled with explicit branches, not a single epsilon guard:
+
+    - ``angle ≈ 0`` (identity): the axis is undefined but the output is unambiguous — the
+      zero vector, no division needed.
+    - ``angle ≈ π``: the skew-symmetric extraction (``1/(2 sin(angle))`` times the
+      antisymmetric part of ``R``) is a 0/0 division there, since ``sin(π) = 0``. The axis
+      is instead recovered from the diagonal of ``(R + I) / 2``, which equals
+      ``axis ⊗ axis`` at this angle (standard identity: at ``angle=π``,
+      ``R = 2 · axis⊗axis - I``). Signs are disambiguated from the off-diagonal terms,
+      anchored on the largest-magnitude axis component for numerical stability. The sign of
+      the whole axis is otherwise arbitrary at ``angle=π`` (``(axis, π)`` and
+      ``(-axis, π)`` represent the same rotation) — this is a deterministic tie-break, not
+      a correctness concern.
+    """
+    R = np.asarray(R, dtype=float)
+    if R.shape != (3, 3):
+        raise ValueError(f"matrix_to_axis_angle expects shape (3,3), got {R.shape}")
+
+    trace = R[0, 0] + R[1, 1] + R[2, 2]
+    cos_angle = np.clip((trace - 1.0) / 2.0, -1.0, 1.0)
+    angle = float(np.arccos(cos_angle))
+
+    if angle < _AXIS_ANGLE_NEAR_ZERO:
+        return np.zeros(3, dtype=float)
+
+    if angle > _AXIS_ANGLE_NEAR_PI:
+        B = (R + np.eye(3)) / 2.0
+        axis = np.sqrt(np.clip(np.diag(B), 0.0, None))
+        k = int(np.argmax(axis))
+        for i in range(3):
+            if i != k and B[k, i] < 0:
+                axis[i] = -axis[i]
+        return axis * angle
+
+    axis = (1.0 / (2.0 * np.sin(angle))) * np.array(
+        [R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]]
+    )
+    return axis * angle
+
+
+def axis_angle_to_matrix(v) -> np.ndarray:
+    """Convert an axis-angle vector (``angle * unit_axis``) to a 3×3 rotation matrix via
+    Rodrigues' rotation formula. No singularity at any angle, including π — this direction
+    is well-defined everywhere, unlike :func:`matrix_to_axis_angle`.
+    """
+    v = np.asarray(v, dtype=float).reshape(-1)
+    if v.shape != (3,):
+        raise ValueError(f"axis_angle_to_matrix expects shape (3,), got {v.shape}")
+    angle = float(np.linalg.norm(v))
+    if angle < 1e-12:
+        return np.eye(3, dtype=float)
+    x, y, z = v / angle
+    K = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=float)
+    return np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
+
+
+def matrices_to_axis_angles(Rs) -> np.ndarray:
+    """Batch counterpart of :func:`matrix_to_axis_angle`. Supports arbitrary leading dims.
+
+    Per-sample branch selection (near-zero / near-π / generic) via ``np.where``, matching
+    this file's existing vectorization convention (see :func:`matrices_to_quats`) — not a
+    Python-level loop.
+    """
+    Rs = np.asarray(Rs, dtype=float)
+    if Rs.shape[-2:] != (3, 3):
+        raise ValueError(f"matrices_to_axis_angles: last two dims must be (3,3), got {Rs.shape}")
+
+    trace = Rs[..., 0, 0] + Rs[..., 1, 1] + Rs[..., 2, 2]
+    cos_angle = np.clip((trace - 1.0) / 2.0, -1.0, 1.0)
+    angle = np.arccos(cos_angle)  # (...,)
+
+    near_zero = angle < _AXIS_ANGLE_NEAR_ZERO
+    near_pi = angle > _AXIS_ANGLE_NEAR_PI
+    generic = ~near_zero & ~near_pi
+
+    # Generic branch: skew-symmetric extraction. Guard the denominator everywhere (not just
+    # where `generic` holds) so non-generic entries never divide by ~0 before being
+    # overwritten by np.where below.
+    sin_angle = np.sin(angle)
+    safe_sin = np.where(generic, sin_angle, 1.0)
+    axis_generic = np.stack([
+        Rs[..., 2, 1] - Rs[..., 1, 2],
+        Rs[..., 0, 2] - Rs[..., 2, 0],
+        Rs[..., 1, 0] - Rs[..., 0, 1],
+    ], axis=-1) / (2.0 * safe_sin)[..., None]
+
+    # near-pi branch: axis from the diagonal of (R + I) / 2 = axis ⊗ axis at angle = π.
+    B = (Rs + np.eye(3)) / 2.0
+    axis_pi_mag = np.sqrt(np.clip(np.diagonal(B, axis1=-2, axis2=-1), 0.0, None))  # (..., 3)
+    k = np.argmax(axis_pi_mag, axis=-1)  # (...,)
+    B_k_row = np.take_along_axis(B, k[..., None, None], axis=-2)[..., 0, :]  # (..., 3)
+    signs = np.where(B_k_row < 0, -1.0, 1.0)
+    axis_pi = axis_pi_mag * signs
+
+    axis = np.where(
+        near_zero[..., None], np.zeros_like(axis_generic),
+        np.where(near_pi[..., None], axis_pi, axis_generic),
+    )
+    return axis * angle[..., None]
+
+
+def axis_angles_to_matrices(vs) -> np.ndarray:
+    """Batch counterpart of :func:`axis_angle_to_matrix`. Supports arbitrary leading dims."""
+    vs = np.asarray(vs, dtype=float)
+    if vs.shape[-1] != 3:
+        raise ValueError(f"axis_angles_to_matrices: last dim must be 3, got {vs.shape}")
+
+    angle = np.linalg.norm(vs, axis=-1)  # (...,)
+    is_identity = angle < 1e-12
+    safe_angle = np.where(is_identity, 1.0, angle)
+    axis = vs / safe_angle[..., None]  # (..., 3) — garbage where is_identity, overwritten below
+
+    x, y, z = axis[..., 0], axis[..., 1], axis[..., 2]
+    zeros = np.zeros_like(x)
+    K = np.stack([
+        np.stack([zeros, -z, y], axis=-1),
+        np.stack([z, zeros, -x], axis=-1),
+        np.stack([-y, x, zeros], axis=-1),
+    ], axis=-2)  # (..., 3, 3)
+
+    sin_a = np.sin(angle)[..., None, None]
+    cos_term = (1.0 - np.cos(angle))[..., None, None]
+    R = np.eye(3) + sin_a * K + cos_term * (K @ K)
+
+    return np.where(is_identity[..., None, None], np.broadcast_to(np.eye(3), R.shape), R)

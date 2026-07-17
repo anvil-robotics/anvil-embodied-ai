@@ -189,10 +189,14 @@ class LeRobotWriter:
         ``action`` features ``(sum_arm n_joints,)``. Multi-robot setups
         (left/right) concatenate per-arm joint names in sorted-arm order.
 
-        EE mode: single concatenated ``observation.state`` (8 * n_arms,) with
-        per-arm slice ``[x, y, z, qx, qy, qz, qw, gripper]`` and ``action``
-        (10 * n_arms,) with per-arm slice ``[x, y, z, r0..r5, gripper]``.
-        Concatenation order = ``config.observation_topics`` insertion order.
+        EE mode: single concatenated ``observation.state`` — per-arm slice
+        ``[x, y, z, <rotation encoding>, gripper]``, dimension/names depending on
+        ``config.observation_encoding`` (quaternion: 8/arm ``qx,qy,qz,qw``; rot6d: 10/arm
+        ``r0..r5``; axis_angle: 7/arm ``ax,ay,az`` — see ``config/encodings.py`` for the
+        single source of truth for this table) — and ``action`` (10 * n_arms,) with
+        per-arm slice ``[x, y, z, r0..r5, gripper]``, always rot6d regardless of
+        ``observation_encoding``. Concatenation order = ``config.observation_topics``
+        insertion order.
 
         Args:
             joint_names: (joint mode) ``{robot_prefix: [joint_id, ...]}``;
@@ -215,12 +219,13 @@ class LeRobotWriter:
 
         # EE mode — single canonical features keyed off observation_topics arms.
         if self.config.is_ee:
+            from ..config.encodings import observation_state_names_per_arm
+
+            obs_names_per_arm = observation_state_names_per_arm(self.config.observation_encoding)
             state_names: List[str] = []
             action_names: List[str] = []
             for arm_id in self.config.arms:  # observation_topics insertion order
-                state_names.extend(
-                    f"{arm_id}_{suf}" for suf in ("x", "y", "z", "qx", "qy", "qz", "qw", "gripper")
-                )
+                state_names.extend(f"{arm_id}_{suf}" for suf in obs_names_per_arm)
                 action_names.extend(
                     f"{arm_id}_{suf}" for suf in (
                         "x", "y", "z", "r0", "r1", "r2", "r3", "r4", "r5", "gripper"

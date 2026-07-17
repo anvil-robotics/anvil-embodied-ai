@@ -103,7 +103,7 @@ class TestPatchAlwaysInstalled:
         cfg = TrainingConfig(
             split_ratio=[8.0, 1.0, 1.0],
             dataset_root=DATASET_ROOT,
-            action_type="ee_rel",  # EERelTransform is enabled for ee_rel
+            action_type="ee_rel",  # legacy alias for ee_relative; EERelativeTransform is enabled
         )
         runner = TransformRunner(cfg)
         assert len(runner.active_transforms) > 0

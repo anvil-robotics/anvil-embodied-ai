@@ -59,8 +59,10 @@ htmlcov/
 # Data files (users download their own)
 data/raw/*
 data/datasets/*
+data/debug/*
 !data/raw/.gitkeep
 !data/datasets/.gitkeep
+!data/debug/.gitkeep
 !data/README.md
 # Test fixtures — checked-in stubs so tests run without downloading data
 !data/raw/test-session/

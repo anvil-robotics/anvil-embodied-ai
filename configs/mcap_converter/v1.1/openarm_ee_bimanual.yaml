@@ -1,20 +1,27 @@
 # =============================================================================
-# OpenArm MCAP to LeRobot — EE Cartesian, LEFT ARM ONLY
+# OpenArm MCAP to LeRobot — EE Cartesian, BIMANUAL (primary EE default)
 # =============================================================================
 #
-# Output (per frame):
-#   observation.state  float32 (8,)   = [x,y,z, qx,qy,qz,qw, gripper]
-#   action             float32 (10,)  = [x,y,z, rot6d(6), gripper]
+# Output (per frame; LeRobot delta_timestamps applies the future window
+# at train time):
+#   observation.state  float32 (16,)  =  [left:  x,y,z, qx,qy,qz,qw, gripper]
+#                                        [right: x,y,z, qx,qy,qz,qw, gripper]
+#   action             float32 (20,)  =  [left:  x,y,z, rot6d(6), gripper]
+#                                        [right: x,y,z, rot6d(6), gripper]
 #   observation.images.{chest,waist,wrist_l,wrist_r}
 #
-# Single-arm = list only one entry under observation_topics. The right arm's
-# /ee_pose_right topic is ignored even if present in the MCAP.
+# `action_topics: {}` is mandatory in EE mode — the action source is the same
+# /ee_pose_<arm> message used for observation, encoded with rot6d.
 # =============================================================================
 
+schema_version: "1.1"
 data_space: "ee"
+action_encoding: "absolute"
+observation_encoding: "quaternion"
 
 observation_topics:
-  left: "/ee_pose_left"
+  left:  "/ee_pose_left"
+  right: "/ee_pose_right"
 
 action_topics: {}
 

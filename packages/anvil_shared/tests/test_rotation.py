@@ -5,6 +5,10 @@ import numpy as np
 import pytest
 
 from anvil_shared.rotation import (
+    axis_angle_to_matrix,
+    axis_angles_to_matrices,
+    matrices_to_axis_angles,
+    matrix_to_axis_angle,
     matrix_to_quat,
     matrix_to_rot6d,
     quat_to_matrix,
@@ -124,3 +128,119 @@ def test_matrix_to_quat_all_shepperd_branches():
         matrix_to_rot6d(np.eye(2))
     with pytest.raises(ValueError):
         rot6d_to_matrix(np.zeros(5))
+
+
+# =============================================================================
+# Axis-angle
+# =============================================================================
+
+
+def _random_rotation_matrix(rng: np.random.Generator) -> np.ndarray:
+    return quat_to_matrix(_random_quat(rng))
+
+
+def test_axis_angle_matrix_roundtrip_generic_angles():
+    """Generic angles (well away from both 0 and pi) — the ordinary skew-symmetric branch."""
+    rng = np.random.default_rng(2)
+    for _ in range(64):
+        R = _random_rotation_matrix(rng)
+        trace = np.trace(R)
+        angle = np.arccos(np.clip((trace - 1) / 2, -1, 1))
+        if angle < 0.1 or angle > np.pi - 0.1:
+            continue  # exercised separately below; avoid flaky near-singularity draws here
+        v = matrix_to_axis_angle(R)
+        np.testing.assert_allclose(np.linalg.norm(v), angle, atol=1e-10)
+        R2 = axis_angle_to_matrix(v)
+        np.testing.assert_allclose(R, R2, atol=1e-9)
+
+
+def test_axis_angle_at_identity():
+    """angle ~ 0: axis is undefined, output must be the zero vector, not NaN."""
+    v = matrix_to_axis_angle(np.eye(3))
+    np.testing.assert_allclose(v, np.zeros(3), atol=1e-12)
+    R = axis_angle_to_matrix(v)
+    np.testing.assert_allclose(R, np.eye(3), atol=1e-12)
+
+
+def test_axis_angle_at_pi_known_value():
+    """180 deg about Z: R = diag(-1,-1,1). Must not be NaN (0/0 in the naive formula) and
+    must round-trip through axis_angle_to_matrix back to the same rotation."""
+    R = np.diag([-1.0, -1.0, 1.0])
+    v = matrix_to_axis_angle(R)
+    assert np.all(np.isfinite(v))
+    np.testing.assert_allclose(np.linalg.norm(v), np.pi, atol=1e-8)
+    R2 = axis_angle_to_matrix(v)
+    np.testing.assert_allclose(R, R2, atol=1e-9)
+
+
+def test_axis_angle_at_pi_generic_axis():
+    """180 deg about a generic (non-axis-aligned) unit vector — exercises the sign
+    disambiguation branch with off-diagonal terms actually nonzero."""
+    axis = np.array([1.0, 2.0, 2.0])
+    axis = axis / np.linalg.norm(axis)
+    K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    R = np.eye(3) + 2 * (K @ K)  # Rodrigues at angle=pi: R = I + 2*K^2
+    np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-9)  # sanity: valid rotation
+    v = matrix_to_axis_angle(R)
+    assert np.all(np.isfinite(v))
+    np.testing.assert_allclose(np.linalg.norm(v), np.pi, atol=1e-8)
+    R2 = axis_angle_to_matrix(v)
+    np.testing.assert_allclose(R, R2, atol=1e-9)
+
+
+def test_axis_angle_shape_validation():
+    with pytest.raises(ValueError):
+        matrix_to_axis_angle(np.eye(2))
+    with pytest.raises(ValueError):
+        axis_angle_to_matrix(np.zeros(4))
+
+
+def test_axis_angles_batch_matches_scalar_across_all_regimes():
+    """Batch functions must agree with the scalar ones, including at both singularities —
+    this proves the vectorized branch-selection actually routes each sample correctly,
+    not just the generic case."""
+    rng = np.random.default_rng(3)
+    Rs = []
+    # Generic-angle samples.
+    for _ in range(16):
+        Rs.append(_random_rotation_matrix(rng))
+    # Near-identity samples.
+    Rs.append(np.eye(3))
+    Rs.append(axis_angle_to_matrix(np.array([1e-10, 0.0, 0.0])))
+    # Near-pi samples (axis-aligned and generic-axis).
+    Rs.append(np.diag([-1.0, -1.0, 1.0]))
+    Rs.append(np.diag([1.0, -1.0, -1.0]))
+    axis = np.array([1.0, 2.0, 2.0]) / 3.0
+    K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    Rs.append(np.eye(3) + 2 * (K @ K))
+
+    Rs = np.stack(Rs, axis=0)  # (N, 3, 3)
+    batch_out = matrices_to_axis_angles(Rs)
+    assert batch_out.shape == (Rs.shape[0], 3)
+    for i in range(Rs.shape[0]):
+        scalar_out = matrix_to_axis_angle(Rs[i])
+        np.testing.assert_allclose(batch_out[i], scalar_out, atol=1e-8)
+
+    # And the batch inverse must round-trip each sample back to its own R.
+    Rs_rt = axis_angles_to_matrices(batch_out)
+    for i in range(Rs.shape[0]):
+        np.testing.assert_allclose(Rs_rt[i], Rs[i], atol=1e-8)
+
+
+def test_axis_angles_to_matrices_arbitrary_leading_dims():
+    """Batch functions must support >1-D leading (batch) dimensions, not just a flat list."""
+    rng = np.random.default_rng(4)
+    vs = rng.standard_normal((2, 3, 3)) * 0.5  # (2, 3, 3): 2x3 grid of axis-angle vectors
+    Rs = axis_angles_to_matrices(vs)
+    assert Rs.shape == (2, 3, 3, 3)
+    vs2 = matrices_to_axis_angles(Rs)
+    assert vs2.shape == vs.shape
+    Rs2 = axis_angles_to_matrices(vs2)
+    np.testing.assert_allclose(Rs, Rs2, atol=1e-8)
+
+
+def test_axis_angles_batch_shape_validation():
+    with pytest.raises(ValueError):
+        matrices_to_axis_angles(np.eye(2))
+    with pytest.raises(ValueError):
+        axis_angles_to_matrices(np.zeros((4, 4)))

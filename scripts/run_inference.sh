@@ -151,14 +151,17 @@ print(','.join(order))
 fi
 
 # Production-only: MONITOR_ENABLE env var triggers inference_monitor_node inside the container;
-# also pre-create the output dir as current user so Docker can't claim root ownership.
+# also pre-create the output dir (and the videos/ subdir the container writes
+# per-camera frames into) as current user so Docker can't claim root ownership —
+# otherwise the ffmpeg encode step below (running as the host user) can't create
+# <camera>.mp4 inside a root-owned videos/ directory.
 REAL_MONITOR=false
 if [[ "$MONITOR_REQUESTED" == true && "$FAKE_HARDWARE" == false ]]; then
     REAL_MONITOR=true
     export MONITOR_ENABLE=true
     MONITOR_DIR="${MONITOR_OUTPUT_DIR:-${REPO_ROOT}/monitor_output}"
     export MONITOR_OUTPUT_DIR="$MONITOR_DIR"
-    mkdir -p "$MONITOR_DIR"
+    mkdir -p "$MONITOR_DIR/videos"
     echo "[run_inference] Monitor enabled → output: $MONITOR_DIR"
 fi
 

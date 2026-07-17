@@ -58,7 +58,7 @@ class EpisodeMetrics:
     pred_smoothness_std: float
     gt_smoothness_mean: float
     gt_smoothness_std: float
-    # EE Cartesian metrics — populated only for ee_abs / ee_rel action types
+    # EE Cartesian metrics — populated only for ee_abs / ee_relative action types
     ee: Optional[EEMetrics] = None
 
 
@@ -192,7 +192,10 @@ def compute_episode_metrics(
 
     # EE mode: generic metrics (mse/mae/…) mix metres + quaternion + gripper and are
     # meaningless.  Return NaN/empty generics and populate ee only.
-    if action_type in ("ee_abs", "ee_rel") and predicted.shape[1] % 8 == 0:
+    # "ee_rel" is a permanent legacy alias for "ee_relative" — some callers
+    # (e.g. eval_recorder_node) pass the action_type through unnormalized, so
+    # accept both here rather than assuming normalize_action_type() ran upstream.
+    if action_type in ("ee_abs", "ee_relative", "ee_rel") and predicted.shape[1] % 8 == 0:
         ee_metrics = compute_ee_metrics(predicted, ground_truth, joint_names)
         return EpisodeMetrics(
             episode_idx=episode_idx,

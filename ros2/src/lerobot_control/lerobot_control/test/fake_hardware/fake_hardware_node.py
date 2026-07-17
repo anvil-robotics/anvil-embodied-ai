@@ -3,17 +3,37 @@
 
 This node simulates a robot controller by:
 - Publishing dummy CompressedImage (configurable resolution and FPS)
-- Publishing dummy joint states at 500Hz (matches real robot)
-- Subscribing to action commands and validating them
+- Joint mode (default): publishing dummy joint states at 500Hz (matches real
+  robot), subscribing to joint action commands and validating them.
+- EE mode (``ee_mode:=true``): publishing CommandedEEPose observations on
+  ``/ee_pose_<arm>``, and — critically — subscribing to
+  ``/commanded_ee_<arm>`` and ECHOING each received command back as the next
+  published observation (``next_ee_pose ≈ last_received_command``). This
+  closed-loop echo is what actually exercises the decoupled delta-mode
+  publish loop's self-correction (``absolute_target = obs_pose ∘ delta``,
+  see claude_docs/ee-delta-flow-plan.md, Item 2b) — a static/random EE-pose
+  publisher would only validate topic wiring, not the feedback loop itself.
+  Joint-mode topics/timers are NOT started in EE mode (mirrors production's
+  either-joint-or-ee exclusivity).
 
 ROS2 parameters:
     timeout (float): Seconds before exit with failure (default 30.0)
     required_actions (int): Valid actions needed before exit success (default 10)
     camera_resolution (str): "480p", "720p", or "1080p" (default "480p")
     camera_fps (int): Camera publish rate in Hz (default 30)
+    ee_mode (bool): Enable EE-space pub/sub instead of joint-space (default False)
+    ee_arms (str): Comma-separated arm ids, e.g. "left,right" (default "left,right")
+    ee_pose_fps (float): /ee_pose_<arm> publish rate in Hz (default 100.0)
 
-The node exits with code 0 after receiving the required number of valid actions,
-or exits with code 1 on timeout or invalid data.
+The node exits with code 0 after receiving the required number of valid actions
+(joint commands, or EE commands in ee_mode), or exits with code 1 on timeout or
+invalid data. This exit-code contract is identical across both modes.
+
+Explicitly out of scope (see claude_docs/ee-delta-flow-plan.md, Item 2b):
+real actuation dynamics, physical velocity/latency limits, sensor latency —
+the echo is instantaneous and perfect. This validates SOFTWARE timing and
+composition correctness only, never physical behavior; it is not a
+substitute for real-hardware validation (Item 6).
 """
 
 import cv2
@@ -42,12 +62,20 @@ class MockControllerNode(Node):
         self.declare_parameter("required_actions", 10)
         self.declare_parameter("camera_resolution", "480p")
         self.declare_parameter("camera_fps", 30)
+        self.declare_parameter("ee_mode", False)
+        self.declare_parameter("ee_arms", "left,right")
+        self.declare_parameter("ee_pose_fps", 100.0)
 
         # Get parameter values
         self._timeout = self.get_parameter("timeout").value
         self._required_actions = self.get_parameter("required_actions").value
         self._camera_res_label = self.get_parameter("camera_resolution").value
         self._camera_fps = self.get_parameter("camera_fps").value
+        self._ee_mode = bool(self.get_parameter("ee_mode").value)
+        self._ee_arms = [
+            a.strip() for a in str(self.get_parameter("ee_arms").value).split(",") if a.strip()
+        ]
+        self._ee_pose_fps = float(self.get_parameter("ee_pose_fps").value)
 
         # Resolve resolution
         h, w = _RESOLUTION_MAP.get(self._camera_res_label, (480, 640))
@@ -55,7 +83,8 @@ class MockControllerNode(Node):
         self.get_logger().info(
             f"MockControllerNode initialized: timeout={self._timeout}s, "
             f"required_actions={self._required_actions}, "
-            f"resolution={w}x{h} ({self._camera_res_label}), camera_fps={self._camera_fps}"
+            f"resolution={w}x{h} ({self._camera_res_label}), camera_fps={self._camera_fps}, "
+            f"ee_mode={self._ee_mode}" + (f", ee_arms={self._ee_arms}" if self._ee_mode else "")
         )
 
         # Publishers — 4 CompressedImage cameras matching production topics
@@ -69,6 +98,32 @@ class MockControllerNode(Node):
             self.create_publisher(CompressedImage, topic, 10)
             for topic in self._camera_topics
         ]
+        self.image_timer = self.create_timer(1.0 / self._camera_fps, self.publish_image)
+
+        if self._ee_mode:
+            self._setup_ee_mode()
+        else:
+            self._setup_joint_mode()
+
+        # Timeout check timer (1Hz) — shared by both modes
+        self.timeout_timer = self.create_timer(1.0, self.check_timeout)
+
+        # State
+        self.valid_actions_received = 0
+        self.start_time = self.get_clock().now()
+
+        # Random number generator
+        self._rng = np.random.default_rng()
+
+        # Pre-generate a dummy image and JPEG-encode once (reuse across frames)
+        dummy_rgb = self._rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+        _, self._jpeg_data = cv2.imencode(".jpg", dummy_rgb, [cv2.IMWRITE_JPEG_QUALITY, 50])
+
+    # ------------------------------------------------------------------ #
+    # Joint mode (default, unchanged from before)
+    # ------------------------------------------------------------------ #
+
+    def _setup_joint_mode(self) -> None:
         self.joint_pub = self.create_publisher(JointState, "/joint_states", 10)
 
         # Subscribers — one per arm, matching inference_node publish topics
@@ -80,16 +135,8 @@ class MockControllerNode(Node):
             ]
         ]
 
-        # Separate timers: 500Hz joint states, configurable camera FPS
+        # Separate timer: 500Hz joint states (matches real robot)
         self.joint_timer = self.create_timer(1.0 / 500.0, self.publish_joint_state)
-        self.image_timer = self.create_timer(1.0 / self._camera_fps, self.publish_image)
-
-        # Timeout check timer (1Hz)
-        self.timeout_timer = self.create_timer(1.0, self.check_timeout)
-
-        # State
-        self.valid_actions_received = 0
-        self.start_time = self.get_clock().now()
 
         # Joint names for 16-DOF robot (8 joints per arm: finger + 7 joints)
         # Naming matches production: follower_{l,r}_{joint_id}
@@ -112,12 +159,117 @@ class MockControllerNode(Node):
             "follower_r_joint7",
         ]
 
-        # Random number generator
-        self._rng = np.random.default_rng()
+    def publish_joint_state(self):
+        """Publish dummy joint states at 500Hz."""
+        joint_msg = JointState()
+        joint_msg.header.stamp = self.get_clock().now().to_msg()
+        joint_msg.header.frame_id = "base_link"
+        joint_msg.name = self.joint_names
+        joint_msg.position = (self._rng.random(16) * 2 * np.pi - np.pi).tolist()
+        joint_msg.velocity = [0.0] * 16
+        joint_msg.effort = [0.0] * 16
+        self.joint_pub.publish(joint_msg)
 
-        # Pre-generate a dummy image and JPEG-encode once (reuse across frames)
-        dummy_rgb = self._rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
-        _, self._jpeg_data = cv2.imencode(".jpg", dummy_rgb, [cv2.IMWRITE_JPEG_QUALITY, 50])
+    def action_callback(self, msg: Float64MultiArray):
+        """Handle incoming joint action commands from per-arm controller topics."""
+        for i, val in enumerate(msg.data):
+            if not np.isfinite(val):
+                self.get_logger().error(
+                    f"Invalid action value at index {i}: {val} (must be finite)"
+                )
+                raise SystemExit(1)
+        self._record_valid_action()
+
+    # ------------------------------------------------------------------ #
+    # EE mode — closed-loop echo (see module docstring)
+    # ------------------------------------------------------------------ #
+
+    def _setup_ee_mode(self) -> None:
+        from anvil_msgs.msg import CommandedEEPose
+
+        # Per-arm current EE pose state — seeded with an arbitrary but
+        # reasonable default (not physically meaningful; this is a software
+        # timing/plumbing smoke test, not a dynamics simulator). Updated
+        # in-place by _ee_command_callback whenever a command arrives —
+        # this IS the "echo/integrate" closed-loop behavior.
+        self._ee_state: dict[str, dict] = {
+            arm: {
+                "pos": np.array([0.4, 0.0 if arm == "left" else 0.0, 0.5], dtype=np.float64),
+                "quat": np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64),  # identity, xyzw
+                "gripper": 0.02,
+            }
+            for arm in self._ee_arms
+        }
+
+        self._ee_pose_pubs: dict[str, object] = {}
+        self._ee_command_subs = []
+        for arm in self._ee_arms:
+            obs_topic = f"/ee_pose_{arm}"
+            cmd_topic = f"/commanded_ee_{arm}"
+            self._ee_pose_pubs[arm] = self.create_publisher(CommandedEEPose, obs_topic, 10)
+            self._ee_command_subs.append(
+                self.create_subscription(
+                    CommandedEEPose, cmd_topic,
+                    lambda msg, arm=arm: self._ee_command_callback(arm, msg),
+                    10,
+                )
+            )
+            self.get_logger().info(f"[ee_mode] arm={arm}: publishing {obs_topic}, subscribing {cmd_topic}")
+
+        self.ee_pose_timer = self.create_timer(1.0 / self._ee_pose_fps, self.publish_ee_poses)
+
+    def publish_ee_poses(self):
+        """Publish each arm's current (possibly just-echoed) EE pose."""
+        from anvil_msgs.msg import CommandedEEPose
+        from geometry_msgs.msg import Point, Pose, Quaternion
+        from std_msgs.msg import Header
+
+        stamp = self.get_clock().now().to_msg()
+        for arm, state in self._ee_state.items():
+            msg = CommandedEEPose()
+            msg.header = Header(stamp=stamp, frame_id="world")
+            pos, quat = state["pos"], state["quat"]
+            msg.pose = Pose(
+                position=Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2])),
+                orientation=Quaternion(
+                    x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3])
+                ),
+            )
+            msg.gripper = float(state["gripper"])
+            self._ee_pose_pubs[arm].publish(msg)
+
+    def _ee_command_callback(self, arm: str, msg) -> None:
+        """Echo/integrate a received CommandedEEPose as the arm's next observed pose.
+
+        This is the closed-loop feedback the decoupled delta-mode publish
+        loop depends on: `next_ee_pose ≈ last_received_command`. A perfect,
+        instantaneous echo (no dynamics, no latency) — deliberately, per the
+        plan's stated scope: this validates software timing/composition
+        correctness, not physical actuation behavior.
+        """
+        values = [
+            msg.pose.position.x, msg.pose.position.y, msg.pose.position.z,
+            msg.pose.orientation.x, msg.pose.orientation.y,
+            msg.pose.orientation.z, msg.pose.orientation.w,
+            msg.gripper,
+        ]
+        for i, val in enumerate(values):
+            if not np.isfinite(val):
+                self.get_logger().error(
+                    f"[ee_mode] Invalid CommandedEEPose value for arm={arm} at index {i}: "
+                    f"{val} (must be finite)"
+                )
+                raise SystemExit(1)
+
+        self._ee_state[arm]["pos"] = np.array(values[0:3], dtype=np.float64)
+        self._ee_state[arm]["quat"] = np.array(values[3:7], dtype=np.float64)
+        self._ee_state[arm]["gripper"] = values[7]
+
+        self._record_valid_action()
+
+    # ------------------------------------------------------------------ #
+    # Shared: image publishing, timeout, exit-code bookkeeping
+    # ------------------------------------------------------------------ #
 
     def publish_image(self):
         """Publish dummy CompressedImage on all 4 cameras at 30Hz."""
@@ -131,17 +283,6 @@ class MockControllerNode(Node):
             msg.data = data
             pub.publish(msg)
 
-    def publish_joint_state(self):
-        """Publish dummy joint states at 500Hz."""
-        joint_msg = JointState()
-        joint_msg.header.stamp = self.get_clock().now().to_msg()
-        joint_msg.header.frame_id = "base_link"
-        joint_msg.name = self.joint_names
-        joint_msg.position = (self._rng.random(16) * 2 * np.pi - np.pi).tolist()
-        joint_msg.velocity = [0.0] * 16
-        joint_msg.effort = [0.0] * 16
-        self.joint_pub.publish(joint_msg)
-
     def check_timeout(self):
         """Check if timeout has been exceeded."""
         elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
@@ -152,16 +293,8 @@ class MockControllerNode(Node):
             )
             raise SystemExit(1)
 
-    def action_callback(self, msg: Float64MultiArray):
-        """Handle incoming action commands from per-arm controller topics."""
-        # Validate action values are finite
-        for i, val in enumerate(msg.data):
-            if not np.isfinite(val):
-                self.get_logger().error(
-                    f"Invalid action value at index {i}: {val} (must be finite)"
-                )
-                raise SystemExit(1)
-
+    def _record_valid_action(self) -> None:
+        """Shared valid-action counter/exit logic for both joint and EE modes."""
         self.valid_actions_received += 1
         self.get_logger().info(
             f"Valid action received [{self.valid_actions_received}/{self._required_actions}]"

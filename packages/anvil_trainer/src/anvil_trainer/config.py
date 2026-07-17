@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from anvil_shared.action_types import normalize_action_type
+
 log = logging.getLogger(__name__)
 
 
@@ -68,7 +70,15 @@ def _parse_names(info: dict, feat_key: str) -> list[str]:
     return names
 
 
-_VALID_ACTION_TYPES = {"joint_abs", "ee_abs", "ee_rel"}
+# "ee_rel" is a permanent legacy alias for "ee_relative" (normalized via
+# normalize_action_type() — see anvil_shared.action_types). Both are accepted
+# as valid input; only "ee_relative" is ever stored on TrainingConfig after
+# construction (TrainingConfig.__post_init__ normalizes it).
+#
+# "ee_delta" is the Delta(n-(n-1)) mechanism: per-frame anchor, baked into the
+# on-disk action column at mcap_converter time (action_encoding="delta") —
+# NOT computed live like "ee_relative". No legacy alias; it's new.
+_VALID_ACTION_TYPES = {"joint_abs", "ee_abs", "ee_relative", "ee_rel", "ee_delta"}
 
 # Suffix components that appear in EE datasets but not joint datasets.
 # Feature names may be bare ("qx") or arm-prefixed ("right_qx", "left_r0").
@@ -102,7 +112,11 @@ class TrainingConfig:
             Use the key suffix after "observation." — supports both image and non-image keys:
             e.g. ["images.chest", "images.wrist_l", "velocity", "effort"]
         task_override: Override task string for all samples (for SmolVLA)
-        action_type: One of "joint_abs", "ee_abs", "ee_rel".
+        action_type: One of "joint_abs", "ee_abs", "ee_relative", "ee_delta"
+            ("ee_rel" is a permanent legacy alias for "ee_relative", normalized
+            in __post_init__ — see anvil_shared.action_types). "ee_delta" is
+            the Delta(n-(n-1)) mechanism — its action is baked on disk by
+            mcap_converter (action_encoding="delta"), not computed live.
         dataset_root: Path to local dataset (for validation)
         note: Free-text note attached to this run (stored in anvil_config.json and wandb)
         note_append: Text to append to the existing note when resuming a run
@@ -111,9 +125,15 @@ class TrainingConfig:
     exclude_observs: list[str] | None = None
     task_override: str | None = None
     # action_type values:
-    #   "joint_abs" — joint absolute positions (default)
-    #   "ee_abs"    — EE Cartesian rot6d, absolute
-    #   "ee_rel"    — EE Cartesian rot6d, SE(3) relative (delta xyz + relative rotation)
+    #   "joint_abs"    — joint absolute positions (default)
+    #   "ee_abs"       — EE Cartesian rot6d, absolute
+    #   "ee_relative"  — EE Cartesian rot6d, SE(3) relative to the chunk anchor
+    #                    (body-frame xyz + relative rotation). Legacy alias:
+    #                    "ee_rel" (normalized to "ee_relative" in __post_init__).
+    #   "ee_delta"     — EE Cartesian rot6d, per-frame Delta(n-(n-1)) baked on
+    #                    disk by mcap_converter (world-frame xyz + rotation,
+    #                    anchored to the immediately-preceding real state, not
+    #                    a fixed chunk anchor). No live transform of action.
     action_type: str = "joint_abs"
     dataset_root: str | None = None
     output_dir: str | None = None
@@ -139,17 +159,29 @@ class TrainingConfig:
     use_ddpm_ip: bool = True         # --no-ddpm-ip disables
     ddpm_ip_alpha: float = 0.1       # --ddpm-ip-alpha=<float> (UMI: 0.1)
 
-    @property
-    def is_ee(self) -> bool:
-        return self.action_type in ("ee_abs", "ee_rel")
+    def __post_init__(self) -> None:
+        # Normalize legacy action_type aliases (e.g. "ee_rel" → "ee_relative")
+        # exactly once, here, regardless of how this config was constructed
+        # (from_env_and_args, from_yaml, or direct instantiation). Everything
+        # downstream (is_ee / is_ee_relative / is_ee_abs, transform selection,
+        # anvil_config.json persistence) only ever sees the canonical value.
+        self.action_type = normalize_action_type(self.action_type)
 
     @property
-    def is_ee_rel(self) -> bool:
-        return self.action_type == "ee_rel"
+    def is_ee(self) -> bool:
+        return self.action_type in ("ee_abs", "ee_relative", "ee_delta")
+
+    @property
+    def is_ee_relative(self) -> bool:
+        return self.action_type == "ee_relative"
 
     @property
     def is_ee_abs(self) -> bool:
         return self.action_type == "ee_abs"
+
+    @property
+    def is_ee_delta(self) -> bool:
+        return self.action_type == "ee_delta"
 
     @classmethod
     def from_env_and_args(cls) -> TrainingConfig:
@@ -161,7 +193,7 @@ class TrainingConfig:
             LEROBOT_TASK_OVERRIDE: Task string override
 
         Command line args:
-            --action-type=joint_abs|ee_abs|ee_rel
+            --action-type=joint_abs|ee_abs|ee_relative|ee_delta  ("ee_rel" legacy alias also accepted)
             --exclude-observs=SUFFIX1,SUFFIX2: Drop observations by suffix
         """
         excl_str = _pop_argv("exclude-observs") or os.environ.get("LEROBOT_EXCLUDE_OBSERVS", "")
@@ -177,7 +209,8 @@ class TrainingConfig:
             raise ValueError(
                 "--use-delta-actions is no longer supported. "
                 "Use --action-type=joint_abs (joint absolute, the default) instead. "
-                "For EE space training: --action-type=ee_abs or --action-type=ee_rel."
+                "For EE space training: --action-type=ee_abs, --action-type=ee_relative, "
+                "or --action-type=ee_delta."
             )
 
         # Strip removed flags silently (they may appear in old scripts)
@@ -189,6 +222,8 @@ class TrainingConfig:
                 f"--action-type={action_type!r} is not valid. "
                 f"Choose from: {sorted(_VALID_ACTION_TYPES)}"
             )
+        # Normalize once, early — everything below only ever sees "ee_relative".
+        action_type = normalize_action_type(action_type)
 
         _sr_raw = _pop_argv("split-ratio")
         if _sr_raw:
@@ -291,7 +326,10 @@ class TrainingConfig:
                         prev = json.loads(ckpt_anvil.read_text())
                         _inherited = prev.get("action_type", "joint_abs")
                         if _inherited in _VALID_ACTION_TYPES and _inherited != "joint_abs":
-                            action_type = _inherited
+                            # Normalize here too (checkpoint may persist the
+                            # legacy "ee_rel" alias) — same single helper, no
+                            # separate branch to drift out of sync.
+                            action_type = normalize_action_type(_inherited)
                             log.info(
                                 "[anvil_trainer] --resume: inherited action_type=%s from checkpoint",
                                 action_type,
@@ -301,8 +339,8 @@ class TrainingConfig:
         else:
             # Resolve output_dir for NEW job:
             #   model_zoo/{data_space}-space/{dataset_name}/{run_name}
-            # ee_abs/ee_rel → ee-space/; joint_abs → joint-space/
-            data_space = "ee" if action_type in ("ee_abs", "ee_rel") else "joint"
+            # ee_abs/ee_relative → ee-space/; joint_abs → joint-space/
+            data_space = "ee" if action_type in ("ee_abs", "ee_relative") else "joint"
 
             # Extract job_name if provided (passed through to lerobot as-is)
             job_name = None
@@ -502,7 +540,7 @@ class TrainingConfig:
         has_ee_action = _has_ee_markers(action_names, _EE_ACTION_MARKER_SUFFIXES)
         is_ee_dataset = has_ee_state and has_ee_action
 
-        if self.action_type in ("ee_abs", "ee_rel"):
+        if self.action_type in ("ee_abs", "ee_relative"):
             if not is_ee_dataset:
                 raise DataIntegrityError(
                     f"[validate_action_space] --action-type={self.action_type!r} requires an EE-space "
@@ -542,7 +580,7 @@ class TrainingConfig:
                     f"{self.dataset_root!r} appears to be EE-space.\n"
                     f"  observation.state names: {state_names}\n"
                     f"  action names:            {action_names}\n"
-                    "Hint: use --action-type=ee_abs or --action-type=ee_rel for EE datasets."
+                    "Hint: use --action-type=ee_abs or --action-type=ee_relative for EE datasets."
                 )
             log.info("[anvil_trainer] Validated action_type=joint_abs with joint-space dataset.")
 

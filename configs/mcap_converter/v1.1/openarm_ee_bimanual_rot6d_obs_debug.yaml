@@ -1,0 +1,52 @@
+# =============================================================================
+# OpenArm MCAP to LeRobot — EE Cartesian, rot6d OBSERVATION encoding, BIMANUAL —
+# DEBUG TEMPLATE for real session data
+# =============================================================================
+#
+# Same as openarm_ee_rot6d_obs_debug.yaml (single right arm, synthetic fixtures)
+# but bimanual, matching a real recorded session's topic layout — e.g.
+# data/raw_sessions/ee-space-testing.
+#
+# KNOWN LIMITATION (deliberate, documented in
+# claude_docs/mcap-converter-encoding-refactor-plan.md): only mcap_converter is
+# rotation-encoding-aware as of this pass. This dataset converts cleanly but
+# `anvil-gt-replay --encoding absolute` on it currently CRASHES with ValueError
+# (n_arms_from_dims hardcodes 8-dim quaternion state) — a loud failure, not a
+# silent wrong answer. Not trainable either.
+#
+#   uv run mcap-convert \
+#     -i data/raw_sessions/ee-space-testing \
+#     -o data/debug/ee-rot6d-obs \
+#     --config configs/mcap_converter/v1.1/openarm_ee_bimanual_rot6d_obs_debug.yaml
+#
+# Output (per frame):
+#   observation.state  float32 (20,) = [left: x,y,z,r0..r5,gripper][right: same]  (rot6d, NOT quaternion)
+#   action             float32 (20,) = [left: x,y,z,rot6d(6),gripper][right: same] (always rot6d, unrelated knob)
+# =============================================================================
+
+schema_version: "1.1"
+data_space: "ee"
+
+action_encoding: "absolute"
+
+observation_encoding: "rot6d"
+
+observation_topics:
+  left:  "/ee_pose_left"
+  right: "/ee_pose_right"
+
+action_topics: {}
+
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+  - "/cam_wrist_l/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed":  "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed":  "chest"
+  "/cam_wrist_l/image_raw/compressed": "wrist_l"
+
+image_resolution: [640, 480]

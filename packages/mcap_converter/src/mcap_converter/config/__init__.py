@@ -5,11 +5,12 @@ from .schema import (
     DEFAULT_DATA_CONFIG,
     ActionTopicConfig,
     ActionTopicSpec,
+    ConfigurationError,
     DataConfig,
     FeatureMapping,
     JointNamePattern,
 )
-from .validators import ConfigurationError, validate_config, validate_topics_exist
+from .validators import validate_topics_exist
 
 __all__ = [
     "ActionTopicConfig",
@@ -20,6 +21,5 @@ __all__ = [
     "DEFAULT_DATA_CONFIG",
     "FeatureMapping",
     "JointNamePattern",
-    "validate_config",
     "validate_topics_exist",
 ]

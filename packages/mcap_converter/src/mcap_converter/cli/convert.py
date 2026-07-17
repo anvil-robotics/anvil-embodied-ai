@@ -36,7 +36,7 @@ from mcap_converter import (
     LeRobotWriter,
     McapReader,
 )
-from mcap_converter.config.validators import ConfigurationError, validate_config
+from mcap_converter.config.schema import ConfigurationError
 from mcap_converter.core.extractor import BufferedStreamExtractor
 from mcap_converter.core.reader import snap_fps
 
@@ -213,7 +213,10 @@ def convert_session(
         task: Task name for the dataset
         config: Data configuration
         buffer_seconds: Buffer window for time alignment in seconds (default: 5.0)
-        config_path: Path to the conversion config YAML file (for copying to output)
+        config_path: Path to the conversion config YAML file that produced ``config``
+            (kept for logging/reference; conversion_config.yaml is always (re-)serialized
+            from ``config`` itself, not copied from this path — see the save-config note
+            below)
         vcodec: Video codec for encoding ("h264", "hevc", or "libsvtav1")
         cli_act_from_obs: Force ``action[t] = observation.state[t]`` even when
             ``action_topics`` are configured (joint mode only; EE mode is
@@ -300,43 +303,17 @@ def convert_session(
             camera_names=camera_names,
         )
 
-    # Copy conversion config for inference generation during training (skip if resuming)
+    # Save conversion config for inference generation during training (skip if resuming).
+    # Always (re-)serialized from the DataConfig object at the current schema version —
+    # not copied verbatim from --config, even when one was given — so conversion_config.yaml
+    # always records exactly what was actually used, in canonical current-schema form
+    # (a raw copy of a legacy-shaped input config would immediately need its own
+    # migration-on-read, which is avoidable for anything converted from this point on).
     conversion_config_dest = os.path.join(output_dir, "conversion_config.yaml")
     if resume_from > 0:
         log(f"Skipping config copy — using existing [dim]{conversion_config_dest}[/dim]")
-    elif config_path and os.path.exists(config_path):
-        shutil.copy(config_path, conversion_config_dest)
-        log(f"Copied conversion config: [dim]{conversion_config_dest}[/dim]")
     else:
-        # Save config from DataConfig object (new unified format)
-        import yaml
-
-        config_to_save: dict = {
-            "data_space": config.data_space,
-            "observation_topics": dict(config.observation_topics),
-            "action_topics": {
-                arm_id: {"topic": spec.topic, "joint_order": list(spec.joint_order)}
-                for arm_id, spec in config.action_topics.items()
-            },
-            "camera_topics": list(config.camera_topics),
-            "camera_topic_mapping": dict(config.camera_topic_mapping),
-            "image_resolution": list(config.image_resolution),
-        }
-        # joint_names is joint-mode-only; omit from EE configs to avoid confusion
-        if not config.is_ee:
-            config_to_save["joint_names"] = {
-                "separator": config.joint_name_pattern.separator,
-                "source": config.joint_name_pattern.source,
-                "arms": config.joint_name_pattern.arms,
-            }
-
-        with open(conversion_config_dest, "w") as f:
-            yaml.dump(
-                config_to_save,
-                f,
-                default_flow_style=False,
-                sort_keys=False,
-            )
+        ConfigLoader.to_yaml(config, conversion_config_dest)
         log(f"Saved conversion config: [dim]{conversion_config_dest}[/dim]")
 
     # Append git provenance to conversion_config.yaml (skip when resuming — already present)
@@ -589,17 +566,17 @@ def main(args=None):
         epilog="""\
 examples:
   # EE Cartesian bimanual (recommended for EE-space diffusion policy)
-  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/openarm_ee_bimanual.yaml
+  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/v1.1/openarm_ee_bimanual.yaml
   # output goes to data/datasets/my-session/
 
   # EE Cartesian left arm only
-  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/openarm_ee_left.yaml
+  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/v1.1/openarm_ee_left.yaml
 
   # Joint space bimanual (Quest teleop, action from command topics)
-  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/openarm_joint_bimanual.yaml
+  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/v1.1/openarm_joint_bimanual.yaml
 
   # Joint space with action[t] = obs[t] (future window via delta_timestamps at train time)
-  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/openarm_joint_bimanual.yaml --act-from-obs
+  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/v1.1/openarm_joint_bimanual.yaml --act-from-obs
 
   # Common options
   mcap-convert -i data/raw/my-session -o data/datasets --config ... --vcodec libsvtav1
@@ -696,7 +673,7 @@ examples:
 
     # Validate config eagerly — better error messages than cryptic extraction failures
     try:
-        validate_config(config)
+        config.validate()
     except ConfigurationError as exc:
         console.print(f"\n[bold red]Configuration error:[/bold red] {exc}\n")
         exit(1)
@@ -705,12 +682,16 @@ examples:
     # <output-dir>/<data_space>-space/<input-dir-name>/
     # The <data_space>-space/ subdir (ee-space/ or joint-space/) splits EE and
     # joint datasets cleanly when both are converted from the same raw sessions.
+    # action_encoding="delta" gets its own "ee-delta-space/" subdir so baked-delta
+    # datasets never land next to absolute-action ee-space/ datasets on disk. See
+    # DataConfig.output_subdir (schema.py) — the single source of truth for this decision.
+    space_suffix = config.output_subdir
     input_name = Path(args.input_dir.rstrip("/")).name
     if args.output_path:
         args.output_dir = args.output_path.rstrip("/")
     else:
         args.output_dir = str(
-            Path(args.output_dir.rstrip("/")) / f"{config.data_space}-space" / input_name
+            Path(args.output_dir.rstrip("/")) / space_suffix / input_name
         )
 
     # Handle HuggingFace username

@@ -12,6 +12,7 @@
 # is empty). Existing datasets converted with the legacy config are unaffected.
 # =============================================================================
 
+schema_version: "1.1"
 data_space: "joint"
 
 observation_topics:

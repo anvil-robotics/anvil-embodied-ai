@@ -14,10 +14,10 @@ from mcap_converter.config.loader import ConfigLoader
 from mcap_converter.config.schema import (
     ActionTopicConfig,
     ActionTopicSpec,
+    ConfigurationError,
     DataConfig,
     JointNamePattern,
 )
-from mcap_converter.config.validators import ConfigurationError, validate_config
 from mcap_converter.core.extractor import parse_joint_name
 
 
@@ -287,7 +287,10 @@ class TestActionTopicParsing:
         cfg_dict["action_topics"] = {
             "/left_cmd": {"arm": "left", "joint_order": ["joint1"]},
         }
-        with pytest.raises(ValueError):
+        # ConfigLoader now raises ConfigurationError uniformly for all loader-level
+        # errors (structural/type and value-legality alike), replacing the previous
+        # split between bare ValueError (loader) and ConfigurationError (validators).
+        with pytest.raises(ConfigurationError):
             ConfigLoader.from_dict(cfg_dict)
 
 
@@ -327,7 +330,7 @@ class TestValidateConfig:
 
     def test_valid_joint_config(self):
         cfg = ConfigLoader.from_dict(_minimal_joint_dict())
-        validate_config(cfg)  # no raise
+        cfg.validate()  # no raise
 
     def test_joint_empty_joint_order_rejected(self):
         cfg = ConfigLoader.from_dict(_minimal_joint_dict(
@@ -337,7 +340,7 @@ class TestValidateConfig:
             }
         ))
         with pytest.raises(ConfigurationError, match="joint_order"):
-            validate_config(cfg)
+            cfg.validate()
 
     def test_joint_action_arm_missing_from_observation_rejected(self):
         cfg = ConfigLoader.from_dict(_minimal_joint_dict(
@@ -347,7 +350,7 @@ class TestValidateConfig:
             }
         ))
         with pytest.raises(ConfigurationError, match="not present in observation_topics"):
-            validate_config(cfg)
+            cfg.validate()
 
     def test_ee_with_action_topics_rejected(self):
         cfg = ConfigLoader.from_dict({
@@ -360,7 +363,7 @@ class TestValidateConfig:
             "camera_topic_mapping": {"/cam": "head"},
         })
         with pytest.raises(ConfigurationError, match="action_topics must be empty in ee mode"):
-            validate_config(cfg)
+            cfg.validate()
 
     def test_ee_valid_empty_action_topics(self):
         cfg = ConfigLoader.from_dict({
@@ -370,4 +373,4 @@ class TestValidateConfig:
             "camera_topics": ["/cam"],
             "camera_topic_mapping": {"/cam": "head"},
         })
-        validate_config(cfg)  # no raise
+        cfg.validate()  # no raise

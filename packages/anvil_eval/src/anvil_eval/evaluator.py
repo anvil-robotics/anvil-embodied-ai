@@ -48,7 +48,7 @@ class EpisodeResult:
 
     episode_idx: int
     split_label: str
-    predicted: np.ndarray     # (T, D) absolute actions (after ee_rel restore if needed)
+    predicted: np.ndarray     # (T, D) absolute actions (after ee_relative restore if needed)
     ground_truth: np.ndarray  # (T, D) absolute ground-truth actions
     joint_names: list[str]
     raw_output: np.ndarray | None = None         # (T, D) model raw output before restore
@@ -70,19 +70,25 @@ class EpisodeEvaluator:
         task_description: str | None,
         joint_names: list[str],
     ):
+        _ensure_anvil_shared()
+        from anvil_shared.action_types import normalize_action_type
+
         self.model = model
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
         self.model_type = model_type
         self.device = device
-        self.action_type: str = anvil_cfg.get("action_type", "joint_abs")
-        self.is_ee: bool = self.action_type in ("ee_abs", "ee_rel")
-        self.is_ee_rel: bool = self.action_type == "ee_rel"
+        # normalize_action_type() maps the legacy "ee_rel" alias to the
+        # canonical "ee_relative" so everything below only ever compares
+        # against the canonical value.
+        self.action_type: str = normalize_action_type(anvil_cfg.get("action_type", "joint_abs"))
+        self.is_ee: bool = self.action_type in ("ee_abs", "ee_relative")
+        self.is_ee_relative: bool = self.action_type == "ee_relative"
         self.is_ee_abs: bool = self.action_type == "ee_abs"
         self.task_description = task_description
         self.joint_names = joint_names
         self._is_vla = model_type in ("pi0", "pi05", "smolvla")
-        self._delta_ref_state: np.ndarray | None = None
+        self._relative_anchor_state: np.ndarray | None = None
 
     def evaluate_episode(
         self,
@@ -95,7 +101,7 @@ class EpisodeEvaluator:
         _ensure_model_loader_importable()
         _ensure_anvil_shared()
         from lerobot_control.model_loader import reset_model_state
-        from anvil_shared.ee_transform import ee_obs_abs_forward, ee_obs_rel_forward, ee_rel_forward, ee_rel_inverse
+        from anvil_shared.ee_transform import ee_obs_abs_forward, ee_obs_relative_forward, ee_relative_forward, ee_relative_inverse
 
         predicted_actions: list[np.ndarray] = []
         ground_truth_actions: list[np.ndarray] = []
@@ -104,7 +110,7 @@ class EpisodeEvaluator:
         raw_gt_list: list[np.ndarray] = []
 
         reset_model_state(self.model)
-        self._delta_ref_state = None   # reset per-episode delta reference state
+        self._relative_anchor_state = None   # reset per-episode n-0 chunk anchor
         # Shadow queue of pre-restored absolute actions (avoids touching model's normalized queue)
         _abs_shadow_queue: deque[np.ndarray] = deque()
 
@@ -126,13 +132,13 @@ class EpisodeEvaluator:
             # Build observation dict (observation.* keys only)
             obs = {k: v for k, v in item.items() if k.startswith("observation.")}
 
-            # Observation state for ee_rel restore (raw, before preprocessing)
+            # Observation state for ee_relative restore (raw, before preprocessing)
             obs_state = item["observation.state"].numpy() if "observation.state" in item else None
             _obs_flat = (obs_state[-1] if obs_state is not None and obs_state.ndim > 1 else obs_state)
 
             # Detect whether a new action chunk is about to be generated.
-            # Only ee_rel needs restore; ee_abs/joint_abs do not.
-            _needs_restore = self.is_ee_rel
+            # Only ee_relative needs restore; ee_abs/joint_abs do not.
+            _needs_restore = self.is_ee_relative
             _is_new_chunk = (
                 _needs_restore
                 and hasattr(self.model, "_queues")
@@ -141,7 +147,7 @@ class EpisodeEvaluator:
 
             # Capture ref state BEFORE inference (queue will be filled after select_action)
             if _is_new_chunk and _obs_flat is not None:
-                self._delta_ref_state = _obs_flat.copy()
+                self._relative_anchor_state = _obs_flat.copy()
 
             # Preprocess + inference
             with torch.inference_mode():
@@ -151,11 +157,11 @@ class EpisodeEvaluator:
                     # EE obs conversion: dataset stores 8-dim quat obs; checkpoint
                     # normaliser stats are 10-dim rot6d (patched during training).
                     # Convert here before normalisation to match training layout.
-                    if self.is_ee_rel and "observation.state" in obs:
-                        # ee_rel: relativise to the anchor (most recent obs step).
+                    if self.is_ee_relative and "observation.state" in obs:
+                        # ee_relative: relativise to the anchor (most recent obs step).
                         obs_np = obs["observation.state"].numpy()  # (n_obs_steps, 8) or (8,)
                         anchor = obs_np[-1] if obs_np.ndim > 1 else obs_np
-                        obs_rel = ee_obs_rel_forward(obs_np, anchor)
+                        obs_rel = ee_obs_relative_forward(obs_np, anchor)
                         obs = dict(obs)
                         obs["observation.state"] = torch.tensor(
                             obs_rel, dtype=torch.float32
@@ -192,27 +198,27 @@ class EpisodeEvaluator:
                 obs_state_list.append(_obs_flat.copy())
 
             # Compute raw ground truth (same space as raw model output)
-            if self.is_ee_rel and _obs_flat is not None:
-                raw_gt_list.append(self._compute_ee_rel_gt(gt_action, _obs_flat, ee_rel_forward))
+            if self.is_ee_relative and _obs_flat is not None:
+                raw_gt_list.append(self._compute_ee_relative_gt(gt_action, _obs_flat, ee_relative_forward))
             else:
                 raw_gt_list.append(gt_action)
 
-            # Chunk-level ee_rel restore using shadow queue.
+            # Chunk-level ee_relative restore using shadow queue.
             if _needs_restore:
-                _restore_fn = lambda chunk, ref: ee_rel_inverse(chunk, ref)
-                if _is_new_chunk and self._delta_ref_state is not None:
+                _restore_fn = lambda chunk, ref: ee_relative_inverse(chunk, ref)
+                if _is_new_chunk and self._relative_anchor_state is not None:
                     if _rest_norm is not None:
                         _rest_denorm = [_tensor_to_np(a) for a in _rest_norm]
                         _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
                     else:
                         _chunk = action[np.newaxis]
-                    _abs = _restore_fn(_chunk, self._delta_ref_state)
+                    _abs = _restore_fn(_chunk, self._relative_anchor_state)
                     _abs_shadow_queue = deque(_abs[1:])
                     action = _abs[0]
                 elif _abs_shadow_queue:
                     action = _abs_shadow_queue.popleft()
                 elif not hasattr(self.model, "_queues"):
-                    _ref = self._delta_ref_state if self._delta_ref_state is not None else _obs_flat
+                    _ref = self._relative_anchor_state if self._relative_anchor_state is not None else _obs_flat
                     if _ref is not None:
                         _abs = _restore_fn(action[np.newaxis], _ref)
                         action = _abs[0]
@@ -251,20 +257,20 @@ class EpisodeEvaluator:
             return type(data)(self._move_to_device(v) for v in data)
         return data
 
-    def _compute_ee_rel_gt(
+    def _compute_ee_relative_gt(
         self,
         gt_action: np.ndarray,
         obs_state: np.ndarray,
-        ee_rel_forward_fn,
+        ee_relative_forward_fn,
     ) -> np.ndarray:
         """Compute EE ground-truth in model-output (relative) space.
 
-        Mirrors EERelTransform applied at training time.
-        Uses the vectorised ``ee_rel_forward`` from anvil_shared.ee_transform.
+        Mirrors EERelativeTransform applied at training time.
+        Uses the vectorised ``ee_relative_forward`` from anvil_shared.ee_transform.
         """
         # gt_action shape: (10*n_arms,) — single frame
         # obs_state shape: (8*n_arms,)
-        return ee_rel_forward_fn(gt_action[np.newaxis, :], obs_state)[0]
+        return ee_relative_forward_fn(gt_action[np.newaxis, :], obs_state)[0]
 
 
 def load_model(checkpoint: str, device: str):

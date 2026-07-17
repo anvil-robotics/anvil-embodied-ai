@@ -1,0 +1,36 @@
+# =============================================================================
+# OpenArm MCAP to LeRobot — EE Cartesian, LEFT ARM ONLY
+# =============================================================================
+#
+# Output (per frame):
+#   observation.state  float32 (8,)   = [x,y,z, qx,qy,qz,qw, gripper]
+#   action             float32 (10,)  = [x,y,z, rot6d(6), gripper]
+#   observation.images.{chest,waist,wrist_l,wrist_r}
+#
+# Single-arm = list only one entry under observation_topics. The right arm's
+# /ee_pose_right topic is ignored even if present in the MCAP.
+# =============================================================================
+
+schema_version: "1.1"
+data_space: "ee"
+action_encoding: "absolute"
+observation_encoding: "quaternion"
+
+observation_topics:
+  left: "/ee_pose_left"
+
+action_topics: {}
+
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+  - "/cam_wrist_l/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed":  "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed":  "chest"
+  "/cam_wrist_l/image_raw/compressed": "wrist_l"
+
+image_resolution: [640, 480]

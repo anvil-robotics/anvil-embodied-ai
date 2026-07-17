@@ -19,11 +19,11 @@ Convert MCAP files to LeRobot dataset format.
 ```bash
 # EE Cartesian bimanual (new)
 mcap-convert -i data/raw/my-session -o data/datasets \
-  --config configs/mcap_converter/openarm_ee_bimanual.yaml
+  --config configs/mcap_converter/v1.1/openarm_ee_bimanual.yaml
 
 # Joint space bimanual (existing)
 mcap-convert -i data/raw/my-session -o data/datasets \
-  --config configs/mcap_converter/openarm_joint_bimanual.yaml
+  --config configs/mcap_converter/v1.1/openarm_joint_bimanual.yaml
 ```
 
 Key options:
@@ -47,7 +47,7 @@ Output is always saved to `<output-dir>/<input-dir-name>/`.
 ```bash
 mcap-inspect /path/to/file.mcap          # Analyze MCAP topics and message types
 mcap-to-video -i recording.mcap -o ./videos
-dataset-validate --root data/datasets/my-session
+dataset-valid --root data/datasets/my-session
 mcap-upload /path/to/dataset --repo-id anvil-robot/my_dataset
 ```
 
@@ -139,20 +139,28 @@ image_resolution: [640, 480]
 
 ### Available configs
 
+Split by schema version under `configs/mcap_converter/v1.0/` (legacy, pre-unification —
+not directly usable, see that folder's `README.md`) and `configs/mcap_converter/v1.1/`
+(current — use these). Full version/migration design:
+`claude_docs/mcap-converter-encoding-refactor-plan.md`.
+
 | Config | `data_space` | Arms | Output dims |
 |--------|-------------|------|-------------|
-| `openarm_ee_bimanual.yaml` | `ee` | left + right | state `(16,)`, action `(20,)` |
-| `openarm_ee_left.yaml` | `ee` | left only | state `(8,)`, action `(10,)` |
-| `openarm_joint_bimanual.yaml` | `joint` | left + right | state `(16,)`, action `(16,)` |
-| `openarm_bimanual.yaml` | `joint` (legacy fmt) | left + right | state `(16,)`, action `(16,)` |
-| `openarm_bimanual_quest.yaml` | `joint` (legacy fmt) | left + right | state `(16,)`, action `(16,)` |
+| `v1.1/openarm_ee_bimanual.yaml` | `ee` | left + right | state `(16,)`, action `(20,)` |
+| `v1.1/openarm_ee_bimanual_16x9.yaml` | `ee` | left + right | same (16:9 cameras) |
+| `v1.1/openarm_ee_left.yaml` | `ee` | left only | state `(8,)`, action `(10,)` |
+| `v1.1/openarm_joint_bimanual.yaml` | `joint` | left + right | state `(16,)`, action `(16,)` |
+| `v1.0/openarm_bimanual.yaml` | `joint` (v1.0, legacy fmt) | left + right | needs `dataset-config-migrate` first |
+| `v1.0/openarm_bimanual_quest.yaml` | `joint` (v1.0, legacy fmt) | left + right | superseded by `v1.1/openarm_joint_bimanual.yaml` |
+| `v1.0/openarm_single_quest.yaml` | `joint` (v1.0, legacy fmt) | right only | needs `dataset-config-migrate` first |
+| `v1.0/openarm_single_quest_afo.yaml` | `joint` (v1.0, legacy fmt) | right only | needs `dataset-config-migrate` first |
 
 ## Python API
 
 ```python
 from mcap_converter import McapReader, LeRobotWriter, ConfigLoader
 
-config = ConfigLoader.from_yaml("configs/mcap_converter/openarm_ee_bimanual.yaml")
+config = ConfigLoader.from_yaml("configs/mcap_converter/v1.1/openarm_ee_bimanual.yaml")
 
 writer = LeRobotWriter(
     output_dir="data/datasets/my-session",
@@ -178,7 +186,7 @@ mcap_converter/
 ├── cli/
 │   ├── convert.py     # mcap-convert (--act-from-obs, EE/joint gate)
 │   ├── inspect.py     # mcap-inspect
-│   ├── validate.py    # dataset-validate
+│   ├── validate.py    # dataset-valid
 │   ├── upload.py      # mcap-upload
 │   └── video.py       # mcap-to-video
 ├── config/

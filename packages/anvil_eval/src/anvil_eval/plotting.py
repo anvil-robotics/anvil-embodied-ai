@@ -32,8 +32,8 @@ def plot_episode_joints(
 
     Layout (per joint column):
     - Top block (absolute scale): GT, Pred, obs_state
-    - Bottom block (relative scale, when action_type is ee_rel and raw_ground_truth provided):
-      raw model output and ΔGT in relative EE space (pre-computed by evaluator)
+    - Bottom block (relative scale, when action_type is ee_relative and raw_ground_truth
+      provided): raw model output and ΔGT in relative EE space (pre-computed by evaluator)
     """
     import matplotlib.pyplot as plt
 
@@ -43,7 +43,9 @@ def plot_episode_joints(
     ncols = min(4, n_joints)
     nrows_abs = math.ceil(n_joints / ncols)
 
-    show_delta = action_type == "ee_rel" and raw_ground_truth is not None
+    # "ee_rel" is a permanent legacy alias for "ee_relative" — accept both in
+    # case action_type reaches here unnormalized (e.g. from eval_recorder_node).
+    show_delta = action_type in ("ee_relative", "ee_rel") and raw_ground_truth is not None
     nrows_delta = math.ceil(n_joints / ncols) if show_delta else 0
     total_rows = nrows_abs + nrows_delta
 
@@ -125,15 +127,17 @@ def plot_monitor_signals(
 
     Layout (per joint column):
     - Top block: obs_state, control_cmd
-    - Bottom block (when action_type is ee_rel): raw model output in relative EE space
+    - Bottom block (when action_type is ee_relative): raw model output in relative EE space
     """
     import matplotlib.pyplot as plt
 
     n_joints = obs.shape[1]
     frames = np.arange(obs.shape[0])
 
-    # Bottom block shown for ee_rel: raw model output in relative EE space
-    show_delta = action_type == "ee_rel" and raw_output is not None
+    # Bottom block shown for ee_relative: raw model output in relative EE space.
+    # "ee_rel" is a permanent legacy alias — accept both in case action_type
+    # reaches here unnormalized.
+    show_delta = action_type in ("ee_relative", "ee_rel") and raw_output is not None
     ncols = min(ncols, n_joints)
     nrows_abs = math.ceil(n_joints / ncols)
     nrows_delta = math.ceil(n_joints / ncols) if show_delta else 0
@@ -141,7 +145,7 @@ def plot_monitor_signals(
 
     _EE_DIM_NAMES = ["x", "y", "z", "r0", "r1", "r2", "r3", "r4", "r5", "grip"]
     _EE_DIM_UNITS = ["m", "m", "m", "", "", "", "", "", "", "m"]
-    _is_ee = action_type in ("ee_abs", "ee_rel")
+    _is_ee = action_type in ("ee_abs", "ee_relative", "ee_rel")
 
     def _joint_label(j: int) -> str:
         if joint_names and j < len(joint_names):

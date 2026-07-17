@@ -1,11 +1,13 @@
 # =============================================================================
 # Smoke-test inference config — EE Cartesian, SINGLE ARM (right), 3 cameras
 # =============================================================================
-# Used by pipeline_smoke_test.py step 4 (anvil-eval-ros) for ee_abs and ee_rel
-# scenarios.  Matches the ee-session fixture topology: right arm only, no wrist_l.
+# Used by pipeline_smoke_test.py step 4 (anvil-eval-ros) for the ee_abs and ee_rel
+# scenarios (ee_rel exercises the "ee_rel" legacy alias for action_type=ee_relative
+# end-to-end).  Matches the ee-session fixture topology: right arm only, no wrist_l.
 #
-# generate_inference_config detects action_type=ee_abs/ee_rel and uses dims_per_arm=10
-# with /commanded_ee_<arm> topics instead of joint forward_position_controller topics.
+# generate_inference_config detects action_type=ee_abs/ee_relative (or the legacy
+# "ee_rel" alias) and uses dims_per_arm=10 with /commanded_ee_<arm> topics instead
+# of joint forward_position_controller topics.
 # model_joint_order: [] is intentional — EE mode does not use joint names.
 
 model:

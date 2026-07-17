@@ -27,6 +27,7 @@ dependencies = [
     "numpy>=2.0.0,<2.3.0",
     "matplotlib>=3.8.0",
     "tqdm~=4.67",
+    "pyyaml~=6.0",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,7 @@ all     = ["lerobot[smolvla,pi]~=0.5.1", "wandb~=0.24"]
 
 [project.scripts]
 anvil-eval = "anvil_eval.cli:main"
+anvil-gt-replay = "anvil_eval.gt_replay:main"
 # anvil-eval-ros moved to the anvil-eval-ros package (see packages/anvil_eval_ros/)
 
 [build-system]

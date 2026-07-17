@@ -7,7 +7,7 @@ Covers:
   4. _force_rot6d_identity — rot6d dims clamped ±1, other dims unchanged
   5. _compute_ee_abs_stats — action rot6d dims ±1, obs computed and clamped,
      xyz/gripper in abs stats retain real values, correct return structure
-  6. Regression: existing ee_rel tests still pass (shared helper refactor)
+  6. Regression: existing ee_relative tests still pass (shared helper refactor)
 """
 
 from __future__ import annotations

@@ -35,7 +35,12 @@ from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 
 from .action_limiter import ActionLimiter
-from .ee_runtime import ee_poses_from_chunk, ee_rel_restore_chunk, resolve_action_type
+from .ee_runtime import (
+    ee_delta_restore_step,
+    ee_poses_from_chunk,
+    ee_relative_restore_chunk,
+    resolve_action_type,
+)
 from .metrics_tracker import MetricsTracker
 from .model_loader import ModelLoader, set_deterministic_mode
 
@@ -74,11 +79,21 @@ class LeRobotInferenceNode(Node):
         self._classic_action_deque: deque = deque(maxlen=10)
         # Reference joint state captured at the moment each action chunk was
         # generated (in model/observation order).  All queued steps in the chunk
-        # share this reference so delta restoration is consistent with training.
-        # _delta_ref_state and _abs_shadow_queue must always be reset together;
-        # use _reset_delta_state() in any future reload or episode-boundary path.
-        self._delta_ref_state: np.ndarray | None = None
+        # share this reference so the n-0 chunk-anchor restore is consistent
+        # with training.
+        # _relative_anchor_state and _abs_shadow_queue must always be reset together;
+        # use _reset_relative_anchor_state() in any future reload or episode-boundary path.
+        self._relative_anchor_state: np.ndarray | None = None
         self._abs_shadow_queue: deque[np.ndarray] = deque()
+
+        # ee_delta only: freshest observed absolute EE pose (quat layout, 8*n_arms),
+        # updated every _obs_update tick regardless of chunk timing. _publish_loop
+        # reads this (under _obs_lock, cross-thread) to compose
+        # absolute_target = obs_pose ∘ delta fresh at EVERY publish tick — the
+        # decoupled delta-mode publish loop. Never restored to absolute in
+        # _obs_update; that would defeat the whole point (see claude_docs/
+        # ee-delta-flow-plan.md, Item 2).
+        self._ee_delta_latest_obs_quat: np.ndarray | None = None
 
         self._shutting_down: bool = False
         self._has_published: bool = False
@@ -86,9 +101,9 @@ class LeRobotInferenceNode(Node):
         if not self.echo_topic_only:
             self._setup_model()
 
-            # ee_rel: raw absolute obs history for re-relativizing the full obs window.
+            # ee_relative: raw absolute obs history for re-relativizing the full obs window.
             # n_obs_steps lives on model.config (not the module) in lerobot 0.5.1.
-            if self.is_ee_rel and not self._is_vla:
+            if self.is_ee_relative and not self._is_vla:
                 self._ee_n_obs_steps: int = int(
                     getattr(getattr(self.model, "config", None), "n_obs_steps", 2)
                 )
@@ -229,11 +244,19 @@ class LeRobotInferenceNode(Node):
         model_cfg = self.config.get("model", {})
         self.model_type = model_cfg.get("type") or meta.get("model_type")
 
-        # action_type from anvil_config.json — must match training
+        # action_type from anvil_config.json — must match training.
+        # resolve_action_type() normalizes the legacy "ee_rel" alias to
+        # "ee_relative", so everything below only ever compares against the
+        # canonical value.
         self.action_type: str = resolve_action_type(meta)
-        self.is_ee: bool = self.action_type in ("ee_abs", "ee_rel")
-        self.is_ee_rel: bool = self.action_type == "ee_rel"
+        self.is_ee: bool = self.action_type in ("ee_abs", "ee_relative", "ee_delta")
+        self.is_ee_relative: bool = self.action_type == "ee_relative"
         self.is_ee_abs: bool = self.action_type == "ee_abs"
+        # ee_delta: Delta(n-(n-1)) — decoupled delta-mode publish loop (see
+        # _publish_loop). Model output is a DELTA, not a pre-restored absolute;
+        # absolute_target = obs_pose ∘ delta is composed fresh at EACH publish
+        # tick against the freshest observed pose, not at chunk-generation time.
+        self.is_ee_delta: bool = self.action_type == "ee_delta"
         # True only for ee_abs checkpoints trained with rot6d obs (obs_state_dim % 10 == 0).
         # Old ee_abs checkpoints use raw quat obs (obs_state_dim % 8 == 0) — no conversion needed.
         _obs_dim = meta.get("obs_state_dim")
@@ -481,7 +504,7 @@ class LeRobotInferenceNode(Node):
     def _setup_publishers(self) -> None:
         """Setup action publishers.
 
-        EE mode (ee_abs / ee_rel): one ``CommandedEEPose`` publisher per arm,
+        EE mode (ee_abs / ee_relative): one ``CommandedEEPose`` publisher per arm,
         topic from ``arm_config["ee_command_topic"]`` (defaults to
         ``/commanded_ee_{arm_name}``).
 
@@ -651,8 +674,8 @@ class LeRobotInferenceNode(Node):
                 # EE obs conversion: must happen before preprocessor so the
                 # normaliser sees the correct (rot6d) obs.state layout.
                 _ee_obs_window_rel = None
-                if self.is_ee_rel and "observation.state" in _raw_obs:
-                    # ee_rel: maintain raw abs obs history and re-relativize the full
+                if self.is_ee_relative and "observation.state" in _raw_obs:
+                    # ee_relative: maintain raw abs obs history and re-relativize the full
                     # window every step (anchor = current EE).
                     _s_raw = _raw_obs["observation.state"]
                     if hasattr(_s_raw, "numpy"):
@@ -665,20 +688,23 @@ class LeRobotInferenceNode(Node):
                     self._ee_raw_obs_buf.append(_s_np)
 
                     if len(self._ee_raw_obs_buf) == self._ee_n_obs_steps:
-                        observation, _ee_obs_window_rel = self._apply_ee_rel_obs(observation)
+                        observation, _ee_obs_window_rel = self._apply_ee_relative_obs(observation)
                     else:
                         # Warm-up (buffer not yet full): relativize current step to itself
                         # → identity [0,0,0, 1,0,0,0,1,0, gripper].  This gives the correct
                         # 10-dim shape for the preprocessor/model, though the obs window
                         # won't be perfectly relativized until the buffer fills.
-                        from anvil_shared.ee_transform import ee_obs_rel_forward as _eorf
+                        from anvil_shared.ee_transform import ee_obs_relative_forward as _eorf
                         _rel_id = _eorf(_s_np[np.newaxis], _s_np)[0]
                         observation = dict(observation)
                         observation["observation.state"] = torch.tensor(_rel_id, dtype=torch.float32).unsqueeze(0)
 
-                elif self.ee_abs_uses_rot6d_obs and "observation.state" in _raw_obs:
-                    # ee_abs (rot6d checkpoint): convert obs.state from quat (8n) to rot6d (10n).
-                    # Skipped for old ee_abs checkpoints where obs was already quat (8n).
+                elif (self.ee_abs_uses_rot6d_obs or self.is_ee_delta) and "observation.state" in _raw_obs:
+                    # ee_abs (rot6d checkpoint) or ee_delta: convert obs.state from quat
+                    # (8n) to rot6d (10n), absolute — no relativization (ee_delta keeps
+                    # observation.state absolute, matching native's convention; only
+                    # `action` carries the delta representation, and it's restored fresh
+                    # per publish tick in _publish_loop, not here).
                     from anvil_shared.ee_transform import ee_obs_abs_forward as _eobsf
                     _s_raw = _raw_obs["observation.state"]
                     if hasattr(_s_raw, "numpy"):
@@ -694,16 +720,22 @@ class LeRobotInferenceNode(Node):
                         _abs_rot6d, dtype=torch.float32
                     ).unsqueeze(0)  # (1, 10*n_arms)
 
-                # Capture raw absolute EE obs for monitor (all EE modes).
+                # Capture raw absolute EE obs (quat layout) — for monitor when enabled,
+                # and ALWAYS for ee_delta (the decoupled publish loop reads this every
+                # tick, under _obs_lock, regardless of monitor status).
                 # _raw_obs still points to the original observation dict before any
                 # in-place conversion, so this always holds the quat-layout state.
-                if self.is_ee and self._monitor_enable and "observation.state" in _raw_obs:
+                if self.is_ee and "observation.state" in _raw_obs and (self._monitor_enable or self.is_ee_delta):
                     _mon_s = _raw_obs["observation.state"]
                     if hasattr(_mon_s, "numpy"):
                         _mon_np = _mon_s.squeeze(0).numpy() if _mon_s.dim() > 1 else _mon_s.numpy()
                     else:
                         _mon_np = np.asarray(_mon_s)
-                    self._last_raw_ee_obs_np: np.ndarray = _mon_np.flatten().astype(np.float64)
+                    _mon_np = _mon_np.flatten().astype(np.float64)
+                    self._last_raw_ee_obs_np: np.ndarray = _mon_np
+                    if self.is_ee_delta:
+                        with self._obs_lock:
+                            self._ee_delta_latest_obs_quat = _mon_np
 
                 # True when the model will actually run a forward pass this tick.
                 # ACT uses self._action_queue; Diffusion uses self._queues["action"].
@@ -718,9 +750,9 @@ class LeRobotInferenceNode(Node):
                 # Detect whether a new action chunk is about to be generated.
                 # When the queue is empty, select_action will run the model and fill
                 # it with n_action_steps new predictions, all computed relative to
-                # the current state.  We capture that state as the delta reference.
-                # Only ee_rel needs chunk-level restore; ee_abs/joint_abs do not.
-                _needs_restore = self.is_ee_rel
+                # the current state.  We capture that state as the n-0 chunk anchor.
+                # Only ee_relative needs chunk-level restore; ee_abs/joint_abs do not.
+                _needs_restore = self.is_ee_relative
                 _is_new_chunk = (
                     _needs_restore
                     and hasattr(self.model, "_queues")
@@ -731,11 +763,11 @@ class LeRobotInferenceNode(Node):
                     observation = self.preprocessor(dict(observation))
                 observation = self._move_to_device(observation)
 
-                # ee_rel: pre-fill model's obs queue with normalized historical
+                # ee_relative: pre-fill model's obs queue with normalized historical
                 # relative obs (anchored to current EE).  Must run after preprocessor
                 # (queue stores normalized tensors) and before select_action.
-                if self.is_ee_rel and _ee_obs_window_rel is not None and self._ee_n_obs_steps > 1:
-                    self._prefill_ee_rel_queue(_ee_obs_window_rel)
+                if self.is_ee_relative and _ee_obs_window_rel is not None and self._ee_n_obs_steps > 1:
+                    self._prefill_ee_relative_queue(_ee_obs_window_rel)
 
                 # [DEBUG] Point 1: obs.state after preprocessor (check normalization)
                 if self._debug and _is_new_chunk and "observation.state" in observation:
@@ -754,7 +786,7 @@ class LeRobotInferenceNode(Node):
                     if _will_run_forward:
                         self._latency_tracker.add(time.monotonic() - _t0)
                     # Collect remaining normalized queue items BEFORE postprocessing so
-                    # the whole chunk can be denormalized together for ee_rel restore.
+                    # the whole chunk can be denormalized together for the ee_relative restore.
                     if _is_new_chunk and _needs_restore and hasattr(self.model, "_queues"):
                         _rest_norm = [a.detach().clone() for a in self.model._queues.get("action", [])]
                     else:
@@ -762,10 +794,10 @@ class LeRobotInferenceNode(Node):
 
                 # Capture reference state right after chunk generation.
                 # Use _ee_raw_obs_buf[-1] — the same raw absolute EE pose used as the
-                # obs anchor in _apply_ee_rel_obs — so the action-restore frame is
+                # obs anchor in _apply_ee_relative_obs — so the action-restore frame is
                 # explicitly identical to the obs-relativization frame.
                 if _is_new_chunk and self._ee_raw_obs_buf:
-                    self._delta_ref_state = np.asarray(
+                    self._relative_anchor_state = np.asarray(
                         self._ee_raw_obs_buf[-1], dtype=np.float64
                     ).flatten()
 
@@ -777,31 +809,31 @@ class LeRobotInferenceNode(Node):
                         action = action.squeeze(0)
                     action = action.cpu().numpy()
 
-                # [DEBUG] Point 3: action after postprocessor, before delta restore
+                # [DEBUG] Point 3: action after postprocessor, before n-0 restore
                 if self._debug and _is_new_chunk:
                     self.get_logger().info(
                         f"[DEBUG] action (post-postproc): [{', '.join(f'{v:.4f}' for v in action)}]"
                     )
 
-                # Chunk-level ee_rel restore via shadow queue.
+                # Chunk-level ee_relative restore via shadow queue.
                 # The model's internal queue stores normalized tensors; we denormalize
                 # the full chunk together, restore rel → absolute, then serve absolute
                 # values from a shadow queue so we never re-enter normalized space.
                 # ee_abs and joint_abs require no restore — model output is already absolute.
-                if self.is_ee_rel:
-                    if _is_new_chunk and self._delta_ref_state is not None:
+                if self.is_ee_relative:
+                    if _is_new_chunk and self._relative_anchor_state is not None:
                         if _rest_norm is not None:
                             _rest_denorm = [self._denorm_queue_action(a) for a in _rest_norm]
                             _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
                         else:
                             _chunk = action[np.newaxis]
-                        _abs = ee_rel_restore_chunk(_chunk, self._delta_ref_state)
+                        _abs = ee_relative_restore_chunk(_chunk, self._relative_anchor_state)
                         self._abs_shadow_queue = deque(_abs[1:])
                         action = _abs[0]
                     elif self._abs_shadow_queue:
                         action = self._abs_shadow_queue.popleft()
-                    elif not hasattr(self.model, "_queues") and self._delta_ref_state is not None:
-                        action = ee_rel_restore_chunk(action[np.newaxis], self._delta_ref_state)[0]
+                    elif not hasattr(self.model, "_queues") and self._relative_anchor_state is not None:
+                        action = ee_relative_restore_chunk(action[np.newaxis], self._relative_anchor_state)[0]
 
                 self._classic_action_deque.append(action)
                 if _will_run_forward:
@@ -817,6 +849,14 @@ class LeRobotInferenceNode(Node):
 
         VLA: pop from ActionQueue (filled by background inference thread).
         ACT/Diffusion: pop from deque (filled by _obs_update).
+        ee_delta: the deque holds DELTAS, not pre-restored absolutes — the
+            decoupled delta-mode publish loop composes
+            absolute_target = obs_pose ∘ delta FRESH, right here, at every
+            publish tick, against whatever the freshest observed pose is at
+            that instant (NOT the pose from when the chunk/delta was
+            predicted). This is what makes full open-loop chunk execution
+            safe without anchor staleness or forward-integration — see
+            claude_docs/ee-delta-flow-plan.md, Item 2.
         """
         if self._shutting_down:
             return
@@ -836,7 +876,17 @@ class LeRobotInferenceNode(Node):
         else:
             if not self._classic_action_deque:
                 return
-            action = self._classic_action_deque.popleft()
+            if self.is_ee_delta:
+                with self._obs_lock:
+                    _latest_obs = self._ee_delta_latest_obs_quat
+                if _latest_obs is None:
+                    # No observation yet (startup warm-up) — skip this tick rather
+                    # than publish an un-composed delta; don't drop the queued
+                    # delta, it will compose correctly once an obs arrives.
+                    return
+                action = ee_delta_restore_step(self._classic_action_deque.popleft(), _latest_obs)
+            else:
+                action = self._classic_action_deque.popleft()
 
         try:
             self._publish_action(action)
@@ -845,23 +895,23 @@ class LeRobotInferenceNode(Node):
             self.get_logger().error(f"Publish error: {e}")
             self.get_logger().error(traceback.format_exc())
 
-    def _apply_ee_rel_obs(self, observation: dict) -> tuple:
+    def _apply_ee_relative_obs(self, observation: dict) -> tuple:
         """Convert absolute obs.state (8-dim/arm, quat) to relative (10-dim/arm, rot6d).
 
         Uses the full buffer window anchored to the current EE pose (last buffer entry).
         Returns (modified_observation_dict, obs_window_rel_np) where obs_window_rel_np
         is (n_obs_steps, 10*n_arms) — used later to pre-fill the model's obs queue.
         """
-        from anvil_shared.ee_transform import ee_obs_rel_forward
+        from anvil_shared.ee_transform import ee_obs_relative_forward
         anchor = self._ee_raw_obs_buf[-1]                          # (8*n_arms,) absolute
         obs_window_np = np.stack(self._ee_raw_obs_buf)             # (n_obs_steps, 8*n_arms)
-        obs_rel_np = ee_obs_rel_forward(obs_window_np, anchor)     # (n_obs_steps, 10*n_arms)
+        obs_rel_np = ee_obs_relative_forward(obs_window_np, anchor)     # (n_obs_steps, 10*n_arms)
         observation = dict(observation)  # shallow copy — don't mutate caller's dict
         # Current step relative to itself → identity; preserve (1, 10n) batch dim from topic
         observation["observation.state"] = torch.tensor(obs_rel_np[-1], dtype=torch.float32).unsqueeze(0)
         return observation, obs_rel_np
 
-    def _prefill_ee_rel_queue(self, obs_window_rel_np: np.ndarray) -> None:
+    def _prefill_ee_relative_queue(self, obs_window_rel_np: np.ndarray) -> None:
         """Pre-fill the model's internal obs queue with historical normalized relative obs.
 
         This ensures the full obs window [t-(n-1), ..., t-1] is correctly relativized
@@ -888,14 +938,14 @@ class LeRobotInferenceNode(Node):
                     obs_t = norm["observation.state"]   # stays (1, 10n) — no squeeze
                 except Exception as _exc:
                     self.get_logger().warn(
-                        f"[ee_rel] prefill normalization failed at step {i}: {_exc} "
+                        f"[ee_relative] prefill normalization failed at step {i}: {_exc} "
                         "— appending unnormalized obs (output will be incorrect)"
                     )
             queue.append(obs_t.to(model_device))
 
-    def _reset_delta_state(self) -> None:
-        """Reset delta-restore state; call this whenever the model is reloaded."""
-        self._delta_ref_state = None
+    def _reset_relative_anchor_state(self) -> None:
+        """Reset n-0 chunk-anchor restore state; call whenever the model is reloaded."""
+        self._relative_anchor_state = None
         self._abs_shadow_queue.clear()
 
     def _denorm_queue_action(self, a: object) -> np.ndarray:
@@ -960,7 +1010,7 @@ class LeRobotInferenceNode(Node):
                     ]
                 )
 
-            # ee_rel restore is done upstream in _obs_update (chunk-level).
+            # ee_relative restore is done upstream in _obs_update (chunk-level).
             # Actions arriving here are already absolute — just apply safety limits.
             arm_action = self.action_limiter.process(arm_action, arm_current)
 
@@ -986,10 +1036,10 @@ class LeRobotInferenceNode(Node):
             )
 
     def _publish_ee_action(self, action: np.ndarray) -> None:
-        """Publish EE actions as CommandedEEPose messages (ee_abs / ee_rel mode).
+        """Publish EE actions as CommandedEEPose messages (ee_abs / ee_relative mode).
 
         ``action`` is already in absolute rot6d space when it arrives here
-        (ee_rel restore happens upstream in _obs_update).
+        (ee_relative restore happens upstream in _obs_update).
 
         For each arm:
           - Slices ``action[action_start:action_end]`` (10 dims per arm)
@@ -1262,7 +1312,7 @@ class LeRobotInferenceNode(Node):
     def _publish_hold_position(self) -> None:
         """Publish current joint positions to hold the robot in place on shutdown.
 
-        Skipped in EE mode (ee_abs / ee_rel) — the robot controller (anvil-workcell)
+        Skipped in EE mode (ee_abs / ee_relative) — the robot controller (anvil-workcell)
         retains the last commanded pose autonomously.  Sending a zero Float64MultiArray
         would be interpreted as joint commands, which is wrong for EE mode.
         """

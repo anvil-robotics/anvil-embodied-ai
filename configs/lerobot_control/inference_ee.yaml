@@ -2,7 +2,8 @@
 # LeRobot Inference Configuration — EE Cartesian Space (Bimanual, Production)
 # =============================================================================
 # Use this config when running inference with an EE-space checkpoint
-# (anvil_config.json has action_type: ee_abs or ee_rel).
+# (anvil_config.json has action_type: ee_abs or ee_relative; "ee_rel" is a
+# permanent legacy alias for ee_relative).
 #
 # How EE mode is activated:
 #   1. The inference node reads action_type from the checkpoint's anvil_config.json

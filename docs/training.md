@@ -51,7 +51,7 @@ uv run anvil-trainer \
 | Pi0 | `pi0` | Flow-matching VLA; PaliGemma-3B backbone; requires `--extra pi` |
 | Pi0.5 | `pi05` | Larger Pi0 variant (~4B params); higher VRAM; requires `--extra pi` |
 
-Checkpoints are saved to `model_zoo/<space>-space/<dataset>/<job_name>/` (`ee-space/` for `ee_abs`/`ee_rel`, `joint-space/` for `joint_abs`). Run `uv run anvil-trainer --help` for the full flag reference.
+Checkpoints are saved to `model_zoo/<space>-space/<dataset>/<job_name>/` (`ee-space/` for `ee_abs`/`ee_relative`, `joint-space/` for `joint_abs`). Run `uv run anvil-trainer --help` for the full flag reference.
 
 ---
 
@@ -81,7 +81,7 @@ These are LeRobot's own flags that `anvil-trainer` sets automatically so you don
 | `--policy.push_to_hub` | `false` | Prevents accidental HF Hub uploads |
 | `--eval_freq` | `0` | Disables gym eval (no sim env for MCAP datasets) |
 | `--wandb.project` | `<dataset folder name>` | Groups all runs for the same task together |
-| `--output_dir` | `model_zoo/<space>-space/<dataset>/<job_name>` | `<space>` = `ee` for `ee_abs`/`ee_rel`, `joint` for `joint_abs` |
+| `--output_dir` | `model_zoo/<space>-space/<dataset>/<job_name>` | `<space>` = `ee` for `ee_abs`/`ee_relative`, `joint` for `joint_abs` |
 | `--policy.vision_backbone` + `--policy.pretrained_backbone_weights` | `resnet18` + ImageNet weights | Injected from `--backbone` (ACT/Diffusion only) |
 | `--policy.use_group_norm` | `false` | Injected for Diffusion when using a pretrained backbone |
 | `--policy.noise_scheduler_type` | `DDIM` | Diffusion only. DDIM is deterministic and safe to skip denoise steps (train 50 → infer 16). Pass `--policy.noise_scheduler_type=DDPM` to opt out. |
@@ -97,7 +97,7 @@ Controls the action space. The chosen type is persisted to `anvil_config.json` i
 |---|---|---|---|---|
 | `joint_abs` (default) | Joint | `(N,)` joint positions | `(N,)` joint positions | Joint-space policies (ACT, Diffusion) |
 | `ee_abs` | EE Cartesian | `(10×n_arms,)` xyz+**rot6d**+gripper — absolute¹ | `(10×n_arms,)` xyz+rot6d+gripper | EE absolute; simplest EE mode |
-| `ee_rel` | EE Cartesian | `(10×n_arms,)` xyz+rot6d relative to current frame | `(10×n_arms,)` xyz+rot6d relative to current frame | EE SE(3)-relative (UMI-style); more robust to workspace position shift |
+| `ee_relative` | EE Cartesian | `(10×n_arms,)` xyz+rot6d relative to the chunk anchor | `(10×n_arms,)` xyz+rot6d relative to the chunk anchor | EE SE(3)-relative, anchored to the observation at chunk-generation time (n-0); more robust to workspace position shift. `ee_rel` is a permanent legacy alias — existing checkpoints persisting this value keep loading and behaving identically. |
 
 ¹ `ee_abs` converts `observation.state` from quaternion layout (8n) to rot6d layout (10n) at dataset load time.
 The dataset on disk still stores quaternions (`[xyz, qx, qy, qz, qw, gripper]` per arm); the trainer, inference node,
@@ -112,10 +112,10 @@ uv run anvil-trainer ... --action-type=joint_abs
 uv run anvil-trainer ... --action-type=ee_abs
 
 # EE Cartesian SE(3)-relative
-uv run anvil-trainer ... --action-type=ee_rel
+uv run anvil-trainer ... --action-type=ee_relative
 ```
 
-> Use EE configs with `--action-type=ee_abs` or `--action-type=ee_rel`. Joint configs must use `--action-type=joint_abs`.
+> Use EE configs with `--action-type=ee_abs` or `--action-type=ee_relative` (the legacy `ee_rel` alias is also accepted). Joint configs must use `--action-type=joint_abs`.
 
 ---
 
@@ -500,7 +500,7 @@ Checkpoints are written to `model_zoo/<space>-space/<dataset>/<job_name>/`:
 
 ```
 model_zoo/
-├── ee-space/               # ee_abs / ee_rel action types
+├── ee-space/               # ee_abs / ee_relative action types
 │   └── <dataset>/
 │       └── <job_name>/
 │           ├── checkpoints/

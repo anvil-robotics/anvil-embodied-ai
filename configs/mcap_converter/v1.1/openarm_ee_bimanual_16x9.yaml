@@ -1,6 +1,11 @@
 # =============================================================================
-# OpenArm MCAP to LeRobot — EE Cartesian, BIMANUAL (primary EE default)
+# OpenArm MCAP to LeRobot — EE Cartesian, BIMANUAL — 16:9 variant (480×270)
 # =============================================================================
+#
+# Use this config when the source cameras are 1920×1080 (16:9).
+# image_resolution [480, 270] is an exact ÷4 downscale → no black bars.
+# The 4:3 default (openarm_ee_bimanual.yaml) produces ~25% letterbox padding
+# at the top/bottom, wasting activation memory and degrading visual features.
 #
 # Output (per frame; LeRobot delta_timestamps applies the future window
 # at train time):
@@ -8,13 +13,16 @@
 #                                        [right: x,y,z, qx,qy,qz,qw, gripper]
 #   action             float32 (20,)  =  [left:  x,y,z, rot6d(6), gripper]
 #                                        [right: x,y,z, rot6d(6), gripper]
-#   observation.images.{chest,waist,wrist_l,wrist_r}
+#   observation.images.{chest,waist,wrist_l,wrist_r}  shape: (3, 270, 480)
 #
 # `action_topics: {}` is mandatory in EE mode — the action source is the same
 # /ee_pose_<arm> message used for observation, encoded with rot6d.
 # =============================================================================
 
+schema_version: "1.1"
 data_space: "ee"
+action_encoding: "absolute"
+observation_encoding: "quaternion"
 
 observation_topics:
   left:  "/ee_pose_left"
@@ -34,4 +42,4 @@ camera_topic_mapping:
   "/cam_chest/image_raw/compressed":  "chest"
   "/cam_wrist_l/image_raw/compressed": "wrist_l"
 
-image_resolution: [640, 480]
+image_resolution: [480, 270]  # 16:9, exact ÷4 of 1920×1080 — no letterbox padding

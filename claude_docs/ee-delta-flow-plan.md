@@ -1,0 +1,604 @@
+# Plan — Delta-flow (n-(n-1)) EE Cartesian pipeline on real OpenArm hardware
+
+## Context
+
+The prior diagnosis (`claude_docs/ee-space-libero-vs-production-diagnosis.md`, this
+worktree) concluded that production's `ee_rel` real-hardware jitter is caused by **n-0
+chunk-wise relativization** (whole prediction horizon relativized to one fixed
+chunk-start anchor; normalization stats pooled across all horizon offsets →
+near-term/executed actions compressed in normalized space). LIBERO's own
+directly-analogous `goal-world-n0` condition showed the same pathology (Diffusion
+98%→16%). The only validated mechanism is **per-frame single-step delta (n-(n-1))** —
+every target relative to the immediately-preceding real state — shared by the three
+confirmed-successful LIBERO conditions (native / native_rot6d / native_hand_frame). This
+plan builds a full end-to-end delta-flow pipeline on real OpenArm hardware, replacing the
+n-0 mechanism outright.
+
+**Anti-patterns (do NOT reuse/adapt/take inspiration from):** native_ctrlgoal[_relconv]
+scale-conversion (solves a robosuite-only problem), afo_abs/afo_relative
+(observation-as-action — note per the terminology audit below, `afo_relative` is actually
+**Absolute**, misnamed; its delivery mode is what says "relative", not its target), native_abs
+(no consistent physical unit), native_n0 (per the audit: actually degenerate **Delta
+(n-(n-1))**, misnamed — its "n0" does NOT mean it tested chunk-anchor Relative), and the
+entire goal family / goal-world-n0 (genuine **Relative (n-0)** — the diagnosed root-cause
+mechanism — replace, do not stabilize). **No OAA/action_from_observation path** — the data
+has a genuine recorded command (see Data findings); if any step seems to need OAA, stop and
+flag it.
+
+## Verified facts from exploration (both worktrees)
+
+**Data format (reference session `data/raw_sessions/pbib-standard-env-1st-try`,
+251 episodes) — TWO prompt assumptions corrected:**
+- Topics `/ee_pose_left` `/ee_pose_right` are `anvil_msgs/CommandedEEPose` (~90 Hz):
+  `header + geometry_msgs/Pose + float64 gripper`, `frame_id="world"`. Joint states @500 Hz;
+  4 cameras @~60 Hz.
+- **World-frame, NOT body-frame** (extractor.py:1312-1328 applies no frame transform).
+  World-frame matches `native` (the strongest validated condition), so this is fine.
+- **`observation.state` and `action` are the SAME `/ee_pose` sample**, differing only in
+  rotation encoding (state = quat 8-dim/arm; action = rot6d 10-dim/arm); pos+gripper
+  identical. Converter labels EE mode "always effectively act-from-obs" (extractor.py:586,
+  605-614). Not independent signals; NOT the degenerate OAA fallback.
+- **The value is MEASURED, not commanded** (despite the `CommandedEEPose` type name): the
+  sole publisher of `/ee_pose_<arm>` (anvil-workcell quest_teleop_controller,
+  `absolute_control_modality.py:187-195`) emits a TF `lookup_transform("world", tcp_link)`
+  = FK-from-measured-joints. Training and inference both use this measured pose (consistent).
+  → the delta-mode publish loop's measured-pose self-correction (condition a) IS supported.
+  Per-frame delta target = achieved measured→measured motion (coherent for an
+  absolute-target position controller).
+- **Dependency flag:** `/ee_pose_<arm>` has ONE publisher (quest_teleop_controller, in the
+  separate anvil-workcell repo). Item 2's "fresh obs every publish tick" assumes it is
+  co-launched and publishing at rate during AUTONOMOUS inference — make this an explicit
+  pre-flight check (staleness here silently breaks the self-correction).
+- **No converted EE dataset exists** for this session yet (`data/datasets/ee-space/` empty).
+
+**Reusable code:** `anvil_shared.ee_transform.ee_rel_forward` (ee_transform.py:68) /
+`ee_rel_inverse` (:141) / `ee_obs_rel_forward` (:210), unit-tested on synthetic data
+(tests/unit/anvil_shared/test_ee_transform.py). `ee_rel_forward` already has a per-sample
+anchor branch (state.ndim>1). Training entry `anvil-trainer` (train.py:260) is a thin
+lerobot wrapper; a new action_type = 5 touch points (config.py `_VALID_ACTION_TYPES`:71 +
+`is_*`:142-152; new Transform subclass in transforms.py — **per the redesigned Item 1
+below, this now mirrors `EEAbsTransform`'s obs-only path (transforms.py:238-259), not
+`EERelTransform`, since action is baked and obs stays absolute**; TransformRunner list
+patches.py:145-150 + stats dispatch :619-628; eval inverse branch evaluator.py:194-206 +
+ROS passthrough). Offline eval `anvil-eval` (cli.py:91) already
+replays a dataset through a checkpoint, applies ee_rel inverse, and computes
+position(m)/orientation(deg)/gripper PASS/FAIL metrics (metrics.py:65). `anvil-eval-ros`
+(cli.py:572) does ROS-in-the-loop MCAP replay mirroring deployment. **No model-free
+GT-replay tool exists** — must be built new (reuse ee_transform + `anvil_eval.dataset`).
+Converter: `mcap-convert` + `configs/mcap_converter/openarm_ee_bimanual_16x9.yaml`.
+
+**Inference architecture (inference_node.py):** currently `_obs_update` (@control_freq)
+does get_observation → obs relativization → select_action → **ee_rel restore vs fixed
+`_delta_ref_state`** → pushes ABSOLUTE actions to `_classic_action_deque` (:806);
+`_publish_loop` (:815) just pops absolutes and publishes (no obs read, no anchoring).
+Restore currently against a stale fixed chunk anchor (ee_runtime.py:87-128) = n-0.
+
+**Open-loop question — RESOLVED by design decision (not a tradeoff):** LIBERO's validated
+conditions ran closed-loop per-step, delta composed by robosuite's OSC against the LIVE
+current state each execution step; they never forward-integrated or held a chunk anchor
+(lerobot_eval.py:165-198; libero_processor.py:460-462). Production will match this via a
+**decoupled delta-mode publish loop** (below), so a full multi-step chunk can run
+open-loop exactly like native — no n_action_steps=1 throttle, no forward-integration.
+
+## Design decisions (all resolved)
+
+- **Inference execution:** decoupled delta-mode publish loop (resolved — see item 2).
+- **Target architecture: Diffusion first.** Matches the original failing production
+  stack directly, so the fix is most directly comparable to the diagnosed failure;
+  LIBERO's `native` + per-frame delta scored 98-100% on Diffusion, so per-frame delta is
+  independently validated for this architecture. (ACT is a natural follow-up, not in
+  scope for the first pass.)
+- **Delta frame: world-frame (native-style) — now precisely specified for BOTH
+  translation and rotation, verified against actual robosuite 1.4.0 source (not
+  approximated from general convention).** See "Rotation math (resolved)" below for the
+  exact formulas and why the plan's earlier "reuse `ee_rel_forward`" language was wrong.
+- **observation.state source (factual, not a judgment call):** confirmed MEASURED at
+  both training and inference — independently re-traced directly in the `anvil-workcell`
+  source (not just inferred from the type name). `/ee_pose_<arm>` is published
+  unconditionally by `absolute_control_modality.py:187-208` from
+  `tf_buffer.lookup_transform("world", tcp_link, ...)`, i.e. FK from real joint encoders
+  (`joint_state_broadcaster` → `/joint_states` → `robot_state_publisher` TF). This runs
+  *before and independently of* any commanded-target branch in the same function, on a
+  ~1000 Hz timer, in **both** teleop and autonomous/inference modes (same node, same code
+  path — mode only changes what feeds the IK branch further down, not the ee_pose
+  publish). Published stamp is the TF transform's own timestamp, not `now()`, so
+  downstream staleness is directly measurable. Equivalence condition (a) is satisfied
+  with high confidence.
+
+## The six-item plan (each stage gated on the previous)
+
+### Rotation math (RESOLVED — must read before writing any Item 1 code)
+
+Investigated precisely (both the existing code and actual robosuite 1.4.0 source, not
+approximated). Answers all five sub-questions:
+
+**1. Existing `ee_rel_forward`/`ee_rel_inverse` formulas, quoted exactly (ee_transform.py):**
+Forward rotation: `Rs_rel = Rs_state_T @ Rs_action` (per-sample) / `R_state.T @ Rs_action`
+(single-state) — i.e. `R_delta = R_stateᵀ @ R_action` (lines ~124-131). Forward
+translation: `world_delta @ R_state` where `world_delta = action_xyz - state_xyz` (line
+133) — algebraically `R_stateᵀ · (action_xyz − state_xyz)`. Inverse rotation:
+`Rs_abs = Rs_state @ Rs_rel` i.e. `R_action = R_state @ R_delta` (lines ~194-200); inverse
+translation mirrors it. **Both components are BODY-FRAME by construction** — confirmed
+algebraically exact inverses of each other (`R_state @ (R_stateᵀ @ R_action) = R_action`
+since `R_state` is orthonormal).
+
+**2. World vs. body frame — CORRECTION to the plan's prior framing.** The rotation
+formula's frame convention is structurally independent of translation's (the two lines
+don't interact) — so in principle they *could* be mixed. But the existing functions
+implement BODY-frame for **both** components, not just translation as the plan previously
+implied. The "world-frame (native-style)" decision therefore requires **new formulas for
+both**, not a reuse of the existing per-sample branch for rotation while only swapping
+translation.
+
+**3. Anchor-agnostic, confirmed.** Neither formula (existing body-frame, or the new
+world-frame ones below) contains any notion of "chunk start" or "previous frame" — `state`
+is just whatever array is passed in. The n-0 vs n-(n-1) distinction lives entirely in what
+gets passed as `state` (chunk-start anchor vs. immediately-preceding frame), never in the
+formula itself. Passing `state[t-1]` gives genuine Delta(n-(n-1)) with no risk of
+accidentally inheriting n-0 semantics from the formula's origin.
+
+**4. NEW formulas required for `ee_delta_forward`/`ee_delta_inverse` — verified against
+actual robosuite 1.4.0 source** (`osc.py:261-266`, `control_utils.py:132-136,174-177` —
+the exact controller `native` delivers its command to): robosuite's own composition for
+`control_delta=True` is `goal_orientation = delta_rotation @ current_orientation`
+(left-multiply, world/extrinsic) and `goal_position = current_position + delta` (raw
+world-frame addition, no rotation by current orientation). To match this exactly:
+- **Forward (bake at convert time):** `delta_xyz = action_xyz - state_xyz` (plain world
+  difference, no `R_state` rotation — corrected from the existing body-frame
+  `world_delta @ R_state`); `R_delta = R_action @ R_state.T` (world/extrinsic — corrected
+  from the existing body-frame `R_state.T @ R_action`), encoded via `matrices_to_rot6d`.
+- **Inverse (Item 2's publish-loop composition, answering the "exact formula" question
+  directly):** `absolute_target_xyz = obs_xyz + delta_xyz`; `R_absolute_target = R_delta @
+  R_obs` — this is now algebraically confirmed the exact inverse (`(R_action @ R_stateᵀ) @
+  R_state = R_action`) AND is now the literal same composition order robosuite itself
+  uses, so Item 2's `obs_pose ∘ delta_k` is precisely `R_delta @ R_obs` / `obs_xyz +
+  delta_xyz` — no asymmetry risk.
+- **Practical implication:** `ee_delta_forward`/`ee_delta_inverse` must be authored as
+  genuinely new functions, not thin wrappers around `ee_rel_forward`/`ee_rel_inverse`'s
+  per-sample branch. The reusable pieces are the lower-level rotation PRIMITIVES
+  (`quat_to_matrix`/`quats_to_matrices`, `matrices_to_rot6d`, `rot6ds_to_matrices`) — the
+  top-level composition logic differs and must be written fresh. This corrects every
+  earlier mention in this plan of "reuse `ee_rel_forward`'s per-sample branch" /
+  "wrappers around the existing per-sample-anchor branch" — those are now understood to be
+  imprecise; treat all such mentions below as superseded by this section.
+
+**5. Identity/self-anchor first-frame case, rotation — confirmed still valid, no new
+convention needed.** The existing test `test_identity_state_identity_action_zero_delta`
+(test_ee_transform.py:165-176) asserts `rel[3:9]` (rot6d dims) equals identity rot6d
+`[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]` at `atol=1e-12` when `state==action` (both identity).
+This transfers unchanged to the new world-frame formula: when `state==action`, BOTH
+`R_stateᵀ@R_action` (body) and `R_action@R_stateᵀ` (world) degenerate identically to
+`R_state@R_stateᵀ = I` — the self-anchor zero-delta convention (Item 1's first-frame
+decision) is frame-convention-agnostic. Write an analogous test for the new
+`ee_delta_forward`, same assertion, no new test structure required.
+
+### Item 1 — REDESIGNED: convert-time baking, not a training-time Transform
+
+**Mechanism change (investigated and confirmed, decided):** instead of computing
+Delta(n-(n-1)) live per-`__getitem__` in a training-time Transform, `mcap_converter`
+bakes the delta directly into the on-disk `action` column at conversion time — a static,
+independently-inspectable value, never recomputed during training. This is a stronger
+version of the "validate math before spending compute" discipline: GT-replay now checks
+"is this on-disk number correct" once, not "does re-invoking this code produce the same
+result every time."
+
+**LIBERO `native` precedent — confirmed, WITH an important correction to the original
+framing.** `native`'s action is **not computed from absolute poses at all** — it's a
+literal, unmodified copy of the source LIBERO demonstration's own already-recorded delta
+*command* (`item["action"].numpy()`, `libero_convert.py:736-741`; module docstring:
+"a plain LOCAL copy... no Anvil transform at all"). `observation.state` stays the raw
+absolute pose, unmodified (asymmetric absolute-obs / delta-action, confirmed). No anvil
+transform touches it at train time — plain `lerobot-train`, zero anvil-trainer
+involvement. **Consequently `native` needs NO first-frame boundary handling** — it never
+differences two states, so there's no t=-1 problem to solve in the first place (verified:
+the only per-frame boundary logic in the whole file is `afo_abs`'s unrelated *trailing*-frame
+drop, `libero_convert.py:803-812`).
+
+**Why this matters for production:** OpenArm has no recorded delta-*command* channel —
+both `observation.state` and `action` are currently derived from the same absolute
+`/ee_pose` sample (confirmed earlier this session). So production's baked delta is
+necessarily a **differenced-pose** delta (`action[t] = ee_delta_forward(pose[t], pose[t-1])`),
+structurally analogous in spirit (single-step, per-frame anchor, no chunk accumulation)
+but a genuinely different construction than what `native` validates (a *copied-command*
+delta). **There is no direct LIBERO precedent for the first-frame case** — `native` simply
+never faces it. Production must decide this independently (see below), not "replicate" a
+convention that doesn't exist.
+
+**Production baking design (investigated, small/localized change, not a restructuring):**
+- **mcap_converter** (`packages/mcap_converter/src/mcap_converter/`): `_align_ee_signals`
+  (extractor.py:1341-1380) is currently a stateless per-frame encoder with no access to
+  `pose[t-1]`, but extraction is already strictly sequential per-episode
+  (`extract_frames`, extractor.py:647-847) — accessing the previous frame requires only
+  additive plumbing (a `prev_state` local carried through `extract_frames`, mirroring the
+  existing `next_yield_ts is None` first-value-sentinel pattern at extractor.py:788-790),
+  not a loop restructuring.
+- **Config:** add a new field on the EE data config, e.g. `ee_action_encoding:
+  "absolute"|"delta"` (default `"absolute"`) — NOT a new `data_space` value. `is_ee` keys
+  off `data_space=="ee"` (schema.py:140-141) and every EE branch site keys off `is_ee`; a
+  new `data_space` value would touch all of them and risk changing existing behavior. A
+  scalar flag keeps `data_space=="ee"`, so existing configs (defaulting to `"absolute"`)
+  stay byte-identical. Minor: extend the convert.py:713 output-dir suffix
+  (`ee-space/`→`ee-delta-space/` when flagged) to keep datasets cleanly separated on disk.
+- **`observation.state`: unchanged, stays absolute** in both variants (matches `native`'s
+  own asymmetric convention, and requires zero schema/writer change — writer.py's feature
+  declaration is already generic on shape/dtype, extractor.py:1370-1372 untouched). Only
+  the `action_slices.append(...)` computation (extractor.py:1373-1375) branches to the
+  delta formula.
+- **Computation:** call the NEW `ee_delta_forward` (world-frame formulas, per "Rotation
+  math" above — NOT a wrapper around `ee_rel_forward`'s body-frame per-sample branch, per
+  the correction above). The lower-level rotation primitives
+  (`quat_to_matrix`/`matrices_to_rot6d`/`rot6ds_to_matrices`) are still reused; the
+  extractor already lazy-imports from `anvil_shared` (extractor.py:1357).
+- **First-frame convention (decided, no LIBERO precedent to copy — see above):**
+  self-anchor zero-delta, i.e. `action[0] = ee_delta_forward(action[0], state[0])`, which
+  yields a zero body-delta + identity rotation. This is not invented for this plan — it's
+  already the exact invariant asserted by the existing unit test
+  `test_ee_transform.py:165` (`test_identity_state_identity_action_zero_delta`), so it's a
+  principled, already-tested choice, using the existing `None`-sentinel structural pattern
+  already present in the extractor (extractor.py:788-790) rather than a new mechanism.
+- **Writer:** no change needed — `_define_features` (writer.py:234-238) declares `action`
+  generically by shape/dtype; a baked delta has identical shape, only different numeric
+  semantics.
+
+**Training-side implications of baking (investigated):**
+- **`_first_apply` — settled, not a real risk either way.** Traced every read/write site
+  in `EEAbsTransform`/`EERelTransform`: it is a **one-time logging flag only** (guards a
+  single `log.info(...)` call, `transforms.py:335-340` etc.) — the numerical work runs
+  unconditionally before the flag is ever consulted, and transforms are instantiated fresh
+  per run/worker (`patches.py:140`), so there is no cross-worker race and no
+  first-vs-later-call numerical difference. This specific concern is fully resolved
+  regardless of the baking decision — baking is still adopted for the reasons above
+  (static inspectable artifact, stronger validate-before-compute discipline), not because
+  `_first_apply` was actually unsafe.
+- **Action-side transform work is eliminated.** Both the live `ee_rel_forward` call in
+  `apply()` (transforms.py:324-330 today) and the live-replay+episode-masking stats
+  reconstruction in `_compute_ee_rel_stats` (patches.py:337-360) exist ONLY because
+  relativization currently happens live — baking removes the need for both, for the
+  action side.
+- **Obs-side is NOT eliminated, but turns out simpler than expected.** Because `native`'s
+  own convention keeps `observation.state` absolute (not relativized), the new baked-delta
+  type's obs handling should mirror the EXISTING `EEAbsTransform`'s obs path
+  (`ee_obs_abs_forward`, transforms.py:238-259 — layout conversion only, quaternion 8n→
+  rot6d 10n, no relativization) rather than `EERelTransform`'s obs path (which also
+  relativizes). **This means the new transform is structurally close to `EEAbsTransform`
+  (obs-only conversion, action passthrough), not a new pattern from scratch.**
+- **Stats shrink substantially but don't fully disappear.** A slimmed
+  `_compute_ee_delta_stats` reads mean/std/min/max straight off the static baked column (no
+  live replay, no episode-boundary masking) — but the rot6d ±1 identity clamp
+  (`_force_rot6d_identity`, patches.py:60-77) is NOT generic dataset-stats behavior and
+  must still be applied post-hoc if the baked delta is rot6d-encoded (it is). Obs stats
+  likewise still needed, matching the (simpler) `EEAbs`-style obs treatment.
+- **Double-transform risk (flagged, must guard against):** at train time, whatever
+  transform is registered for `ee_delta` must NOT re-apply any action-side relativization
+  — `action` is already the baked delta and must pass through unchanged, exactly as
+  `EEAbsTransform` already does for its own action column today.
+- Full "register nothing, ride the `joint_abs` no-Transform path" is possible only if
+  `observation.state` is ALSO baked to 10n rot6d on disk (a further step beyond what's
+  decided here) — not adopted, since it would break the deliberate match to `native`'s
+  absolute-obs convention for a marginal simplification.
+
+**GT-replay implication (Item 3):** now validates "is the on-disk baked column correct" —
+recompute the expected delta from the raw absolute pose sequence via the same
+`ee_delta_forward` math and compare against what mcap_converter actually wrote, rather than
+round-tripping through a live Transform call.
+
+Naming: still `action_type="ee_delta"`, still uses "delta" exclusively per the Terminology
+section (the converter-side flag `ee_action_encoding` and the training-side action_type
+are two different, individually-named knobs — keep them distinct, don't conflate).
+Sequencing note unchanged: the existing n-0 code's rename should still land before/alongside
+this work, so the converter's new delta-computation call site isn't introduced next to
+ambiguous `ee_rel_*` names either.
+
+Target architecture: **Diffusion** (decided) — the checkpoint's `chunk_size`/
+`n_action_steps`/`n_obs_steps` should otherwise mirror the diagnosed checkpoint
+(horizon=16, n_action_steps=8, n_obs_steps=2) as the closest controlled comparison,
+unless training results suggest otherwise.
+
+### Item 2 — Inference-side redesign (decoupled delta-mode publish loop)
+Store model-output **deltas** (not pre-restored absolutes) in the action queue. In the
+delta-mode publish loop (@control_freq, independent of inference rate): at each tick read
+the freshest real observation and compute `absolute_target = obs_pose ∘ delta_k` fresh —
+precisely `absolute_target_xyz = obs_xyz + delta_xyz`, `R_absolute_target = R_delta @
+R_obs` (see "Rotation math (RESOLVED)" above) — then publish. This mirrors robosuite's
+per-execution-step anchoring, enabling full open-loop chunk execution at the checkpoint's
+trained n_action_steps.
+**Equivalence holds only if (flagged):** (a) anchoring obs = measured current pose, not
+commanded (else dead-reckoning); (b) deltas are genuine single-step (item 1) — coupled,
+validate jointly; (c) real actuation latency yields bounded trailing lag, not divergence,
+which must be MEASURED. This mode does not use the fixed-anchor n-0 path at all (that
+path — `_delta_ref_state`/`ee_rel_restore_chunk`, proposed rename
+`_relative_anchor_state`/`ee_relative_restore_chunk` — remains for the existing
+`ee_relative` action_type, untouched, for comparison).
+
+### Item 3 — OpenArm GT-replay tool (new, model-free) — FIRST GATE, STRICT BAR UNCHANGED
+Permanent reusable CLI: load a converted delta-flow dataset (or the raw reference
+session's GT poses), run GT absolute poses → new forward transform → new inverse/publish
+composition round-trip WITHOUT a model, confirm recovery to ~machine precision. Reuse
+`anvil_shared.ee_transform` + `anvil_eval.dataset.EvaluationDataset`; extend the prototype
+(scratchpad `ee_diag/task4_roundtrip.py`). This gates every delta-flow dataset before
+training compute. Not a port of LIBERO bench_spec/gating. **This bar does NOT relax for
+the 10-episode smoke pass** — it tests transform math correctness, independent of dataset
+size or model quality.
+
+### Item 4 — Convert reference session + train (10-episode smoke scale — see config below)
+Convert the user-provided 10-episode raw session to a delta-flow EE dataset via
+`mcap-convert` with the new `ee_action_encoding: "delta"` config flag (baking the
+per-frame delta at conversion time, per the redesigned Item 1 above) — a new/edited EE
+config, existing `ee_abs`/`ee_relative` configs untouched. Pass item 3 GT-replay first.
+Then train **Diffusion** via `anvil-trainer --action-type=ee_delta` at **smoke scale, not
+convergence scale** — see "10-episode smoke-test config" below for exact flags.
+
+### Item 5 — Offline evaluation — DOWNGRADED BAR for this pass
+`anvil-eval` on the checkpoint (add the new action_type's inverse branch). **Success bar
+for this pass = "runs and produces output," NOT "passes PASS/FAIL thresholds."** A FAIL
+verdict from anvil-eval's position/orientation/gripper metrics is EXPECTED and NOT a
+problem at n=10 — poor model accuracy is normal at this scale. The actual failure signal
+to watch for: a crash, a NaN/inf in the output, or missing/empty output files. Optionally
+`anvil-eval-ros` MCAP-replay as an additional runs-without-crashing check, same downgraded bar.
+
+### Item 6 — Real-hardware inference with monitor — OUT OF REACH THIS SESSION
+No real OpenArm connected this session. See "Item 6 handoff checklist" below for what to
+report to Patrick for the actual hardware run. Success criterion when it does run =
+the diagnosis method: obs-vs-control_cmd jitter ratio back to ~1.0 (vs 1.5–3.7× in the
+failure), plus checking systematic tracking lag (obs-vs-command phase offset) — the new
+failure mode the publish loop could introduce.
+
+### Item 2b (new, confirmed in scope) — Fake-hardware EE extension
+Investigated: the existing fake-hardware system (`docker-compose.fake-hardware.yml` +
+`MockControllerNode`, `.../test/fake_hardware/fake_hardware_node.py`) is **joint-space
+only today** — publishes random (not command-coupled) `/joint_states`, has zero EE topics,
+never touches `CommandedEEPose`. Its architecture IS genuinely valuable though: real
+multi-container CycloneDDS, `MultiThreadedExecutor` with separate `MutuallyExclusiveCallbackGroup`s
+and independent timers for obs (`_obs_timer`) vs publish (`_publish_timer`)
+(inference_node.py:115-127) — exactly the decoupled-timer pattern Item 2 introduces. This
+is a genuinely useful intermediate rung between offline unit tests and real hardware, but
+making it usable requires **new mock logic, not just config**:
+1. Add a `CommandedEEPose` publisher on `/ee_pose_<arm>` to the mock (message plumbing).
+2. Add a `/commanded_ee_<arm>` subscriber that **echoes/integrates the received command
+   back as the next published observation** (`next_ee_pose ≈ last_received_command`) — this
+   is required specifically to exercise the delta-mode self-correction; a static/random
+   EE-pose publisher alone would validate topic wiring but NOT the `obs_pose ∘ delta`
+   feedback loop.
+**Explicitly out of scope regardless:** real actuation dynamics, physical velocity/latency
+limits, sensor latency — the mock extension (if built) validates SOFTWARE timing/
+composition correctness only, never physical behavior. This remains true even with the
+extension; it is not a substitute for Item 6.
+**Scope decision: CONFIRMED IN SCOPE for this pass.** This is real new code (a modest
+mini-feature — a topic publisher + an echo/integrate subscriber in the mock node), beyond
+the original six items, explicitly approved to include given it's a genuine intermediate
+runtime rung and Item 6 is unreachable this session anyway.
+
+## Sequencing (gated)
+Item 1 → validated by Item 3 (GT-replay) → Item 4 (convert+train) → Item 5 (offline eval)
+→ Item 6 (hardware). Item 2 built alongside 1 (coupled), validated by 3 (math) + 6
+(hardware jitter+lag). **Never** hardware (6) before GT-replay (3) passes; **never** train
+(4) before item 1 is GT-replay-confirmed.
+
+## Remaining pre-flight task (not a design decision)
+Confirm quest_teleop_controller is co-launched during autonomous inference (it is the
+same node/code path used in teleop, confirmed above, so this should already hold in the
+current deployment — treat as a smoke-test check, not an open question) and that its
+ownership gate (`quest_teleop_controller.py:767`) isn't held by another requester (e.g.
+during a rehoming operation) when inference starts.
+
+## Terminology lock-in (audit + rename proposal — planning only, nothing renamed yet)
+
+**Canonical terms (use exclusively going forward, in code, config, and docs):**
+- **Absolute** — raw absolute pose, never relativized.
+- **Delta (n-(n-1))** — each step's target relative to the immediately-preceding *observed*
+  frame; per-frame anchor, re-derived every step. This is Item 1's new mechanism.
+- **Relative (n-0)** — each step's target relative to the observation at the *start of the
+  chunk*; one fixed anchor shared across the whole horizon. This is what production's
+  existing `ee_rel` already implements (the diagnosed root cause) — "relative" no longer
+  means "any non-absolute representation," it means specifically this.
+
+**Branch-location correction (found during this audit, not a naming issue but important):**
+the actual `research/libero_ee/` docs + `packages/anvil_sim/.../studies/libero_ee/` code do
+**NOT** live on `patrick/sim-valid-dev` in the current repo state — they were found on
+`research/add-maniskills-env-and-test` @ 660934d (worktree:
+`.worktrees/add-maniskills-env-and-test`). Notably, 660934d is the *same* commit this
+session originally saw `origin/sim-valid-dev` pointing to, early on — the ref appears to
+have moved during this session (likely a concurrent process outside this conversation; the
+`sim-valid-dev` worktree was also separately observed switching to `main` mid-session).
+**Recommend confirming with Patrick which ref/branch is now authoritative for this history**
+before citing it further; treat `research/add-maniskills-env-and-test` as the working
+source for now.
+
+### Production audit summary (`implement-ee-space` worktree)
+~340 in-scope occurrences of "rel"/"relative", **all currently Relative(n-0)** — Delta
+(n-(n-1)) does not exist in code yet, only in `claude_docs/ee-delta-flow-plan.md`.
+
+**Public interfaces (backward-compat REQUIRED, do not silently break):**
+1. `action_type` string value `"ee_rel"` — CLI flag value, `_VALID_ACTION_TYPES`
+   (config.py:71), all `--help`/hint text (train.py:156-159, anvil_eval_ros/cli.py:600).
+2. Persisted `anvil_config.json` fields `"action_type": "ee_rel"` / `"is_ee_rel": true` —
+   **31 on-disk checkpoint files across 5 model dirs** (`ee_rel_v1`..`v4` +
+   `diffusion_20260702_145619`, the checkpoint behind the diagnosed failure). Any rename
+   must keep reading the legacy `"ee_rel"` token forever, or provide an explicit migration.
+3. `configs/lerobot_control/inference_ee.yaml` + smoke-test fixture YAML comments/values.
+
+**Internal-only (renamable, no compat concern):** `EERelTransform`, `ee_rel_forward` /
+`ee_rel_inverse` / `ee_obs_rel_forward` (anvil_shared/ee_transform.py), `ee_rel_restore_chunk`
+(ee_runtime.py), `_compute_ee_rel_stats`, `is_ee_rel` property, assorted log tags
+(`[ee_rel]`, `[ee_rel_stats]`) and doc prose (docs/training.md, docs/ee_space_report[.zh-TW].md,
+docs/relative_ee_failure_analysis.md, this plan, the diagnosis report).
+
+**Critical collision (must resolve before Item 1 uses "delta"):** production already uses
+"delta" pervasively for the **n-0 mechanism's SE(3) offset vector** —
+`_delta_ref_state` (the fixed chunk anchor), `_ee_rel_action_for_delta`, `n_delta_steps`,
+"delta restore" comments (inference_node.py:780,786). None of these are the new
+Delta(n-(n-1)) concept. `action_delta_indices` is likely lerobot's own upstream field name
+(needs a quick ownership check before deciding whether to touch it — same category as
+robosuite's `control_mode="relative"` on the LIBERO side: third-party API, not ours to rename).
+
+### LIBERO audit summary (`research/add-maniskills-env-and-test` worktree)
+Two orthogonal axes exist in the LIBERO study: target **representation** (our canonical
+scheme) vs. **delivery** (`deliver="absolute"/"relative"/"relative_converted"` — how the
+reconstructed target is fed to robosuite). Most naming mismatches come from conflating them.
+
+| condition | actual mechanism | canonical class | name OK? |
+|---|---|---|---|
+| native / native_rot6d / native_hand | per-step recorded delta, live-obs anchor | **Delta (n-(n-1))** | ✅ yes |
+| `native_n0` | goal relativized **per-frame** at convert time (`per_frame_anchor=True` forced at eval); degenerates ≈ native | **Delta (n-(n-1))**, degenerate | ❌ **misnamed** — "n0" wrongly implies Relative(n-0). Propose e.g. `native_perframe_baked`. |
+| `goal-world-n0` / `goal-hand-n0` | absolute goal relativized to **chunk-start** anchor (`per_frame_anchor=False`) | **Relative (n-0)** | ✅ yes — "n0" correctly signals chunk-start |
+| `goal-abs` / `native_abs` | formal `state+Δ`, unscaled, no consistent physical unit | Absolute (formal/degenerate) | ⚠️ partial — name doesn't overclaim but flag the caveat wherever cited |
+| `native_ctrlgoal` | genuine physical absolute controller-goal | **Absolute** | ✅ yes |
+| `native_ctrlgoal_relconv` | same absolute target; only *delivery* is `relative_converted` | Absolute (target); `relconv` = delivery, not representation | ✅ keep, but flag "rel" here ≠ our anchor scheme |
+| `afo_abs_h{1,5,10}` | genuine observed future absolute pose (OAA) | **Absolute** | ✅ yes |
+| `afo_relative` | **same** `afo_abs_h1` absolute target; only *delivery* is `relative_converted` — not relativized to any anchor at all | **Absolute** (obs-derived) | ❌ **misnamed** — "relative" here means delivery mode, clashes with new meaning. Propose e.g. `afo_abs_relconv` (parallel to `native_ctrlgoal_relconv`). |
+| `replay_adapter.py` `"direct"` provider | replay-mechanics label, spans multiple canonical buckets | n/a (orthogonal) | ✅ no rename — don't force it into the scheme |
+| `rel_world`/`rel_hand` (provider-level) | correctly Relative(n-0) at the provider label level | Relative (n-0) | ✅ yes, BUT the underlying `ZeroCalActionProcessorStep` **mode** string is overloaded (also drives `native_n0`'s forced-per-frame Delta) — flag for a disambiguating comment, not necessarily a rename |
+
+### Proposed renaming scheme (NOT executed — proposal only)
+- **Production, public `action_type` token: `"ee_rel"` → `"ee_relative"`** (decided —
+  short form; "relative" is unambiguous under the new canonical scheme, so the explicit
+  `_n0` suffix isn't needed). Loader must accept the legacy `"ee_rel"` string from all 31
+  existing checkpoints as a permanent alias.
+- **Production, internal:** `EERelTransform`→`EERelativeTransform`; `ee_rel_forward`/
+  `ee_rel_inverse`/`ee_obs_rel_forward`→`ee_relative_forward`/`_inverse`/
+  `ee_obs_relative_forward`; `ee_rel_restore_chunk`→`ee_relative_restore_chunk`;
+  `_compute_ee_rel_stats`→`_compute_ee_relative_stats`; `is_ee_rel`→`is_ee_relative`.
+  (Class/function names still read as "n-0" implicitly via the canonical-term docstring/
+  comment on each — the explicit `_n0` suffix was judged unnecessary once "relative" itself
+  is unambiguous, consistent with the public-token decision above.)
+- **Production, resolve the "delta" collision:** `_delta_ref_state`→`_relative_anchor_state`;
+  `_ee_rel_action_for_delta`→`_ee_relative_action_for_offset`; `n_delta_steps`→
+  `n_offset_steps`; reword "delta restore" comments to "n-0 restore" / "chunk-anchor restore".
+- **New Item 1 feature — "delta" used exclusively, never "rel":** `action_type="ee_delta"`
+  (already sketched); `EEDeltaTransform`; `_compute_ee_delta_stats`. **Design note
+  (corrected — see "Rotation math (RESOLVED)" above):** `ee_delta_forward`/
+  `ee_delta_inverse` are NOT thin wrappers around `ee_rel_forward`/`ee_rel_inverse`'s
+  per-sample-anchor branch — that branch is anchor-agnostic (fine to reuse the
+  anchor-passing *pattern*) but hardcodes BODY-frame composition for both translation and
+  rotation, whereas the new type needs WORLD-frame composition for both (verified against
+  robosuite 1.4.0 source). The new functions must be authored with the corrected formulas;
+  only the low-level rotation-matrix/rot6d primitives are shared.
+- **LIBERO:** rename `native_n0`→`native_perframe_baked` (or similar); `afo_relative`→
+  `afo_abs_relconv`. Leave delivery-axis names (`relative_converted`, robosuite
+  `control_mode="relative"`, provider `rel_world`/`rel_hand`) alone — different axis,
+  third-party API in robosuite's case — but add a disambiguating comment on the overloaded
+  `ZeroCalActionProcessorStep` mode string.
+- **Docs to update (prose only, same terms):** `research/libero_ee/{stage1-closeout,report}.md`
+  (add-maniskills-env-and-test worktree); `claude_docs/ee-space-libero-vs-production-diagnosis.md`
+  and `claude_docs/ee-delta-flow-plan.md` (this worktree); `docs/training.md`,
+  `docs/ee_space_report[.zh-TW].md`, `docs/relative_ee_failure_analysis.md` (this worktree).
+
+This section is audit + proposal only — no renames executed. Execution (if approved) should
+be its own gated step, likely before or alongside Item 1, since Item 1's new code must not
+be born into the "delta" collision described above.
+
+## Execution scope confirmation (this session)
+
+Per explicit instruction: **all implementation happens ONLY in `patrick/implement-ee-space`**
+(worktree `.worktrees/implement-ee-space`, working directly on that branch — no new nested
+worktree/branch, per Patrick's explicit override of the default worktree-per-change habit).
+`research/add-maniskills-env-and-test` and `patrick/sim-valid-dev` are reference-only for
+this pass — read for facts, never modified.
+
+**Environment check (this session):** GPU available (RTX 4090) → Item 4 (training) is
+feasible to actually run here. `ros2` not found in this shell's PATH → Item 6 (real
+hardware deployment) is **not executable from this sandbox**; it needs Patrick's actual
+robot machine. Item 5 (offline eval) is feasible here (no hardware needed).
+
+**Pre-existing uncommitted state noticed in the worktree (not made by this session):**
+`scripts/run_inference.sh` shows as modified (not staged/committed) before any of this
+session's edits. Do not silently commit over it — check its diff and, if unclear whether
+it's intentional in-progress work, surface it rather than assume.
+
+**Proposed execution order for this pass (gated, matches the plan's own sequencing rule
+"never train before Item 1 is GT-replay-confirmed"):**
+1. Execute the terminology rename (production side: `ee_rel`→`ee_relative` family, resolve
+   the "delta" collision) — prerequisite so Item 1's new code isn't born next to ambiguous
+   names. **Verify behaviorally, not just by reasoning**: load at least one real existing
+   checkpoint (e.g. `diffusion_20260702_145619`, the diagnosed one) through the renamed
+   code path and confirm the legacy `"ee_rel"` token still resolves correctly to
+   `EERelativeTransform`/`"ee_relative"` behavior — concrete evidence the rename didn't
+   silently break existing checkpoints, not just "the diff looks right."
+2. Item 1 — now TWO parts per the redesign: (a) `mcap_converter` change (new
+   `ee_action_encoding: "delta"` config flag + `prev_state`-threading + first-frame
+   self-anchor convention, using the NEWLY-AUTHORED world-frame `ee_delta_forward`, per
+   "Rotation math (RESOLVED)" above) that bakes the delta on disk at convert time; (b) the
+   much slimmer training-side piece — an obs-only Transform (mirrors `EEAbsTransform`,
+   action passthrough) + `_compute_ee_delta_stats` (mean/std/min/max off the static column
+   + the rot6d identity clamp). New stats method **must replicate the existing
+   epsilon-floor pattern** (see below) — required, not optional hardening.
+3. Item 2 — inference-side decoupled delta-mode publish loop, using the world-frame
+   inverse formula (`absolute_target_xyz = obs_xyz + delta_xyz`, `R_absolute_target =
+   R_delta @ R_obs`).
+4. Item 2b — fake-hardware EE extension (confirmed in scope).
+5. Item 3 — GT-replay tool (model-free round-trip), strict bar. **Gate: must pass before Item 4.**
+6. Item 4 — convert the 10-episode session + train at smoke scale (feasible here, GPU
+   available). See exact config below.
+7. Item 5 — offline eval (`anvil-eval`), downgraded bar (runs without crash/NaN, PASS/FAIL
+   ignored).
+8. Item 6 — real-hardware deployment: **out of reach from this session** — produce the
+   handoff checklist below instead.
+
+### 10-episode smoke-test config (investigated, concrete)
+Recommended: **`--split-ratio=8,1,1 --steps=10 --save_freq=10 --batch_size=1
+--num_workers=0 --eval_freq=0 --log_freq=5 --action-type=ee_delta`** — this mirrors the
+existing proven precedent in `tests/smoke/scripts/pipeline_smoke_test.py` (5-episode
+fixtures, `3,1,1` split, same steps/save_freq/batch/worker/eval pattern), scaled to 10
+episodes with the default-shaped `8,1,1` ratio (→ 8 train / 1 val / 1 test).
+**Correction to the original framing:** `--split-ratio=1,0,0` (all-10-as-train,
+val/test disabled) was considered but is actively WRONG for this purpose —
+`apply_val_loss_patch` (patches.py:585-588) early-returns when val+test ratio is ≤0, which
+skips installing `patched_make_dataset` entirely, meaning **the new stats-computation
+method would never run at all**, defeating the exact thing this smoke test needs to
+exercise. Use `8,1,1` (or any ratio with val>0) instead — **confirmed, decided (accepted
+correction).** `--steps=10 --save_freq=10` guarantees exactly one checkpoint save
+regardless of scale, because lerobot's save condition includes `step == cfg.steps`
+unconditionally (lerobot_train.py:447,469) — confirmed this is not convergence-scale,
+purely a save-path smoke check.
+
+**Stats robustness (investigated, concrete):** the existing `_compute_ee_rel_stats` /
+`_compute_ee_abs_stats` already floor std at `1e-6` via `np.where(std < 1e-6, 1e-6, std)`
+at every relevant site (patches.py:363,419,488-490,512) — **this guard is load-bearing and
+must be replicated verbatim in the new single-step stats method**; a near-constant
+gripper/rotation dim across only 10 episodes is a realistic zero-variance case. min/max is
+NOT guarded in anvil's code beyond the rot6d ±1 force-clamp and gripper's
+restored-from-absolute stats — a degenerate zero-range position dimension is possible at
+n=10 and is NOT anvil's problem to solve twice: lerobot's own vendored normalizer
+(`normalize_processor.py:349-355,372-374,389-391`) independently guards zero-range via
+`torch.where(denom==0, eps, denom)` for both MEAN_STD and MIN_MAX, so there is no crash/NaN
+path either way — worst case a degenerate dim silently maps to a constant.
+
+**Verification requirement for this smoke test (concrete evidence required, not a summary
+judgment):**
+(a) After the run, report the ACTUAL logged per-dimension mean/std/min/max values from
+`_compute_ee_delta_stats` for this specific 10-episode dataset — explicitly state which
+dimensions (if any) show near-zero std or a collapsed min/max range. "No crash occurred"
+is not sufficient evidence on its own.
+(b) The entire stats method is wrapped in a broad `try/except` that swallows failures into
+a silent fallback to raw dataset stats (patches.py:443-445,534-536) — this means "training
+completed without error" looks IDENTICAL whether the new stats path ran, or silently fell
+back. Add (if it doesn't already exist) an unambiguous log line confirming
+`_compute_ee_delta_stats` ran to completion AND that its output was the one actually
+injected into `train_dataset.meta.stats["action"]` (not the fallback) — then quote that
+log line from the actual run as proof, not just "the run finished."
+
+### Item 6 handoff checklist (skeleton — fill in concrete values once Item 4 produces a checkpoint)
+When real-hardware deployment becomes possible, report to Patrick:
+- Trained checkpoint path (under `model_zoo/ee-space/<dataset>/<run>/checkpoints/<step>/`).
+- Which inference config to use (`configs/lerobot_control/inference_ee.yaml`, confirming
+  `ee_command_topic`/`ee_obs_topic` match what the new delta-mode publish loop expects).
+- Pre-flight checks: (1) confirm `quest_teleop_controller` co-launched and its ownership
+  gate isn't held elsewhere (already flagged above); (2) confirm controller topic naming
+  (`/commanded_ee_<arm>`, `/ee_pose_<arm>`) matches exactly what the new publish-loop code
+  subscribes/publishes to — this is an anvil-workcell-side dependency per
+  `inference_ee.yaml`'s own header comment, not verifiable from this worktree alone; (3) the
+  flagged cross-repo staleness risk (below) — confirm awareness before relying on
+  continuous publishing as the only thing preventing stale-command servoing.
+
+## Flagged cross-repo risk (not introduced by this plan, but adjacent to Item 2 / Item 6)
+Found via `anvil-workcell/TODO_commanded_ee_stale_target.md`. The controller's
+consumption of `/commanded_ee_<arm>` — the exact topic our new delta-mode publish loop
+writes to — has **no staleness/timestamp check**:
+`quest_teleop_controller.py:196-206` caches the last commanded target and never resets it;
+`absolute_control_modality.py:218-219` uses it with only an existence check. If our
+publish loop stops (crash, stall, network hiccup), the arm keeps servoing to the last
+published target indefinitely rather than failing safe. This is a pre-existing
+`anvil-workcell` bug, out of this plan's six-item scope (cross-repo), but: (a) it means
+our new loop must not introduce additional stall modes without also considering this
+fail-open behavior, and (b) it's worth surfacing to whoever owns `anvil-workcell` as a
+real hardware-safety gap independent of this delta-flow work.

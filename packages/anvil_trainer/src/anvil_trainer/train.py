@@ -37,7 +37,7 @@ from anvil_trainer.patches import TransformRunner, patched_lerobot
 # Backward-compat re-exports: symbols that previously lived in this module.
 # Existing tests and user code may import them from `anvil_trainer.train`.
 from anvil_trainer.transforms import (  # noqa: E402, F401
-    EERelTransform,
+    EERelativeTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
     Transform,
@@ -155,8 +155,13 @@ Examples:
 
   # Train ACT on EE-space dataset (SE(3) relative)
   anvil-trainer --dataset.root=data/datasets/my-ee-dataset \\
-    --policy.type=act --job_name=grabbing-ee-rel \\
-    --action-type=ee_rel
+    --policy.type=act --job_name=grabbing-ee-relative \\
+    --action-type=ee_relative
+
+  # Train Diffusion on EE-space dataset (baked per-frame Delta, n-(n-1))
+  anvil-trainer --dataset.root=data/datasets/my-ee-delta-dataset \\
+    --policy.type=diffusion --job_name=grabbing-ee-delta \\
+    --action-type=ee_delta
 
   # Train SmolVLA with task description
   anvil-trainer --dataset.root=data/datasets/my-dataset \\
@@ -175,12 +180,20 @@ Anvil-specific flags (stripped before passing to LeRobot):
 
   --action-type=TYPE
       Action representation. One of:
-        joint_abs  — joint absolute positions (default)
-        ee_abs     — EE Cartesian rot6d, absolute (requires EE-space dataset).
-                     obs.state converted quat→rot6d (8n→10n) at load time;
-                     rot6d dims identity-normalized (±1) for Gram-Schmidt validity.
-        ee_rel     — EE Cartesian SE(3) relative, delta xyz + relative rotation
-                     (requires EE-space dataset)
+        joint_abs    — joint absolute positions (default)
+        ee_abs       — EE Cartesian rot6d, absolute (requires EE-space dataset).
+                       obs.state converted quat→rot6d (8n→10n) at load time;
+                       rot6d dims identity-normalized (±1) for Gram-Schmidt validity.
+        ee_relative  — EE Cartesian SE(3) relative to the chunk anchor, body-frame
+                       delta xyz + relative rotation (requires EE-space dataset).
+                       "ee_rel" is accepted as a permanent legacy alias (existing
+                       checkpoints persist this value and always will).
+        ee_delta     — EE Cartesian per-frame Delta(n-(n-1)), world-frame xyz +
+                       rotation, anchored to the immediately-preceding real state
+                       (not a fixed chunk anchor). Baked into the dataset's action
+                       column by mcap_converter (action_encoding="delta") at
+                       convert time — this transform does NOT recompute it live,
+                       only converts observation.state quat(8n)→rot6d(10n).
       Validated against the dataset's info.json at startup.
       Persisted to anvil_config.json in each checkpoint for inference.
 

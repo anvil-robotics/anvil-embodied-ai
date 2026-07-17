@@ -5,7 +5,8 @@ Training utilities for Anvil robotics workflows, supporting lerobot and other pl
 Provides pluggable transforms for dataset preprocessing:
 - Observation exclude: Drop cameras or non-image observations by suffix
 - Task override: Override dataset task for SmolVLA
-- EE relative: Convert EE absolute actions to SE(3) relative (action_type=ee_rel)
+- EE relative: Convert EE absolute actions to SE(3) relative (action_type=ee_relative;
+  "ee_rel" is a permanent legacy alias for existing checkpoints)
 
 Usage:
     from anvil_trainer import train, TrainingConfig, TransformRunner
@@ -18,7 +19,7 @@ from anvil_trainer.config import TrainingConfig
 from anvil_trainer.patches import TransformRunner
 from anvil_trainer.train import main, train
 from anvil_trainer.transforms import (
-    EERelTransform,
+    EERelativeTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
     Transform,
@@ -31,7 +32,7 @@ __all__ = [
     "Transform",
     "ExcludeObservationTransform",
     "TaskOverrideTransform",
-    "EERelTransform",
+    "EERelativeTransform",
     "TransformRunner",
     "train",
     "main",

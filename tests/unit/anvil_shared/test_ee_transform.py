@@ -2,14 +2,18 @@
 
 Covers:
   1. n_arms_from_dims — valid single/bimanual, invalid state dim, invalid action dim
-  2. ee_rel_forward / ee_rel_inverse round-trip (single arm, bimanual)
-  3. ee_rel_forward single reference state vs per-sample state agreement
+  2. ee_relative_forward / ee_relative_inverse round-trip (single arm, bimanual)
+  3. ee_relative_forward single reference state vs per-sample state agreement
   4. Identity: zero rotation → forward returns zero rotation delta
   5. ee_action_to_poses layout: pos, quat_xyzw shape, gripper value
   6. Vectorised forward matches per-sample single calls
-  7. ee_obs_rel_forward — body-frame translation, identity, gripper passthrough,
+  7. ee_obs_relative_forward — body-frame translation, identity, gripper passthrough,
      single vs per-sample anchor, bimanual, obs↔action frame consistency
   8. Inference queue prefill — queue entries are shape (1, 10n) not (10n,)
+  9. ee_delta_forward / ee_delta_inverse — WORLD-frame Delta(n-(n-1)): round-trip,
+     identity/self-anchor zero-delta, single vs per-sample state, robosuite
+     composition-order verification, and explicit divergence from the
+     BODY-frame ee_relative_forward/inverse pair for the same non-trivial input
 """
 from __future__ import annotations
 
@@ -22,10 +26,12 @@ from anvil_shared.ee_transform import (
     EE_ACTION_DIM_PER_ARM,
     EE_STATE_DIM_PER_ARM,
     ee_action_to_poses,
+    ee_delta_forward,
+    ee_delta_inverse,
     ee_obs_abs_forward,
-    ee_obs_rel_forward,
-    ee_rel_forward,
-    ee_rel_inverse,
+    ee_obs_relative_forward,
+    ee_relative_forward,
+    ee_relative_inverse,
     n_arms_from_dims,
 )
 from anvil_shared.rotation import matrix_to_quat, quat_to_matrix, rot6d_to_matrix
@@ -116,8 +122,8 @@ class TestRoundTrip:
         action_abs = _random_action(rng, n_arms)
         state = _random_state(rng, n_arms)
 
-        action_rel = ee_rel_forward(action_abs, state)
-        recovered = ee_rel_inverse(action_rel, state)
+        action_rel = ee_relative_forward(action_abs, state)
+        recovered = ee_relative_inverse(action_rel, state)
 
         np.testing.assert_allclose(
             recovered, action_abs, atol=1e-10,
@@ -138,8 +144,8 @@ class TestRoundTrip:
         state = _random_state(rng, n_arms)  # (8,) single ref
         actions_abs = np.stack([_random_action(rng, n_arms) for _ in range(T)])  # (T, 10)
 
-        actions_rel = ee_rel_forward(actions_abs, state)
-        recovered = ee_rel_inverse(actions_rel, state)
+        actions_rel = ee_relative_forward(actions_abs, state)
+        recovered = ee_relative_inverse(actions_rel, state)
 
         np.testing.assert_allclose(recovered, actions_abs, atol=1e-10)
 
@@ -151,11 +157,11 @@ class TestRoundTrip:
         # The gripper value in the action
         gripper_orig = float(action_abs[9])
 
-        action_rel = ee_rel_forward(action_abs, state)
+        action_rel = ee_relative_forward(action_abs, state)
         # Forward: gripper in rel is still absolute (copied unchanged)
         assert abs(float(action_rel[9]) - gripper_orig) < 1e-12
 
-        recovered = ee_rel_inverse(action_rel, state)
+        recovered = ee_relative_inverse(action_rel, state)
         assert abs(float(recovered[9]) - gripper_orig) < 1e-12
 
 
@@ -168,7 +174,7 @@ class TestIdentity:
         action = _identity_action()
         action[:3] = 0.0  # zero position
 
-        rel = ee_rel_forward(action, state)
+        rel = ee_relative_forward(action, state)
         # xyz delta should be zero
         np.testing.assert_allclose(rel[:3], 0.0, atol=1e-12)
         # rot6d delta should be identity rot6d (relative rotation = I)
@@ -187,11 +193,11 @@ class TestSingleVsPerSampleState:
         actions = np.stack([_random_action(rng) for _ in range(T)])  # (T,10)
 
         # Single ref broadcast
-        rel_single = ee_rel_forward(actions, state)
+        rel_single = ee_relative_forward(actions, state)
 
         # Per-sample: broadcast state to (T, 8)
         states_per_sample = np.tile(state, (T, 1))  # (T, 8)
-        rel_per_sample = ee_rel_forward(actions, states_per_sample)
+        rel_per_sample = ee_relative_forward(actions, states_per_sample)
 
         np.testing.assert_allclose(rel_single, rel_per_sample, atol=1e-12)
 
@@ -202,9 +208,9 @@ class TestSingleVsPerSampleState:
         state = _random_state(rng)
         rels = np.stack([_random_action(rng) for _ in range(T)])
 
-        abs_single = ee_rel_inverse(rels, state)
+        abs_single = ee_relative_inverse(rels, state)
         states_per_sample = np.tile(state, (T, 1))
-        abs_per_sample = ee_rel_inverse(rels, states_per_sample)
+        abs_per_sample = ee_relative_inverse(rels, states_per_sample)
 
         np.testing.assert_allclose(abs_single, abs_per_sample, atol=1e-12)
 
@@ -259,16 +265,16 @@ class TestEeActionToPoses:
         assert abs(abs(q[3]) - 1.0) < 1e-10, f"Expected |qw|=1, got {q}"
 
 
-# ── 7. ee_obs_rel_forward ──────────────────────────────────────────────────────
+# ── 7. ee_obs_relative_forward ──────────────────────────────────────────────────────
 
 class TestEEObsRelForward:
-    """Tests for ee_obs_rel_forward: abs obs (quat, 8n) → relative obs (rot6d, 10n)."""
+    """Tests for ee_obs_relative_forward: abs obs (quat, 8n) → relative obs (rot6d, 10n)."""
 
     # Identity property: obs relative to itself = [0,0,0, 1,0,0,0,1,0, gripper]
     def test_identity_single_arm(self):
         rng = np.random.default_rng(42)
         state = _random_state(rng, n_arms=1)
-        rel = ee_obs_rel_forward(state, state)  # obs = anchor
+        rel = ee_obs_relative_forward(state, state)  # obs = anchor
 
         expected_xyz = np.zeros(3)
         expected_rot6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
@@ -279,7 +285,7 @@ class TestEEObsRelForward:
     def test_identity_bimanual(self):
         rng = np.random.default_rng(43)
         state = _random_state(rng, n_arms=2)
-        rel = ee_obs_rel_forward(state, state)
+        rel = ee_obs_relative_forward(state, state)
 
         assert rel.shape == (2 * EE_ACTION_DIM_PER_ARM,)
         for arm in range(2):
@@ -295,7 +301,7 @@ class TestEEObsRelForward:
         rng = np.random.default_rng(5)
         obs = _random_state(rng)
         anchor = _random_state(rng)
-        rel = ee_obs_rel_forward(obs, anchor)
+        rel = ee_obs_relative_forward(obs, anchor)
         np.testing.assert_allclose(rel[9], obs[7], atol=1e-12, err_msg="gripper must pass through unchanged")
 
     # Output shape: single obs → (10n,); batched obs → (..., 10n)
@@ -303,7 +309,7 @@ class TestEEObsRelForward:
         rng = np.random.default_rng(6)
         obs = _random_state(rng)
         anchor = _random_state(rng)
-        rel = ee_obs_rel_forward(obs, anchor)
+        rel = ee_obs_relative_forward(obs, anchor)
         assert rel.shape == (EE_ACTION_DIM_PER_ARM,)
 
     def test_output_shape_batched(self):
@@ -311,7 +317,7 @@ class TestEEObsRelForward:
         T = 4
         obs_window = np.stack([_random_state(rng) for _ in range(T)])
         anchor = _random_state(rng)
-        rel = ee_obs_rel_forward(obs_window, anchor)
+        rel = ee_obs_relative_forward(obs_window, anchor)
         assert rel.shape == (T, EE_ACTION_DIM_PER_ARM)
 
     # Single anchor (broadcast) must equal per-sample anchor with same value tiled
@@ -321,8 +327,8 @@ class TestEEObsRelForward:
         obs = np.stack([_random_state(rng) for _ in range(T)])
         anchor = _random_state(rng)
 
-        rel_single = ee_obs_rel_forward(obs, anchor)  # anchor shape (8,) → broadcast
-        rel_per_sample = ee_obs_rel_forward(obs, np.tile(anchor, (T, 1)))  # anchor (T,8)
+        rel_single = ee_obs_relative_forward(obs, anchor)  # anchor shape (8,) → broadcast
+        rel_per_sample = ee_obs_relative_forward(obs, np.tile(anchor, (T, 1)))  # anchor (T,8)
 
         np.testing.assert_allclose(rel_single, rel_per_sample, atol=1e-12)
 
@@ -345,7 +351,7 @@ class TestEEObsRelForward:
         obs_state = anchor_state.copy()
         obs_state[1] = 1.0  # y offset in world
 
-        rel = ee_obs_rel_forward(obs_state, anchor_state)
+        rel = ee_obs_relative_forward(obs_state, anchor_state)
         body_delta = rel[:3]
 
         expected_body_delta = np.array([1.0, 0.0, 0.0])
@@ -367,8 +373,8 @@ class TestEEObsRelForward:
         r6d = matrices_to_rot6d(R[np.newaxis])[0]
         action_same_pose[3:9] = r6d
 
-        obs_rel = ee_obs_rel_forward(anchor_state, anchor_state)  # should be identity
-        act_rel = ee_rel_forward(action_same_pose, anchor_state)  # should also be identity
+        obs_rel = ee_obs_relative_forward(anchor_state, anchor_state)  # should be identity
+        act_rel = ee_relative_forward(action_same_pose, anchor_state)  # should also be identity
 
         # [xyz, rot6d] should match (max err ~1e-14 from floating point)
         np.testing.assert_allclose(obs_rel[:9], act_rel[:9], atol=1e-12,
@@ -403,7 +409,7 @@ class TestPrefillQueueShape:
         def fake_preprocessor(d):
             return d
 
-        # Run the same logic as _prefill_ee_rel_queue (C1 fix applied)
+        # Run the same logic as _prefill_ee_relative_queue (C1 fix applied)
         for i in range(len(obs_window_rel_np) - 1):
             obs_t = torch.tensor(obs_window_rel_np[i], dtype=torch.float32).unsqueeze(0)  # (1,10n)
             norm = fake_preprocessor({"observation.state": obs_t})
@@ -531,3 +537,200 @@ class TestEEObsAbsForward:
             a0 = arm * EE_ACTION_DIM_PER_ARM
             np.testing.assert_array_equal(out[a0:a0 + 3], state[s0:s0 + 3])  # xyz
             np.testing.assert_allclose(out[a0 + 9], state[s0 + 7], atol=1e-12)  # gripper
+
+
+# =============================================================================
+# 9. ee_delta_forward / ee_delta_inverse — WORLD-frame Delta(n-(n-1))
+# =============================================================================
+
+
+class TestEeDeltaRoundTrip:
+    """Forward → inverse round-trip, mirroring TestRoundTrip for the relative pair."""
+
+    def _check_round_trip(self, n_arms: int, seed: int = 42) -> None:
+        rng = np.random.default_rng(seed)
+        action_abs = _random_action(rng, n_arms)
+        state = _random_state(rng, n_arms)
+
+        delta = ee_delta_forward(action_abs, state)
+        recovered = ee_delta_inverse(delta, state)
+
+        np.testing.assert_allclose(
+            recovered, action_abs, atol=1e-10,
+            err_msg=f"ee_delta round-trip failed for n_arms={n_arms}"
+        )
+
+    def test_single_arm(self):
+        self._check_round_trip(n_arms=1)
+
+    def test_bimanual(self):
+        self._check_round_trip(n_arms=2)
+
+    def test_batched_chunk(self):
+        """Batch of T=8 steps with a single reference state (broadcasts natively)."""
+        rng = np.random.default_rng(99)
+        T = 8
+        n_arms = 1
+        state = _random_state(rng, n_arms)  # (8,) single ref
+        actions_abs = np.stack([_random_action(rng, n_arms) for _ in range(T)])  # (T, 10)
+
+        deltas = ee_delta_forward(actions_abs, state)
+        recovered = ee_delta_inverse(deltas, state)
+
+        np.testing.assert_allclose(recovered, actions_abs, atol=1e-10)
+
+    def test_per_frame_anchor_sequence(self):
+        """The actual Delta(n-(n-1)) usage: state[t] anchored to state[t-1], per-sample."""
+        rng = np.random.default_rng(101)
+        T = 6
+        n_arms = 1
+        states = np.stack([_random_state(rng, n_arms) for _ in range(T)])       # (T, 8)
+        actions = np.stack([_random_action(rng, n_arms) for _ in range(T)])     # (T, 10)
+
+        # anchor[t] = states[t-1] for t=1..T-1 (per-frame anchor, not chunk-start)
+        anchors = states[:-1]       # (T-1, 8)
+        targets = actions[1:]       # (T-1, 10)
+
+        deltas = ee_delta_forward(targets, anchors)
+        recovered = ee_delta_inverse(deltas, anchors)
+        np.testing.assert_allclose(recovered, targets, atol=1e-10)
+
+    def test_gripper_preserved(self):
+        rng = np.random.default_rng(7)
+        action_abs = _random_action(rng)
+        state = _random_state(rng)
+        gripper_orig = float(action_abs[9])
+
+        delta = ee_delta_forward(action_abs, state)
+        assert abs(float(delta[9]) - gripper_orig) < 1e-12
+
+        recovered = ee_delta_inverse(delta, state)
+        assert abs(float(recovered[9]) - gripper_orig) < 1e-12
+
+
+class TestEeDeltaIdentity:
+    def test_identity_state_identity_action_zero_delta(self):
+        """Self-anchor first-frame convention: state==action → zero xyz delta,
+        identity rot6d — same assertion as the body-frame TestIdentity, confirming
+        the identity/self-anchor convention is frame-convention-agnostic."""
+        state = _identity_state()
+        action = _identity_action()
+        action[:3] = 0.0  # zero position
+
+        delta = ee_delta_forward(action, state)
+        np.testing.assert_allclose(delta[:3], 0.0, atol=1e-12)
+        expected_rot6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        np.testing.assert_allclose(delta[3:9], expected_rot6d, atol=1e-12)
+
+    def test_self_anchor_nonidentity_pose_zero_delta(self):
+        """Self-anchor with a NON-identity pose (action == state's own pose) must
+        still yield zero delta — this is the actual mcap_converter first-frame
+        convention: action[0] = ee_delta_forward(action[0], state[0])."""
+        rng = np.random.default_rng(202)
+        state = _random_state(rng, n_arms=1)
+        # Build an action at exactly the same pose as `state` (same xyz + rotation).
+        action_same_pose = np.zeros(EE_ACTION_DIM_PER_ARM)
+        action_same_pose[:3] = state[:3]
+        R = quat_to_matrix(state[3:7])
+        from anvil_shared.rotation import matrices_to_rot6d
+        action_same_pose[3:9] = matrices_to_rot6d(R[np.newaxis])[0]
+        action_same_pose[9] = state[7]
+
+        delta = ee_delta_forward(action_same_pose, state)
+        np.testing.assert_allclose(delta[:3], 0.0, atol=1e-10)
+        np.testing.assert_allclose(delta[3:9], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0], atol=1e-10)
+
+
+class TestEeDeltaSingleVsPerSampleState:
+    def test_forward_agrees(self):
+        rng = np.random.default_rng(11)
+        T = 5
+        state = _random_state(rng)
+        actions = np.stack([_random_action(rng) for _ in range(T)])
+
+        delta_single = ee_delta_forward(actions, state)
+        states_per_sample = np.tile(state, (T, 1))
+        delta_per_sample = ee_delta_forward(actions, states_per_sample)
+
+        np.testing.assert_allclose(delta_single, delta_per_sample, atol=1e-12)
+
+    def test_inverse_agrees(self):
+        rng = np.random.default_rng(13)
+        T = 5
+        state = _random_state(rng)
+        deltas = np.stack([_random_action(rng) for _ in range(T)])
+
+        abs_single = ee_delta_inverse(deltas, state)
+        states_per_sample = np.tile(state, (T, 1))
+        abs_per_sample = ee_delta_inverse(deltas, states_per_sample)
+
+        np.testing.assert_allclose(abs_single, abs_per_sample, atol=1e-12)
+
+
+class TestEeDeltaWorldFrameComposition:
+    """Verify the WORLD-frame (extrinsic) composition order against a known
+    rotation — the frame-convention analogue of TestEEObsRelForward's
+    test_body_frame_translation, and the direct regression guard against
+    accidentally reusing the BODY-frame ee_relative math."""
+
+    def test_translation_is_plain_world_difference(self):
+        """Unlike ee_relative_forward's body-frame translation
+        (world_delta @ R_state), ee_delta_forward's translation must be the
+        RAW world-frame difference, unaffected by rotation."""
+        import math
+
+        theta = math.pi / 2
+        c, s = math.cos(theta / 2), math.sin(theta / 2)
+        state = np.zeros(EE_STATE_DIM_PER_ARM)
+        state[3:7] = [0.0, 0.0, s, c]  # 90 deg about z
+        state[:3] = [0.1, 0.2, 0.3]
+
+        action = _identity_action(n_arms=1)
+        action[:3] = [0.4, 0.6, 0.3]  # world-frame absolute target position
+
+        delta = ee_delta_forward(action, state)
+        # World-frame: delta_xyz = action_xyz - state_xyz, NOT rotated by R_state.
+        expected_world_delta = np.array([0.3, 0.4, 0.0])
+        np.testing.assert_allclose(delta[:3], expected_world_delta, atol=1e-12)
+
+    def test_rotation_composition_matches_robosuite_order(self):
+        """R_delta = R_action @ R_state.T (extrinsic/left-multiply), verified
+        against a known 90deg-about-z case, matching robosuite 1.4.0's own
+        `goal_orientation = delta_rotation @ current_orientation` composition."""
+        import math
+        from anvil_shared.rotation import matrices_to_rot6d, quats_to_matrices
+
+        # state: identity rotation. action: 90 deg about z.
+        state = _identity_state(n_arms=1)
+        theta = math.pi / 2
+        c, s = math.cos(theta / 2), math.sin(theta / 2)
+        action_quat_equiv = np.array([0.0, 0.0, s, c])  # 90 deg about z, as a quaternion
+        R_action = quats_to_matrices(action_quat_equiv)  # (3, 3), single quat
+        action = _identity_action(n_arms=1)
+        action[3:9] = matrices_to_rot6d(R_action)
+
+        delta = ee_delta_forward(action, state)
+        # state is identity, so R_delta = R_action @ I.T = R_action exactly.
+        np.testing.assert_allclose(delta[3:9], action[3:9], atol=1e-10)
+
+    def test_diverges_from_body_frame_relative_for_nontrivial_input(self):
+        """Direct regression guard: for a non-trivial (non-identity) state,
+        ee_delta_forward's world-frame result must NOT equal
+        ee_relative_forward's body-frame result — if a future edit accidentally
+        makes ee_delta_forward call the body-frame formula, this must fail."""
+        rng = np.random.default_rng(303)
+        action = _random_action(rng, n_arms=1)
+        state = _random_state(rng, n_arms=1)
+
+        delta_world = ee_delta_forward(action, state)
+        delta_body = ee_relative_forward(action, state)
+
+        # They must differ (state's rotation is random, essentially never identity).
+        assert not np.allclose(delta_world[:3], delta_body[:3], atol=1e-9), (
+            "ee_delta_forward's translation matches ee_relative_forward's body-frame "
+            "translation — this indicates the world-frame formula was NOT actually used."
+        )
+        assert not np.allclose(delta_world[3:9], delta_body[3:9], atol=1e-9), (
+            "ee_delta_forward's rotation matches ee_relative_forward's body-frame "
+            "rotation — this indicates the world-frame formula was NOT actually used."
+        )

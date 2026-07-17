@@ -354,10 +354,13 @@ def generate_inference_config(
       1. conversion_config.yaml (most accurate — matches training data exactly)
       2. action_dim / dims_per_arm count (fallback, assumes left-first order)
 
-    For EE action types (ee_abs, ee_rel), dims_per_arm=10 and command topics use
+    For EE action types (ee_abs, ee_relative), dims_per_arm=10 and command topics use
     /commanded_ee_{arm} instead of the joint forward_position_controller topics.
     """
-    is_ee = action_type in ("ee_abs", "ee_rel")
+    # "ee_rel" is a permanent legacy alias for "ee_relative" — action_type
+    # here comes straight from anvil_config.json without normalization, so
+    # accept both.
+    is_ee = action_type in ("ee_abs", "ee_relative", "ee_rel")
 
     try:
         import yaml  # PyYAML — available wherever ROS2 tools are installed
@@ -597,7 +600,7 @@ def main() -> None:
     else:
         log.warning(
             "[anvil-eval-ros] anvil_config.json not found at %s — assuming action_type=joint_abs. "
-            "If this is an EE model, pass --action-type ee_abs or ee_rel explicitly.",
+            "If this is an EE model, pass --action-type ee_abs or ee_relative explicitly.",
             anvil_cfg_path,
         )
 

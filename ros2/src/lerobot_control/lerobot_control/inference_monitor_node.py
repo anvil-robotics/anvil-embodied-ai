@@ -6,9 +6,10 @@ Subscribes to topics published by inference_node (requires
 a CSV that can be plotted offline with scripts/plot_monitor_csv.py.
 
 Works for all action_type modes:
-  joint_abs — obs_state = current joint positions; cmd = joint commands (radians)
-  ee_abs    — obs_state = current EE pose (rot6d, 10 dims/arm); cmd = EE commands
-  ee_rel    — same as ee_abs; obs and cmd both in absolute rot6d space
+  joint_abs    — obs_state = current joint positions; cmd = joint commands (radians)
+  ee_abs       — obs_state = current EE pose (rot6d, 10 dims/arm); cmd = EE commands
+  ee_relative  — same as ee_abs; obs and cmd both in absolute rot6d space
+                 ("ee_rel" legacy alias also accepted)
 
 Usage:
     ros2 run lerobot_control inference_monitor_node \\
@@ -33,7 +34,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 
-from .ee_runtime import read_checkpoint_anvil_config
+from .ee_runtime import read_checkpoint_anvil_config, resolve_action_type
 
 
 class InferenceMonitorNode(Node):
@@ -61,10 +62,15 @@ class InferenceMonitorNode(Node):
         _model_path = self.get_parameter("model_path").value
         _anvil_cfg = read_checkpoint_anvil_config(_model_path) if _model_path else {}
         if "action_type" in _anvil_cfg:
-            self._action_type: str = _anvil_cfg["action_type"]
+            # resolve_action_type() normalizes the legacy "ee_rel" alias to
+            # "ee_relative" so downstream plotting/metrics only ever see the
+            # canonical value.
+            self._action_type: str = resolve_action_type(_anvil_cfg)
             self._action_type_source = f"model_path checkpoint ({_model_path})"
         else:
-            self._action_type = self.get_parameter("action_type").value
+            self._action_type = resolve_action_type(
+                {"action_type": self.get_parameter("action_type").value}
+            )
             self._action_type_source = "action_type ROS param"
 
         # ROS param takes priority; fall back to JOINT_NAMES env var.

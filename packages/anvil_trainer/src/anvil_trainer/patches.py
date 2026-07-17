@@ -6,7 +6,7 @@
         - ``apply_dataset_patches`` — patches ``LeRobotDataset.__getitem__``.
         - ``apply_val_loss_patch`` — patches ``make_dataset`` (split creation),
           captures the preprocessor from ``make_pre_post_processors``, and
-          injects EE rel action stats into the returned ``train_dataset``.
+          injects EE relative action stats into the returned ``train_dataset``.
         - ``apply_checkpoint_patch`` — patches ``save_checkpoint`` to compute
           test loss (raw + EMA) and write EMA weights / ``anvil_config.json`` /
           ``split_info.json`` / ``model_raw.safetensors`` next to each checkpoint.
@@ -40,7 +40,8 @@ from anvil_trainer.config import TrainingConfig
 from anvil_trainer.transforms import (
     DataIntegrityError,
     EEAbsTransform,
-    EERelTransform,
+    EEDeltaTransform,
+    EERelativeTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
     Transform,
@@ -146,7 +147,8 @@ class TransformRunner:
             ExcludeObservationTransform(),
             TaskOverrideTransform(),
             EEAbsTransform(),
-            EERelTransform(),
+            EERelativeTransform(),
+            EEDeltaTransform(),
         ]
         self.active_transforms = [t for t in transforms if t.is_enabled(config)]
         self._val_dataloader = None   # set by apply_val_loss_patch when make_dataset is called
@@ -280,12 +282,14 @@ class TransformRunner:
             return "enabled"
         elif isinstance(transform, TaskOverrideTransform):
             return f"'{self.config.task_override}'"
-        elif isinstance(transform, EERelTransform):
+        elif isinstance(transform, EERelativeTransform):
             return "SE(3) relative: delta_xyz + R_state.T @ R_action"
+        elif isinstance(transform, EEDeltaTransform):
+            return "Delta(n-(n-1)): world-frame, baked on disk by mcap_converter — action untouched here"
         return "enabled"
 
-    def _compute_ee_rel_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
-        """Compute EE relative action AND obs stats for ``ee_rel`` training.
+    def _compute_ee_relative_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
+        """Compute EE relative action AND obs stats for ``ee_relative`` training.
 
         Both observation.state and action are transformed to SE(3)-relative with the
         SAME anchor (current EE pose), matching UMI.  Stats are computed from the
@@ -303,14 +307,14 @@ class TransformRunner:
         Returns a dict ``{"action": stats, "observation.state": obs_stats}``,
         or ``None`` on failure.
         """
-        if not self.config.is_ee_rel:
+        if not self.config.is_ee_relative:
             return None
 
         import numpy as np
         try:
             from anvil_shared.ee_transform import (
-                ee_obs_rel_forward,
-                ee_rel_forward,
+                ee_obs_relative_forward,
+                ee_relative_forward,
                 n_arms_from_dims,
                 EE_ACTION_DIM_PER_ARM,
             )
@@ -329,7 +333,7 @@ class TransformRunner:
             # Action stats (relative to current state, per-sample anchor)        #
             # ------------------------------------------------------------------ #
             # Use action_delta_indices directly so the distribution exactly matches
-            # what EERelTransform.apply produces at __getitem__ time.
+            # what EERelativeTransform.apply produces at __getitem__ time.
             # lerobot default: action_delta_indices = range(1-n_obs_steps, 1-n_obs_steps+horizon)
             #   e.g. [-1, 0, …, 14] for n_obs_steps=2, horizon=16.
             # Using range(n_steps) instead would shift origin by +1 (omit t-1, include t+15),
@@ -339,7 +343,7 @@ class TransformRunner:
                 action_delta_indices = [0]
             N = len(actions_np)
 
-            def _ee_rel_action_for_delta(d: int) -> np.ndarray:
+            def _ee_relative_action_for_offset(d: int) -> np.ndarray:
                 """Return SE(3) relative array for action offset d (may be negative), episode-bounded."""
                 if d == 0:
                     act, sta, mask = actions_np, states_np, np.ones(N, dtype=bool)
@@ -352,10 +356,10 @@ class TransformRunner:
                     act = actions_np[:-k]
                     sta = states_np[k:]
                     mask = episode_idx_np[:-k] == episode_idx_np[k:]
-                return ee_rel_forward(act, sta)[mask]
+                return ee_relative_forward(act, sta)[mask]
 
             all_deltas = np.concatenate(
-                [_ee_rel_action_for_delta(d) for d in action_delta_indices], axis=0
+                [_ee_relative_action_for_offset(d) for d in action_delta_indices], axis=0
             )  # (N_valid_pairs, 10*n_arms)
 
             orig_action = full_dataset.meta.stats.get("action", {})
@@ -402,7 +406,7 @@ class TransformRunner:
 
             obs_rel_samples = []
             # Identity steps — all N frames (obs relative to itself)
-            identity = ee_obs_rel_forward(states_np, states_np)  # zeros+[1,0,0,0,1,0]+grip
+            identity = ee_obs_relative_forward(states_np, states_np)  # zeros+[1,0,0,0,1,0]+grip
             obs_rel_samples.append(identity)
 
             # Prior steps — obs[t-j] relative to obs[t], episode-bounded
@@ -410,7 +414,7 @@ class TransformRunner:
                 past = states_np[:-j]
                 anchor = states_np[j:]
                 mask = episode_idx_np[:-j] == episode_idx_np[j:]
-                rel = ee_obs_rel_forward(past, anchor)
+                rel = ee_obs_relative_forward(past, anchor)
                 obs_rel_samples.append(rel[mask])
 
             all_obs_rel = np.concatenate(obs_rel_samples, axis=0)  # (N_total, 10*n_arms)
@@ -433,7 +437,7 @@ class TransformRunner:
             full_dataset.meta.stats["observation.state"] = obs_patched_stats
 
             log.info(
-                "[ee_rel_stats] action: %d samples (n_delta_steps=%d); obs: %d samples "
+                "[ee_relative_stats] action: %d samples (n_offset_steps=%d); obs: %d samples "
                 "(n_obs_steps=%d); %d arm(s)",
                 len(all_deltas), len(action_delta_indices), len(all_obs_rel), n_obs_steps, n_arms,
             )
@@ -441,7 +445,117 @@ class TransformRunner:
         except DataIntegrityError:
             raise
         except Exception as e:
-            log.warning("[ee_rel_stats] Failed: %s — falling back to absolute stats", e)
+            log.warning("[ee_relative_stats] Failed: %s — falling back to absolute stats", e)
+            return None
+
+    def _compute_ee_delta_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
+        """Compute EE stats for ``ee_delta`` (baked per-frame Delta(n-(n-1))) training.
+
+        Unlike ``_compute_ee_relative_stats`` (the n-0 mechanism), this does
+        NOT replay any live transform or mask by episode boundary — the
+        ``action`` column is ALREADY a static, baked per-frame delta written
+        by mcap_converter (``action_encoding="delta"``); stats are read
+        straight off it, exactly like any ordinary feature column would be.
+        rot6d dims (index 3-8 per arm) are still forced to min=-1/max=1
+        (identity trick) — that clamp is NOT generic dataset-stats behavior,
+        it exists specifically to keep Gram-Schmidt reconstruction
+        geometrically valid under MIN_MAX normalization, and a plain stats
+        read would otherwise skip it.
+
+        Obs stats: observation.state stays absolute for ``ee_delta`` (matches
+        `native`'s asymmetric convention — see Item 1's design), so this is
+        computed identically to ``_compute_ee_abs_stats``'s obs treatment:
+        convert quat(8n)→rot6d(10n) via ``ee_obs_abs_forward``, then clamp.
+
+        Returns a dict ``{"action": stats, "observation.state": obs_stats}``,
+        or ``None`` on failure (falls back to raw dataset stats — see the
+        log line below, which distinguishes this from a real computation).
+        """
+        if not self.config.is_ee_delta:
+            return None
+
+        import numpy as np
+        try:
+            from anvil_shared.ee_transform import (
+                ee_obs_abs_forward,
+                n_arms_from_dims,
+            )
+
+            hf = full_dataset.hf_dataset
+            actions_np = np.array(hf["action"], dtype=np.float64)             # (N, 10*n_arms) — already baked delta
+            states_np = np.array(hf["observation.state"], dtype=np.float64)   # (N, 8*n_arms) — absolute
+
+            if states_np.ndim == 3:
+                states_np = states_np[:, -1, :]  # multi-step obs -> most recent step
+
+            n_arms = n_arms_from_dims(states_np.shape[-1], actions_np.shape[-1])
+
+            # ------------------------------------------------------------------ #
+            # Action stats: read straight off the static baked delta column — no #
+            # live replay/episode-masking needed (unlike _compute_ee_relative_stats): #
+            # the column is already single-step, per-frame delta on disk.       #
+            # ------------------------------------------------------------------ #
+            act_mean = actions_np.mean(axis=0)
+            act_std = np.where(actions_np.std(axis=0) < 1e-6, 1e-6, actions_np.std(axis=0))
+            act_min = actions_np.min(axis=0)
+            act_max = actions_np.max(axis=0)
+
+            _force_rot6d_identity(act_min, act_max, n_arms)
+
+            action_patched_stats = {
+                "mean": act_mean.tolist(),
+                "std": act_std.tolist(),
+                "min": act_min.tolist(),
+                "max": act_max.tolist(),
+                "count": len(actions_np),
+            }
+            full_dataset.meta.stats["action"] = action_patched_stats
+
+            # ------------------------------------------------------------------ #
+            # Obs stats: observation.state stays absolute for ee_delta — same    #
+            # treatment as _compute_ee_abs_stats.                                #
+            # ------------------------------------------------------------------ #
+            all_obs_abs = ee_obs_abs_forward(states_np)  # (N, 10*n_arms)
+
+            obs_mean = all_obs_abs.mean(axis=0)
+            obs_std = np.where(all_obs_abs.std(axis=0) < 1e-6, 1e-6, all_obs_abs.std(axis=0))
+            obs_min = all_obs_abs.min(axis=0)
+            obs_max = all_obs_abs.max(axis=0)
+
+            _force_rot6d_identity(obs_min, obs_max, n_arms)
+
+            obs_patched_stats = {
+                "mean": obs_mean.tolist(),
+                "std": obs_std.tolist(),
+                "min": obs_min.tolist(),
+                "max": obs_max.tolist(),
+                "count": len(all_obs_abs),
+            }
+            full_dataset.meta.stats["observation.state"] = obs_patched_stats
+
+            # Deliberately explicit "COMPLETED and INJECTED" wording (distinct from
+            # the "FAILED ... falling back" wording below) — during a real training
+            # run this is the concrete, greppable proof that this stats path
+            # actually ran and was NOT silently swallowed by the except-fallback,
+            # per the smoke-test verification requirement in
+            # claude_docs/ee-delta-flow-plan.md.
+            log.info(
+                "[ee_delta_stats] COMPLETED and INJECTED (not the dataset-stats fallback) — "
+                "%d frames, %d arm(s); action mean=%s std=%s min=%s max=%s (rot6d dims ±1-clamped)",
+                len(actions_np), n_arms,
+                np.round(act_mean, 5).tolist(), np.round(act_std, 5).tolist(),
+                np.round(act_min, 5).tolist(), np.round(act_max, 5).tolist(),
+            )
+            return {"action": action_patched_stats, "observation.state": obs_patched_stats}
+        except DataIntegrityError:
+            raise
+        except Exception as e:
+            log.warning(
+                "[ee_delta_stats] FAILED: %s — falling back to raw dataset stats "
+                "(this stats path did NOT complete; the fallback is now in effect, "
+                "not the real per-frame delta computation)",
+                e,
+            )
             return None
 
     def _compute_ee_abs_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
@@ -617,13 +731,17 @@ class TransformRunner:
             total_ep = full_dataset.num_episodes
 
             # Compute stats patches for EE action types.
-            # ee_rel: SE(3)-relative stats with rot6d identity trick.
+            # ee_relative: SE(3)-relative stats with rot6d identity trick.
             # ee_abs: absolute rot6d obs stats + rot6d identity trick on action.
+            # ee_delta: baked per-frame delta — stats read off the static column
+            #           (no live replay) + rot6d identity trick.
             # joint_abs: use dataset stats as-is (no patching needed).
-            if val_state.config.is_ee_rel:
-                _patched_ee_stats = val_state._compute_ee_rel_stats(full_dataset, cfg)
+            if val_state.config.is_ee_relative:
+                _patched_ee_stats = val_state._compute_ee_relative_stats(full_dataset, cfg)
             elif val_state.config.is_ee_abs:
                 _patched_ee_stats = val_state._compute_ee_abs_stats(full_dataset, cfg)
+            elif val_state.config.is_ee_delta:
+                _patched_ee_stats = val_state._compute_ee_delta_stats(full_dataset, cfg)
             else:
                 _patched_ee_stats = None
 
@@ -703,11 +821,11 @@ class TransformRunner:
             # frame indices; val/test dataloaders use relative indices and must NOT
             # be remapped.
             train_dataset._anvil_uses_abs_sampler = True
-            # Inject EE rel stats so lerobot's normalizer uses relative distributions.
+            # Inject EE relative stats so lerobot's normalizer uses relative distributions.
             if _patched_ee_stats is not None:
                 train_dataset.meta.stats["action"] = _patched_ee_stats["action"]
                 train_dataset.meta.stats["observation.state"] = _patched_ee_stats["observation.state"]
-                log.info("[ee_rel_stats] Patched train_dataset.meta.stats [action + observation.state]")
+                log.info("[ee_relative_stats] Patched train_dataset.meta.stats [action + observation.state]")
             log.info("[split] train=%d ep (randomly selected)", len(train_ep))
             return train_dataset
 
@@ -741,7 +859,7 @@ class TransformRunner:
         anvil_cfg_base: dict = {
             "action_type": self.config.action_type,
             "is_ee": self.config.is_ee,
-            "is_ee_rel": self.config.is_ee_rel,
+            "is_ee_relative": self.config.is_ee_relative,
             **git_provenance(),
         }
         if self.config.task_override:

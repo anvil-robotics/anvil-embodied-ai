@@ -741,6 +741,13 @@ class BufferedStreamExtractor:
         cursor = 0  # Index of frame to process next
         frames_yielded = 0
         next_yield_ts = None  # Next target timestamp for subsampling
+        # EE delta-encoding only: the immediately-preceding frame's absolute, ALWAYS
+        # quaternion-encoded state (never observation.state as actually written to disk,
+        # which may be rot6d/axis_angle — see _align_ee_signals), carried forward as the
+        # anchor for the NEXT frame's baked delta. None on the first frame of the episode
+        # (self-anchor — see _align_ee_signals). Reset per extract_frames call, i.e. per
+        # episode.
+        prev_ee_state_quat: Optional[np.ndarray] = None
 
         for message in reader.read_messages(topics=all_topics):
             topic = message.channel.topic
@@ -791,14 +798,17 @@ class BufferedStreamExtractor:
 
                 # Subsampling: only yield if this frame is at or past the next target timestamp
                 if frame_ts >= next_yield_ts:
-                    frame = self._align_frame_at_cursor(
+                    frame, state_quat = self._align_frame_at_cursor(
                         camera_buffers, joint_buffers, ee_buffers,
                         cursor, main_cam, task, resize_image,
+                        prev_ee_state_quat=prev_ee_state_quat,
                     )
                     if frame is not None:
                         yield frame
                         frames_yielded += 1
                         next_yield_ts += self.frame_interval
+                        if self.config.is_ee:
+                            prev_ee_state_quat = state_quat
 
                 cursor += 1
 
@@ -830,13 +840,16 @@ class BufferedStreamExtractor:
         while cursor < len(camera_buffers[main_cam]):
             frame_ts = camera_buffers[main_cam][cursor][0]
             if next_yield_ts is None or frame_ts >= next_yield_ts:
-                frame = self._align_frame_at_cursor(
+                frame, state_quat = self._align_frame_at_cursor(
                     camera_buffers, joint_buffers, ee_buffers,
                     cursor, main_cam, task, resize_image,
+                    prev_ee_state_quat=prev_ee_state_quat,
                 )
                 if frame is not None:
                     yield frame
                     frames_yielded += 1
+                    if self.config.is_ee:
+                        prev_ee_state_quat = state_quat
                     if next_yield_ts is not None:
                         next_yield_ts += self.frame_interval
                     if self.progress_callback:
@@ -892,7 +905,8 @@ class BufferedStreamExtractor:
         main_cam: str,
         task: str,
         resize_func,
-    ) -> Optional[Dict[str, Any]]:
+        prev_ee_state_quat: Optional[Any] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[np.ndarray]]:
         """
         Align frame at cursor position using entire buffer for matching.
 
@@ -904,9 +918,17 @@ class BufferedStreamExtractor:
             main_cam: Name of main camera
             task: Task name
             resize_func: Function to resize images
+            prev_ee_state_quat: EE delta-encoding only — the immediately-preceding
+                frame's absolute, quaternion-encoded state, forwarded to
+                ``_align_ee_signals`` as the delta anchor. ``None`` on an
+                episode's first frame (self-anchor). Unused outside EE mode.
 
         Returns:
-            Aligned frame dictionary, or None if not all data available
+            ``(frame, state_quat)`` — ``frame`` is the aligned frame dictionary, or
+            ``None`` if not all data available. ``state_quat`` is the quaternion-encoded
+            EE state for this frame (EE mode only, else ``None``) — not part of the frame
+            dict itself, since it's not a dataset feature; callers thread it back in as
+            the next call's ``prev_ee_state_quat``.
         """
         # Get main camera frame at cursor
         main_ts, main_img = camera_buffers[main_cam][cursor]
@@ -922,7 +944,7 @@ class BufferedStreamExtractor:
 
             # If any camera has no data, skip this frame
             if len(buffer) == 0:
-                return None
+                return None, None
 
             # Search entire buffer for nearest timestamp match
             nearest_idx = self._find_nearest_in_buffer(buffer, main_ts)
@@ -931,11 +953,17 @@ class BufferedStreamExtractor:
                 resized_img = resize_func(img, self.target_size)
                 frame[f"observation.images.{cam_name}"] = resized_img
             else:
-                return None
+                return None, None
 
         # Align non-camera signals — mode-specific
+        state_quat: Optional[np.ndarray] = None
         if self.config.is_ee:
-            signals = self._align_ee_signals(ee_buffers, main_ts)
+            result = self._align_ee_signals(
+                ee_buffers, main_ts, prev_state_quat=prev_ee_state_quat
+            )
+            if result is None:
+                return None, None
+            signals, state_quat = result
         elif joint_buffers:
             signals = self._align_joint_states(
                 joint_buffers, main_ts, act_from_obs=self.act_from_obs
@@ -944,11 +972,11 @@ class BufferedStreamExtractor:
             signals = None
 
         if signals is None:
-            return None
+            return None, None
         frame.update(signals)
 
         frame["task"] = task
-        return frame
+        return frame, state_quat
 
     def _align_joint_states(
         self,
@@ -1342,21 +1370,53 @@ class BufferedStreamExtractor:
         self,
         ee_buffers: Dict[str, deque],
         target_ts: float,
-    ) -> Optional[Dict[str, Any]]:
+        prev_state_quat: Optional[np.ndarray] = None,
+    ) -> Optional[Tuple[Dict[str, Any], np.ndarray]]:
         """Align per-arm EE pose buffers to the camera frame at ``target_ts``.
 
         Builds the unified canonical features by concatenating per-arm slices in
         the insertion order of ``config.observation_topics``::
 
-            observation.state  = concat([xyz, quat_xyzw, gripper] per arm)   (8 * n_arms,)
+            observation.state  = concat([xyz, <rotation encoding>, gripper] per arm)
             action             = concat([xyz, rot6d, gripper]   per arm)     (10 * n_arms,)
+
+        ``observation.state``'s rotation component is written in
+        ``config.observation_encoding`` (quaternion/rot6d/axis_angle — see
+        ``config/encodings.py`` for the per-encoding layout table). ``action`` is always
+        rot6d regardless — an independent knob from ``observation_encoding``.
+
+        ``action`` is the absolute EE pose (re-encoded to rot6d) by default
+        (``config.action_encoding == "absolute"``). When ``config.is_action_delta``,
+        ``action`` instead becomes a baked per-frame Delta(n-(n-1)) target:
+        ``ee_delta_forward(action_abs, anchor)``, where ``anchor`` is
+        ``prev_state_quat`` — the immediately-preceding frame's absolute,
+        QUATERNION-encoded state (never the ``observation_encoding``-selected value
+        actually written to disk: ``ee_delta_forward``/``n_arms_from_dims`` hardcode an
+        8-dim-per-arm quaternion state layout, so the delta anchor must stay quaternion
+        regardless of what ``observation.state`` is encoded as on disk) — or, on an
+        episode's first frame (``prev_state_quat is None``), the CURRENT frame's own
+        quaternion state (self-anchor, yielding a zero delta; matches the identity-delta
+        invariant asserted by ``test_identity_state_identity_action_zero_delta`` and its
+        ``ee_delta_forward`` analogue — no LIBERO precedent exists for this boundary
+        case, since LIBERO's ``native`` never differences two states).
+
+        Returns ``(frame, state_quat)`` where ``state_quat`` is ALWAYS quaternion-encoded
+        (regardless of ``observation_encoding``) — it is NOT part of the dataset schema;
+        callers thread it back in as the next call's ``prev_state_quat`` rather than
+        smuggling it into ``frame`` and stripping it out later, so nothing downstream can
+        accidentally treat it as a real feature.
 
         Returns ``None`` if any arm has no buffered pose yet.
         """
-        # Lazy import keeps the converter independent of training packages.
+        # Lazy imports keep the converter independent of training packages except when
+        # EE mode (and, for non-quaternion observation_encoding or delta action_encoding,
+        # anvil_shared's transform/rotation modules) is actually used.
         from anvil_shared.rotation import matrix_to_rot6d, quat_to_matrix
 
-        state_slices: List[np.ndarray] = []
+        from ..config.encodings import encode_rotation
+
+        state_quat_slices: List[np.ndarray] = []
+        state_encoded_slices: List[np.ndarray] = []
         action_slices: List[np.ndarray] = []
         for arm_id in self.config.observation_topics:  # insertion order
             buffer = ee_buffers.get(arm_id)
@@ -1366,18 +1426,35 @@ class BufferedStreamExtractor:
             if idx is None:
                 return None
             _, pos, quat, gripper = buffer[idx]
-            rot6d = matrix_to_rot6d(quat_to_matrix(quat))
-            state_slices.append(
-                np.concatenate([pos, quat, np.array([gripper], dtype=np.float64)])
-            )
-            action_slices.append(
-                np.concatenate([pos, rot6d, np.array([gripper], dtype=np.float64)])
-            )
+            gripper_arr = np.array([gripper], dtype=np.float64)
 
-        return {
-            "observation.state": np.concatenate(state_slices).astype(np.float32),
-            "action": np.concatenate(action_slices).astype(np.float32),
+            state_quat_slices.append(np.concatenate([pos, quat, gripper_arr]))
+
+            rot_encoded = encode_rotation(quat, self.config.observation_encoding)
+            state_encoded_slices.append(np.concatenate([pos, rot_encoded, gripper_arr]))
+
+            rot6d = matrix_to_rot6d(quat_to_matrix(quat))  # action stays rot6d always
+            action_slices.append(np.concatenate([pos, rot6d, gripper_arr]))
+
+        state_quat = np.concatenate(state_quat_slices)
+        state_encoded = np.concatenate(state_encoded_slices)
+        action_abs = np.concatenate(action_slices)
+
+        if self.config.is_action_delta:
+            # Lazy import: keeps the converter independent of training packages
+            # except when this specific encoding is actually requested.
+            from anvil_shared.ee_transform import ee_delta_forward
+
+            anchor = state_quat if prev_state_quat is None else prev_state_quat
+            action_out = ee_delta_forward(action_abs, anchor)
+        else:
+            action_out = action_abs
+
+        frame = {
+            "observation.state": state_encoded.astype(np.float32),
+            "action": action_out.astype(np.float32),
         }
+        return frame, state_quat
 
     def _sync_ee_buffers(
         self,
