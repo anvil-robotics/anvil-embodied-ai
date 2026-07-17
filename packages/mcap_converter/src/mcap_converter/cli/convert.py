@@ -922,27 +922,6 @@ examples:
     dataset_name = args.hf_repo if args.hf_repo else Path(args.output_dir).name
     repo_id = f"{hf_username}/{dataset_name}"
 
-    # UNRESOLVED MERGE DECISION (github.com/anvil-robotics/anvil-embodied-ai, main @ 5d1c8eb):
-    # main still has `--act-from-obs-n-step` overriding a `config.action_from_observation_n`
-    # field with an arbitrary N. This session's schema-versioning refactor removed
-    # action_from_observation[_n] from DataConfig entirely (dataset-config-migrate drops it;
-    # joint act-from-obs is now expressed as empty `action_topics: {}`, same convention as EE
-    # mode — see docs/data-conversion.md's action_from_observation section). main's flag/field
-    # no longer has anywhere to attach: restoring it means partially reverting that removal,
-    # which was a deliberate decision made earlier in this session, not just branch staleness.
-    # Defaulting to (a) below (keeps the file syntactically valid / tests runnable) pending
-    # your call:
-    #   (a) [current default] drop --act-from-obs-n-step for real (its parser.add_argument is
-    #       already gone post-merge, so args.act_from_obs_n_step doesn't exist — leaving main's
-    #       code active would crash on every run), keeping only the existing boolean
-    #       `--act-from-obs` (act[t] = obs[t], i.e. N=0), which already covers the documented case; or
-    #   (b) reintroduce action_from_observation_n as a real (if narrow) DataConfig field to
-    #       preserve arbitrary-N override behavior for joint configs — main's removed code:
-    #
-    #   if args.act_from_obs_n_step is not None:
-    #       config.action_from_observation_n = args.act_from_obs_n_step
-    #       log(f"action_from_observation_n overridden to [bold]{args.act_from_obs_n_step}[/bold] via --act-from-obs-n-step")
-
     # Collect MCAP files once (reused for fps detection and conversion)
     all_mcap_files = collect_mcap_files(args.input_dir)
 
