@@ -27,7 +27,7 @@ x-ros: &ros
   environment:
     - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
     - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-    - CYCLONEDDS_URI=
+    - CYCLONEDDS_URI=file:///workspace/configs/cyclonedds/test_bridge.xml
 
 services:
 

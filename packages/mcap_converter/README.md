@@ -40,14 +40,65 @@ Key options:
 | `--act-from-obs` | Force `action[t] = obs[t]` even when action topics are configured | |
 | `--push-to-hub` | Upload to HuggingFace Hub after conversion | |
 
-Output is always saved to `<output-dir>/<input-dir-name>/`.
+Output is saved to `<output-dir>/<data_space>-space/<input-dir-name>/` (`ee-delta-space/`
+for `action_encoding: delta` configs) — **requires a `mcap-valid` quality report for the
+same session to exist first** (auto-discovered, or `--quality-report PATH`); critical
+episodes are skipped by default (`--include-flagged` to override). See
+[docs/data-conversion.md](../../docs/data-conversion.md) for the full flow.
 
 ### Other tools
 
+### mcap-valid
+
+Scan a raw session for quality issues (dropped frames, silent topics, fps degradation)
+before conversion — required before `mcap-convert` will run.
+
 ```bash
-mcap-inspect /path/to/file.mcap          # Analyze MCAP topics and message types
+mcap-valid -i data/raw/my-session
+```
+
+### mcap-to-video
+
+Extract image topics from MCAP files directly to MP4 videos.
+
+```bash
 mcap-to-video -i recording.mcap -o ./videos
-dataset-valid --root data/datasets/my-session
+mcap-to-video -i recording.mcap --scan-only
+```
+
+### dataset-valid
+
+Validate a converted LeRobot dataset by loading and reading frames, and print raw
+per-frame data (on by default — see `--print-episodes`/`--print-frames`).
+
+```bash
+dataset-valid --root /path/to/dataset
+```
+
+### dataset-viz
+
+Browse a converted dataset's episodes, videos, and action curves with lerobot's own Rerun-based viewer.
+
+```bash
+dataset-viz /path/to/dataset
+```
+
+See [docs/dataset-viz.md](../../docs/dataset-viz.md) for the full flag reference and troubleshooting.
+
+### dataset-config-migrate
+
+Migrate a `v1.0` (legacy) conversion config to the current `v1.1` schema — see
+`configs/mcap_converter/v1.0/README.md`.
+
+```bash
+dataset-config-migrate --dataset /path/to/dataset
+```
+
+### mcap-upload
+
+Upload a LeRobot dataset to Hugging Face Hub.
+
+```bash
 mcap-upload /path/to/dataset --repo-id anvil-robot/my_dataset
 ```
 
@@ -184,15 +235,20 @@ mcap_converter/
 │   ├── aligner.py     # Time synchronization
 │   └── writer.py      # LeRobot dataset writing (joint + EE feature schemas)
 ├── cli/
-│   ├── convert.py     # mcap-convert (--act-from-obs, EE/joint gate)
-│   ├── inspect.py     # mcap-inspect
-│   ├── validate.py    # dataset-valid
-│   ├── upload.py      # mcap-upload
-│   └── video.py       # mcap-to-video
+│   ├── convert.py         # mcap-convert (--act-from-obs, EE/joint gate, quality-report gate)
+│   ├── mcap_valid.py      # mcap-valid (pre-conversion quality scan)
+│   ├── validate.py        # dataset-valid
+│   ├── dataset_viz.py     # dataset-viz (Rerun-based dataset browser)
+│   ├── migrate_config.py  # dataset-config-migrate (v1.0 -> v1.1)
+│   ├── upload.py          # mcap-upload
+│   └── video.py           # mcap-to-video
 ├── config/
-│   ├── schema.py      # Unified DataConfig (data_space, observation_topics, action_topics)
-│   ├── loader.py      # YAML config loading (new unified format)
-│   └── validators.py  # Config validation (called at runtime before conversion)
+│   ├── schema.py      # Unified DataConfig (data_space, observation_topics, action_topics,
+│   │                  #   action_encoding, observation_encoding) + schema_version constants
+│   ├── loader.py      # YAML config loading (migrates on load, strict/lenient unknown-key check)
+│   ├── versioning.py  # Schema version migration registry (v1.0 legacy shapes -> v1.1)
+│   ├── encodings.py   # action/observation encoding value tables + rotation encode helper
+│   └── validators.py  # Topic-existence validation (called at runtime before conversion)
 ├── utils/
 │   ├── image_utils.py # Image processing (JPEG decode with PIL fallback)
 │   └── logging.py     # Logging utilities

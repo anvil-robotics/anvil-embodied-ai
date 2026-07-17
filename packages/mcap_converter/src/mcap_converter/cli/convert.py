@@ -9,6 +9,7 @@ import contextlib
 import json
 import os
 import shutil
+import stat
 import sys
 import time
 from datetime import datetime
@@ -17,6 +18,7 @@ from typing import List
 
 import huggingface_hub
 from rich.console import Console, Group
+from rich.markup import escape
 from rich.padding import Padding
 from rich.panel import Panel
 from rich.progress import (
@@ -36,8 +38,10 @@ from mcap_converter import (
     LeRobotWriter,
     McapReader,
 )
+from mcap_converter.cli.mcap_valid import default_report_paths
 from mcap_converter.config.schema import ConfigurationError
 from mcap_converter.core.extractor import BufferedStreamExtractor
+from mcap_converter.core.quality import SEVERITY_CRITICAL, SEVERITY_PASS, SEVERITY_WARNING
 from mcap_converter.core.reader import snap_fps
 
 console = Console()
@@ -90,6 +94,76 @@ def collect_mcap_files(input_dir: str) -> List[Path]:
             if file.endswith(".mcap"):
                 mcap_paths.append(Path(root) / file)
     return sorted(mcap_paths)
+
+
+# Single source of truth for severity ordering, shared with core/quality.py's
+# SEVERITY_PASS/WARNING/CRITICAL constants (rather than re-hardcoding the same
+# three strings here) so a future rename can't drift between the two files.
+_SEVERITY_ORDER = [SEVERITY_PASS, SEVERITY_WARNING, SEVERITY_CRITICAL]
+
+
+def resolve_quality_skip_paths(quality_report_path: str | None, include_flagged: str) -> dict:
+    """
+    Read a mcap-valid JSON report and return {resolved_path: severity} for the
+    episodes that fall ABOVE the --include-flagged threshold and should be
+    skipped during conversion.
+
+    include_flagged is an inclusive threshold, not an exclusion list: "pass"
+    converts only pass-severity episodes (skips warning+critical); "warning"
+    (the CLI default) also converts warning episodes, skipping only critical;
+    "critical" converts everything, skipping nothing.
+    """
+    if quality_report_path is None:
+        return {}
+
+    with open(quality_report_path) as f:
+        payload = json.load(f)
+
+    threshold_idx = _SEVERITY_ORDER.index(include_flagged)
+    skip_severities = set(_SEVERITY_ORDER[threshold_idx + 1 :])
+    return {
+        ep["path"]: ep["severity"]
+        for ep in payload.get("episodes", [])
+        if ep["severity"] in skip_severities
+    }
+
+
+def parse_episode_index_spec(spec: str, total_episodes: int) -> set:
+    """
+    Parse a 1-based episode index spec into a concrete set of indices.
+
+    Colon ranges follow Python slice convention: the end is EXCLUSIVE, e.g.
+    "1:4" selects episodes 1, 2, 3 (not 4) — same as Python's range(1, 4).
+    An omitted start defaults to 1; an omitted end reaches the actual last
+    episode inclusively (there's nothing to exclude when no end is given).
+    """
+    result: set = set()
+    for raw_token in spec.split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+        if ":" in token:
+            start_str, end_str = token.split(":", 1)
+            start_str, end_str = start_str.strip(), end_str.strip()
+            try:
+                start = int(start_str) if start_str else 1
+                end = int(end_str) if end_str else total_episodes + 1
+            except ValueError:
+                raise ValueError(f"invalid episode range token: '{token}'")
+            if start >= end:
+                raise ValueError(f"invalid range '{token}': start must be less than end (end is exclusive)")
+            if start < 1 or end > total_episodes + 1:
+                raise ValueError(f"range '{token}' out of bounds — episodes are numbered 1 to {total_episodes}")
+            result.update(range(start, end))
+        else:
+            try:
+                idx = int(token)
+            except ValueError:
+                raise ValueError(f"invalid episode index token: '{token}'")
+            if not (1 <= idx <= total_episodes):
+                raise ValueError(f"episode index {idx} out of range (1-{total_episodes})")
+            result.add(idx)
+    return result
 
 
 def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
@@ -182,6 +256,34 @@ def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
     return {}
 
 
+def _ensure_output_readable(output_dir: str) -> None:
+    """
+    Ensure every file/directory in the converted dataset is readable by
+    other users, not just the owner.
+
+    Works around a known issue where lerobot's video encoder (PyAV/
+    libavformat, via encode_video_frames() in lerobot/datasets/
+    video_utils.py) writes video files with 0600 permissions, bypassing the
+    process umask. This breaks any tool that needs to read the dataset as a
+    different user/UID than the one that ran the conversion — e.g. a
+    different local user or service account reading the dataset later.
+    """
+    root = Path(output_dir)
+    for path in root.rglob("*"):
+        try:
+            current_mode = stat.S_IMODE(path.stat().st_mode)
+            if path.is_dir():
+                # ensure r+w+x for owner, r+x for group/other (on top of whatever's already set)
+                os.chmod(path, current_mode | 0o755)
+            else:
+                # ensure r+w for owner, r for group/other
+                os.chmod(path, current_mode | 0o644)
+        except OSError:
+            # best-effort: don't let a permission fix-up failure crash the
+            # whole conversion; the dataset is still usable by the owner.
+            continue
+
+
 def convert_session(
     input_dir: str,
     output_dir: str,
@@ -199,6 +301,8 @@ def convert_session(
     mcap_files: List[Path] = None,
     debug_plot_episodes: int = 5,
     cli_act_from_obs: bool = False,
+    quality_skip_paths: dict | None = None,
+    skip_episode_indices: set | None = None,
 ):
     """
     Convert MCAP session to LeRobot dataset
@@ -329,6 +433,7 @@ def convert_session(
     total_frames = 0
     episode_times = []
     episode_frame_counts = []
+    episode_original_indices = []
 
     with Progress(
         SpinnerColumn(),
@@ -345,11 +450,32 @@ def convert_session(
             status=f"{resume_from}/{len(mcap_files)} episodes",
         )
 
+        skip_paths = quality_skip_paths or {}
         for episode_idx, mcap_path in enumerate(mcap_files):
             if episode_idx < resume_from:
                 progress.advance(overall_task)
                 progress.update(overall_task, status=f"{episode_idx + 1}/{len(mcap_files)} episodes [dim](skipped)[/dim]")
                 console.print(f"  [dim]↷ [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}  skipped (already converted)[/dim]")
+                continue
+
+            quality_severity = skip_paths.get(str(mcap_path.resolve()))
+            if quality_severity is not None:
+                color = "red" if quality_severity == "critical" else "yellow"
+                progress.advance(overall_task)
+                progress.update(overall_task, status=f"{episode_idx + 1}/{len(mcap_files)} episodes [dim](skipped)[/dim]")
+                console.print(
+                    f"  [{color}]↷ [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
+                    f"  skipped (quality: {quality_severity})[/{color}]"
+                )
+                continue
+
+            if skip_episode_indices and (episode_idx + 1) in skip_episode_indices:
+                progress.advance(overall_task)
+                progress.update(overall_task, status=f"{episode_idx + 1}/{len(mcap_files)} episodes [dim](skipped)[/dim]")
+                console.print(
+                    f"  [cyan]↷ [{episode_idx + 1}/{len(mcap_files)}] {mcap_path.name}"
+                    f"  skipped (manual index)[/cyan]"
+                )
                 continue
 
             episode_start_time = time.time()
@@ -412,6 +538,7 @@ def convert_session(
                 )
                 episode_frame_counts.append(0)
                 episode_times.append(time.time() - episode_start_time)
+                episode_original_indices.append(episode_idx)
                 log(
                     f"[yellow]⚠ Skipped episode {mcap_path.name} — corrupt frame: "
                     f"{corrupt_frame_error}[/yellow]"
@@ -438,7 +565,22 @@ def convert_session(
                 )
                 episode_frame_counts.append(0)
                 episode_times.append(time.time() - episode_start_time)
+                episode_original_indices.append(episode_idx)
                 continue
+
+            for robot, counts in stream_extractor.get_action_fill_stats().items():
+                filled = counts["hold_last"] + counts["fallback_to_observation"]
+                if filled == 0 and counts["dropped"] == 0:
+                    continue
+                robot_label = robot or "action"
+                dropped_suffix = (
+                    f", [red]{counts['dropped']} dropped[/red]" if counts["dropped"] else ""
+                )
+                console.print(
+                    f"    [yellow]↺[/yellow] {robot_label}: {counts['exact']} exact, "
+                    f"{counts['hold_last']} hold-last, "
+                    f"{counts['fallback_to_observation']} fallback-to-obs{dropped_suffix}"
+                )
 
             # Save episode — suppress ffmpeg/libx264 noise
             progress.update(
@@ -451,6 +593,7 @@ def convert_session(
             episode_time = time.time() - episode_start_time
             episode_times.append(episode_time)
             episode_frame_counts.append(frame_count)
+            episode_original_indices.append(episode_idx)
             total_frames += frame_count
 
             # Mark episode done with green bar
@@ -483,7 +626,7 @@ def convert_session(
             "  1. Camera topics in config don't match MCAP topics\n"
             "  2. Action topics don't exist in MCAP (quest mode)\n"
             "  3. Joint name prefixes don't match config source mapping\n"
-            "  Run [bold]mcap-inspect[/bold] on your MCAP to see available topics.\n"
+            "  Run [bold]mcap-valid[/bold] on your MCAP to see all recorded topics and message types.\n"
         )
         return dataset
 
@@ -491,6 +634,10 @@ def convert_session(
     with console.status("[bold]Finalizing dataset (metadata & cleanup)..."):
         with suppress_fd_output():
             writer.finalize(dataset)
+        # lerobot's video encoder writes .mp4 files as 0600 (bypassing umask),
+        # which blocks any reader running as a different UID. Fix up
+        # permissions across the whole output tree.
+        _ensure_output_readable(output_dir)
 
     # Debug plots: joint mode only. The current plot reads observation.state /
     # action assuming joint positions; EE plots are out of scope for Task 1.
@@ -528,8 +675,8 @@ def convert_session(
     ep_table.add_column("Frames", justify="right")
     ep_table.add_column("Duration", justify="right")
     ep_table.add_column("Speed", justify="right")
-    for i, mcap_path in enumerate(mcap_files[resume_from:], start=resume_from):
-        j = i - resume_from
+    for j, i in enumerate(episode_original_indices):
+        mcap_path = mcap_files[i]
         ep_fps = episode_frame_counts[j] / episode_times[j] if episode_times[j] > 0 else 0
         ep_table.add_row(
             str(i + 1),
@@ -583,6 +730,8 @@ examples:
   mcap-convert -i data/raw/my-session -o data/datasets --config ... --fps 15 --push-to-hub
   mcap-convert -i data/raw/my-session -o data/datasets --config ... --max-episodes 5
   mcap-convert -i data/raw/my-session -o data/datasets --config ... --resume
+  mcap-convert -i data/raw/my-session -o data/datasets --config ...  # default: critical episodes skipped automatically
+  mcap-convert -i data/raw/my-session -o data/datasets --config ... --include-flagged critical  # convert everything, even critical episodes
 """,
     )
     parser.add_argument(
@@ -661,7 +810,71 @@ examples:
         metavar="N",
         help="number of episodes to include in debug plots (default: 5)",
     )
+    parser.add_argument(
+        "--quality-report", type=str, default=None,
+        help=(
+            "path to a mcap-valid JSON report. A report is REQUIRED to run mcap-convert — "
+            "if omitted, it is auto-discovered at <input-dir>/mcap_valid_reports/report.json "
+            "(run `mcap-valid -i INPUT_DIR` first to generate it); if neither is found, "
+            "mcap-convert exits with an error before touching the output directory"
+        ),
+    )
+    parser.add_argument(
+        "--include-flagged",
+        choices=_SEVERITY_ORDER,
+        default=SEVERITY_WARNING,
+        help=(
+            "highest severity tier to include when converting, per the quality "
+            "report. Inclusive threshold: 'pass' converts only clean episodes "
+            "(skips warning AND critical); 'warning' (default) also converts "
+            "warning-level episodes, skipping only critical ones automatically; "
+            "'critical' converts every episode regardless of severity, skipping "
+            "nothing."
+        ),
+    )
+    parser.add_argument(
+        "--skip-episode-idx", type=str, default=None,
+        help=(
+            "manually skip specific episodes by 1-based index, independent of "
+            "--quality-report. Accepts a comma-separated list (1,2,5,6), a "
+            "colon range with an EXCLUSIVE end matching Python slice convention "
+            "(1:4 selects episodes 1,2,3 — NOT 4), an open-ended range (2: or :4), "
+            "or a mix (1,3:5,8). Whitespace is tolerated."
+        ),
+    )
     args = parser.parse_args(args)
+
+    # ── Mandatory quality-report gate ──────────────────────────────────
+    # mcap-convert refuses to run without a mcap-valid quality report (explicit
+    # --quality-report, or auto-discovered at the default path) so bad
+    # recordings are caught before they enter a dataset. This only checks that
+    # a report FILE exists — --include-flagged (below) is a separate mechanism
+    # that reads the report's *contents* and defaults to "warning", so only
+    # critical episodes are skipped automatically; pass --include-flagged
+    # critical to opt out entirely and convert everything.
+    # Checked before config is even loaded — it doesn't depend on config, and
+    # this is meant to be a guard clause: reject before any other setup runs.
+    report_path = args.quality_report
+    default_json, _ = default_report_paths(Path(args.input_dir))
+    if report_path is None:
+        if default_json.is_file():
+            report_path = str(default_json)
+    if report_path is None or not Path(report_path).is_file():
+        # escape(): input-dir/report paths are user/data-controlled and could
+        # otherwise be parsed as Rich markup (e.g. a path containing "[red]").
+        console.print(
+            "\n[bold red]ERROR: No mcap-valid quality report found for this input.[/bold red]\n"
+            "mcap-convert requires a quality report to exist before conversion, so bad\n"
+            "recordings are caught before they enter a dataset.\n"
+            f"Run mcap-valid first:\n"
+            f"  [bold]uv run mcap-valid -i {escape(args.input_dir)}[/bold]\n"
+            f"then re-run this command — the report is auto-discovered at\n"
+            f"  {escape(str(default_json))}\n"
+            "or pass --quality-report PATH to point at a report elsewhere.\n"
+        )
+        exit(1)
+
+    quality_skip_paths = resolve_quality_skip_paths(report_path, args.include_flagged)
 
     # Load configuration early — needed to determine data_space suffix for output dir
     if args.config:
@@ -709,8 +922,39 @@ examples:
     dataset_name = args.hf_repo if args.hf_repo else Path(args.output_dir).name
     repo_id = f"{hf_username}/{dataset_name}"
 
+    # UNRESOLVED MERGE DECISION (github.com/anvil-robotics/anvil-embodied-ai, main @ 5d1c8eb):
+    # main still has `--act-from-obs-n-step` overriding a `config.action_from_observation_n`
+    # field with an arbitrary N. This session's schema-versioning refactor removed
+    # action_from_observation[_n] from DataConfig entirely (dataset-config-migrate drops it;
+    # joint act-from-obs is now expressed as empty `action_topics: {}`, same convention as EE
+    # mode — see docs/data-conversion.md's action_from_observation section). main's flag/field
+    # no longer has anywhere to attach: restoring it means partially reverting that removal,
+    # which was a deliberate decision made earlier in this session, not just branch staleness.
+    # Defaulting to (a) below (keeps the file syntactically valid / tests runnable) pending
+    # your call:
+    #   (a) [current default] drop --act-from-obs-n-step for real (its parser.add_argument is
+    #       already gone post-merge, so args.act_from_obs_n_step doesn't exist — leaving main's
+    #       code active would crash on every run), keeping only the existing boolean
+    #       `--act-from-obs` (act[t] = obs[t], i.e. N=0), which already covers the documented case; or
+    #   (b) reintroduce action_from_observation_n as a real (if narrow) DataConfig field to
+    #       preserve arbitrary-N override behavior for joint configs — main's removed code:
+    #
+    #   if args.act_from_obs_n_step is not None:
+    #       config.action_from_observation_n = args.act_from_obs_n_step
+    #       log(f"action_from_observation_n overridden to [bold]{args.act_from_obs_n_step}[/bold] via --act-from-obs-n-step")
+
     # Collect MCAP files once (reused for fps detection and conversion)
     all_mcap_files = collect_mcap_files(args.input_dir)
+
+    # Validate --skip-episode-idx early (before any output-dir mutation below)
+    skip_episode_indices = None
+    if args.skip_episode_idx:
+        try:
+            skip_episode_indices = parse_episode_index_spec(args.skip_episode_idx, len(all_mcap_files))
+        except ValueError as exc:
+            console.print(f"[red]✗ --skip-episode-idx error: {exc}[/red]")
+            exit(1)
+        log(f"Manually skipping {len(skip_episode_indices)} episode(s) by index: {sorted(skip_episode_indices)}")
 
     # Always auto-detect input fps from all episodes (fast — reads MCAP summary only)
     ref_topic = list(config.camera_topic_mapping.keys())[0] if config.camera_topic_mapping else None
@@ -798,6 +1042,7 @@ examples:
 
         # Convert session
         log("[bold]Starting conversion...[/bold]")
+
         dataset = convert_session(
             input_dir=args.input_dir,
             output_dir=args.output_dir,
@@ -815,6 +1060,8 @@ examples:
             mcap_files=all_mcap_files,
             debug_plot_episodes=args.debug_plot_episodes,
             cli_act_from_obs=args.act_from_obs,
+            quality_skip_paths=quality_skip_paths,
+            skip_episode_indices=skip_episode_indices,
         )
 
         # Upload to Hub if requested

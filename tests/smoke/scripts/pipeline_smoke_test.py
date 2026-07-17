@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """End-to-end CLI smoke test for the anvil training / eval stack.
 
-Four scenarios across two fixture sessions:
+Six scenarios across two fixture sessions:
 
 Joint-space (tests/smoke/fixtures/test-session, 5 stub MCAPs, single right arm):
-  joint_abs_afo — action_from_observation=true,  action_type=joint_abs
-  joint_abs     — action_from_observation=false, action_type=joint_abs
+  joint_abs_afo              — action_from_observation=true,  action_type=joint_abs
+  joint_abs                  — action_from_observation=false, action_type=joint_abs
+  joint_abs_delta_obs_t      — shares joint_abs's converted dataset, action_type=delta_obs_t
+  joint_abs_delta_sequential — shares joint_abs's converted dataset, action_type=delta_sequential
 
 EE Cartesian (tests/smoke/fixtures/ee-session, 5 stub MCAPs, single right arm):
   ee_abs — action_type=ee_abs  (EE absolute rot6d)
   ee_rel — action_type=ee_rel  (EE SE(3) relative; shares converted dataset with ee_abs)
 
 EE space is inherently AFO — /ee_pose_right is both observation and action source.
-ee_rel step 1 shows "cached" when the shared EE dataset already exists from ee_abs.
+ee_rel step 1 shows "cached" when the shared EE dataset already exists from ee_abs;
+same for joint_abs_delta_* against joint_abs.
 
 Each scenario runs all 4 steps: mcap-convert → anvil-trainer → anvil-eval → anvil-eval-ros
 
@@ -73,6 +76,24 @@ MCAP_ROOT    = FIXTURES / "test-session"
 EE_MCAP_ROOT = FIXTURES / "ee-session"
 
 
+def _mcap_input_copy(root: Path) -> Path:
+    """A persistent, gitignored copy of a committed fixture session under
+    outputs/, reused (not recreated) across scenarios and reruns.
+
+    mcap-valid's default report now writes inside its `-i` input's own
+    resolved location, not cwd — so Step 1 pointing `-i` at a tracked fixture
+    directly (MCAP_ROOT or EE_MCAP_ROOT) would write mcap_valid_reports/ into
+    the tracked fixture tree on every smoke test run. All scenarios/steps use
+    this copy instead so mcap-valid and mcap-convert see the same episode
+    paths (needed for --quality-report path matching in resolve_quality_skip_paths).
+    """
+    dest = OUTPUTS / "mcap_input" / root.name
+    if not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(root, dest)
+    return dest
+
+
 # ── Scenario definition ──────────────────────────────────────────────────────
 
 @dataclass
@@ -102,8 +123,15 @@ class Scenario:
 # Use scenario-specific parent dirs under outputs/ to keep artifacts separate.
 # ee_abs and ee_rel point to the SAME dataset_dir — step 1 for ee_rel shows
 # "cached" when ee_abs has already converted, and re-converts if forced.
+# joint_abs_delta_* scenarios share the SAME dataset as joint_abs (classic
+# delta action-type variants trained/evaluated on the same converted data) —
+# step 1 for those is "cached" once joint_abs has already converted.
 _MCAP_NAME    = MCAP_ROOT.name    # "test-session"
 _EE_MCAP_NAME = EE_MCAP_ROOT.name  # "ee-session"
+# gitignored copies of the tracked fixtures — see _mcap_input_copy docstring
+# (mcap-valid's report would otherwise land inside the tracked fixture tree)
+_MCAP_INPUT    = _mcap_input_copy(MCAP_ROOT)
+_EE_MCAP_INPUT = _mcap_input_copy(EE_MCAP_ROOT)
 
 _EE_INFERENCE_CFG = FIXTURES / "configs" / "inference-eval-smoke-test-ee.yaml"
 
@@ -111,7 +139,7 @@ SCENARIOS: dict[str, Scenario] = {
     "joint_abs_afo": Scenario(
         key="joint_abs_afo",
         label="joint_abs AFO",
-        mcap_root=MCAP_ROOT,
+        mcap_root=_MCAP_INPUT,
         dataset_dir=OUTPUTS / "datasets" / "joint_abs_afo" / "joint-space" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "joint_abs_afo" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "joint_abs_afo" / "raw",
@@ -121,17 +149,41 @@ SCENARIOS: dict[str, Scenario] = {
     "joint_abs": Scenario(
         key="joint_abs",
         label="joint_abs CMD",
-        mcap_root=MCAP_ROOT,
+        mcap_root=_MCAP_INPUT,
         dataset_dir=OUTPUTS / "datasets" / "joint_abs" / "joint-space" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "joint_abs" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "joint_abs" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "joint_abs" / "ros",
         convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
     ),
+    "joint_abs_delta_obs_t": Scenario(
+        key="joint_abs_delta_obs_t",
+        label="joint_abs CMD delta_obs_t",
+        mcap_root=_MCAP_INPUT,
+        # shared with joint_abs — step 1 is "cached" once joint_abs has converted
+        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / "joint-space" / _MCAP_NAME,
+        train_out=OUTPUTS / "model_zoo" / "joint_abs_delta_obs_t" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "joint_abs_delta_obs_t" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "joint_abs_delta_obs_t" / "ros",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
+        action_type="delta_obs_t",
+    ),
+    "joint_abs_delta_sequential": Scenario(
+        key="joint_abs_delta_sequential",
+        label="joint_abs CMD delta_sequential",
+        mcap_root=_MCAP_INPUT,
+        # shared with joint_abs — step 1 is "cached" once joint_abs has converted
+        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / "joint-space" / _MCAP_NAME,
+        train_out=OUTPUTS / "model_zoo" / "joint_abs_delta_sequential" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "joint_abs_delta_sequential" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "joint_abs_delta_sequential" / "ros",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
+        action_type="delta_sequential",
+    ),
     "ee_abs": Scenario(
         key="ee_abs",
         label="ee_abs",
-        mcap_root=EE_MCAP_ROOT,
+        mcap_root=_EE_MCAP_INPUT,
         dataset_dir=OUTPUTS / "datasets" / "ee" / "ee-space" / _EE_MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "ee_abs" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "ee_abs" / "raw",
@@ -143,7 +195,7 @@ SCENARIOS: dict[str, Scenario] = {
     "ee_rel": Scenario(
         key="ee_rel",
         label="ee_rel",
-        mcap_root=EE_MCAP_ROOT,
+        mcap_root=_EE_MCAP_INPUT,
         # Same dataset as ee_abs — step 1 is "cached" when ee_abs already converted.
         dataset_dir=OUTPUTS / "datasets" / "ee" / "ee-space" / _EE_MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "ee_rel" / "smoke",
@@ -225,6 +277,22 @@ def run_step_convert(sc: Scenario, force: bool) -> StepResult:
     if expected.exists() and not force:
         return StepResult(ok=True, duration_s=0.0, artifact=sc.dataset_dir, notes="cached")
 
+    # mcap-convert now requires a mcap-valid quality report to exist first.
+    # All scenarios share the same mcap_root, so one report is generated once
+    # and reused across scenarios/reruns.
+    report_path = OUTPUTS / "mcap_valid_reports" / f"{sc.mcap_root.name}.json"
+    if force or not report_path.exists():
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        valid_rc = _run([
+            "uv", "run", "mcap-valid",
+            "-i", str(sc.mcap_root),
+            "--format", "json",
+            "--output", str(report_path),
+        ])
+        if valid_rc != 0:
+            return StepResult(ok=False, duration_s=0.0, artifact=report_path,
+                              notes=f"mcap-valid exit {valid_rc}")
+
     t0 = time.monotonic()
     # mcap-convert appends <data_space>-space/<input-name>/ to the given -o dir,
     # so we pass dataset_dir.parent.parent (the base above the space-subdir).
@@ -234,6 +302,7 @@ def run_step_convert(sc: Scenario, force: bool) -> StepResult:
         "-o", str(sc.dataset_dir.parent.parent),
         "--config", str(sc.convert_config),
         "--robot-type", "anvil_openarm",
+        "--quality-report", str(report_path),
     ])
     dt = time.monotonic() - t0
 

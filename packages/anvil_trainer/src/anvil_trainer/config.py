@@ -454,6 +454,10 @@ class TrainingConfig:
         if not any(arg.startswith("--wandb.disable_artifact") for arg in sys.argv):
             sys.argv.append("--wandb.disable_artifact=true")
 
+        # Disable wandb artifact upload by default for all runs (new + resume)
+        if not any(arg.startswith("--wandb.disable_artifact") for arg in sys.argv):
+            sys.argv.append("--wandb.disable_artifact=true")
+
         return cls(
             exclude_observs=exclude_observs,
             task_override=task_override,

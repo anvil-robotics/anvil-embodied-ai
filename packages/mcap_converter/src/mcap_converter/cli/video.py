@@ -69,7 +69,12 @@ def scan_image_topics(mcap_path: str) -> dict[str, dict]:
             if schema:
                 msg_type = schema.name
                 # Check if it's an image type
-                if msg_type in ["sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"]:
+                if msg_type in [
+                    "sensor_msgs/msg/Image",
+                    "sensor_msgs/msg/CompressedImage",
+                    "sensor_msgs/Image",
+                    "sensor_msgs/CompressedImage",
+                ]:
                     image_topics[channel.topic] = {
                         "type": msg_type,
                         "schema_id": channel.schema_id,
@@ -355,8 +360,8 @@ def convert_mcap_to_mp4(
             cam_name = topic_to_cam[topic]
             msg_type = image_topics[topic]["type"]
 
-            # Decode image based on type
-            if msg_type == "sensor_msgs/msg/Image":
+            # Decode image based on type (handle both new /msg/ and legacy schema names)
+            if msg_type in ("sensor_msgs/msg/Image", "sensor_msgs/Image"):
                 img = decode_ros_image(
                     bytes(ros_msg.data),
                     ros_msg.encoding,
