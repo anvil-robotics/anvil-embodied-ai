@@ -1,7 +1,7 @@
 """Debug plots for converted LeRobot datasets.
 
 Generates per-episode observation.state vs action comparison plots to visually
-verify action_from_observation_n alignment after conversion.
+verify act-from-obs alignment after conversion.
 """
 
 from __future__ import annotations
@@ -9,13 +9,12 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Optional
 
 
 def plot_conversion_debug(
     output_dir: str,
     n_episodes: int = 5,
-    action_from_observation_n: Optional[int] = None,
+    act_from_obs: bool = False,
 ) -> None:
     """Generate obs_state vs action debug plots for the first N episodes.
 
@@ -25,8 +24,8 @@ def plot_conversion_debug(
     Args:
         output_dir: Path to the converted LeRobot dataset directory.
         n_episodes: Number of episodes to plot (default 5).
-        action_from_observation_n: Frame offset used during conversion, shown
-            in plot titles. If None, attempts to read from conversion_config.yaml.
+        act_from_obs: Whether this dataset was converted with action[t] = obs[t]
+            (--act-from-obs / empty action_topics), shown in plot titles.
     """
     import matplotlib.pyplot as plt
     import pyarrow.parquet as pq
@@ -39,25 +38,10 @@ def plot_conversion_debug(
     # Load joint names from meta/info.json
     info_path = root / "meta" / "info.json"
     joint_names: list[str] = []
-    fps: int = 30
     if info_path.exists():
         info = json.loads(info_path.read_text())
         obs_feature = info.get("features", {}).get("observation.state", {})
         joint_names = obs_feature.get("names", [])
-        fps = info.get("fps", 30)
-
-    # Try to read action_from_observation_n from saved conversion config
-    if action_from_observation_n is None:
-        config_path = root / "conversion_config.yaml"
-        if config_path.exists():
-            try:
-                import yaml
-                cfg = yaml.safe_load(config_path.read_text())
-                action_from_observation_n = cfg.get("action_from_observation_n", 10)
-            except Exception:
-                action_from_observation_n = 10
-        else:
-            action_from_observation_n = 10
 
     # Collect parquet files sorted by chunk/file order
     data_files = sorted((root / "data").rglob("*.parquet"))
@@ -96,8 +80,7 @@ def plot_conversion_debug(
         episodes[ep]["obs"].append(obs)
         episodes[ep]["act"].append(act)
 
-    offset_sec = action_from_observation_n / fps
-    offset_label = f"n={action_from_observation_n} ({offset_sec*1000:.0f}ms @ {fps}fps)"
+    offset_label = "act-from-obs (action[t] = obs[t])" if act_from_obs else "command topics"
 
     for ep_idx in sorted(episodes.keys())[:n_episodes]:
         ep_data = episodes[ep_idx]

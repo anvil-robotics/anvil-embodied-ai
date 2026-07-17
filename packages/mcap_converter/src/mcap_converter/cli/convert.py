@@ -644,12 +644,10 @@ def convert_session(
     if total_frames > 0 and not config.is_ee:
         from mcap_converter.utils.debug_plot import plot_conversion_debug
         with console.status("[bold]Generating debug plots..."):
-            # action_from_observation_n is read from conversion_config.yaml if
-            # present; new configs no longer set it (act-from-obs implies n=0).
             plot_conversion_debug(
                 output_dir,
                 n_episodes=debug_plot_episodes,
-                action_from_observation_n=0 if cli_act_from_obs else None,
+                act_from_obs=cli_act_from_obs or not bool(config.action_command_topics),
             )
         log(f"Debug plots saved to [dim]{output_dir}/debug_plots/[/dim]")
 

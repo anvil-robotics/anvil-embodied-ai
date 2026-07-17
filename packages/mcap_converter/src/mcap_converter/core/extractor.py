@@ -646,13 +646,13 @@ class BufferedStreamExtractor:
         available = {ch.topic for ch in _summary.channels.values()}
         if action_topic_set and action_topic_set.isdisjoint(available):
             raise DataExtractionError(
-                f"\n[ACTION SOURCE ERROR] action_from_observation=false, but none of the "
-                f"configured action topics were found in this MCAP.\n"
+                f"\n[ACTION SOURCE ERROR] None of the configured action topics were found "
+                f"in this MCAP.\n"
                 f"  Expected (from config): {sorted(action_topic_set)}\n"
                 f"  Available in MCAP:      {sorted(available)}\n\n"
                 "Fix options:\n"
-                "  1. Set action_from_observation: true in config to derive actions from "
-                "observations.\n"
+                "  1. Set action_topics: {} in config (or pass --act-from-obs) to derive "
+                "actions from observations instead.\n"
                 "  2. Record a new session that captures the action-command topics.\n"
                 "  3. Use a different --config that matches this recording's topic layout.\n"
             )
