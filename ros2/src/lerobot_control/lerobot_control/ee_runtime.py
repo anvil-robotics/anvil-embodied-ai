@@ -21,12 +21,18 @@
     Thin wrapper around ``anvil_shared.ee_transform.ee_action_to_poses``.
 
 ``ee_delta_restore_step(delta, obs_t)``
-    Restores ONE Delta(n-(n-1)) model output to an absolute EE pose, composed
+    Restores ONE Delta(n->n+1) model output to an absolute EE pose, composed
     fresh against the freshest observed pose (``obs_t``) — this is a
     per-publish-tick composition, NOT a chunk-anchor restore (contrast with
     ``ee_relative_restore_chunk``, which restores a whole chunk against ONE
     fixed chunk-generation-time anchor). World-frame; thin wrapper around
     ``anvil_shared.ee_transform.ee_delta_inverse``.
+
+``pose_arrival_error(current, target)``
+    Position/orientation distance between two 8-dim EE poses (quat layout).
+    Shared by ``gt_replay_verifier_node``'s trajectory comparison and
+    ``dataset_gt_replayer_node``'s pre-replay homing arrival check — same
+    "how far apart are these two poses" math, different callers/tolerances.
 """
 from __future__ import annotations
 
@@ -69,7 +75,7 @@ def resolve_action_type(cfg: dict) -> str:
 def read_checkpoint_anvil_config(model_path: str) -> dict:
     """Resolve *model_path* to a checkpoint dir and read its anvil_config.json.
 
-    Mirrors the path resolution in ``inference_node._read_checkpoint_metadata``
+    Mirrors the path resolution in ``inference_node._load_run_metadata``
     (bare checkpoint dir / ``pretrained_model/`` subdir / HF-cache
     ``snapshots/<hash>/`` layout) so callers get the same answer regardless
     of which convention *model_path* uses.
@@ -148,7 +154,7 @@ def ee_delta_restore_step(
     delta: np.ndarray,
     obs_t: np.ndarray,
 ) -> np.ndarray:
-    """Restore ONE Delta(n-(n-1)) model output to an absolute EE pose.
+    """Restore ONE Delta(n->n+1) model output to an absolute EE pose.
 
     Unlike :func:`ee_relative_restore_chunk` (which restores a whole chunk
     against a single anchor captured at chunk-generation time), this composes
@@ -192,6 +198,90 @@ def ee_delta_restore_step(
 
     result = ee_delta_inverse(delta, obs_t)
     return result[0] if single else result
+
+
+def pose_arrival_error(current: np.ndarray, target: np.ndarray) -> tuple[float, float]:
+    """Position/orientation distance between two 8-dim EE poses (quat layout).
+
+    Both ``current`` and ``target`` are ``[x, y, z, qx, qy, qz, qw, gripper]`` (a
+    trailing gripper value, if present, is ignored — only indices 0:7 are read, so
+    a bare 7-element ``[x, y, z, qx, qy, qz, qw]`` works too). No dependency on
+    anvil_shared — plain numpy, safe to import anywhere this module already is.
+
+    Returns:
+        ``(pos_err_m, rot_err_deg)`` — plain L2 position distance, and the
+        sign-invariant geodesic angle between the two quaternions
+        (``2*arccos(|dot(q1,q2)|)``, since ``q`` and ``-q`` represent the same
+        rotation).
+    """
+    current = np.asarray(current, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    pos_err = float(np.linalg.norm(current[0:3] - target[0:3]))
+    dot = float(np.clip(np.abs(np.dot(current[3:7], target[3:7])), 0.0, 1.0))
+    rot_err = float(np.degrees(2.0 * np.arccos(dot)))
+    return pos_err, rot_err
+
+
+def ramp_toward_pose(
+    current: np.ndarray,
+    target: np.ndarray,
+    max_pos_delta_m: float,
+    max_rot_delta_deg: float,
+) -> np.ndarray:
+    """One ramped step from ``current`` toward ``target`` (8-dim quat-layout
+    EE poses: ``[x, y, z, qx, qy, qz, qw, gripper]``), moving at most
+    ``max_pos_delta_m`` metres and ``max_rot_delta_deg`` degrees this step.
+    Gripper passes through from ``target`` unramped — bounded by the
+    hardware's own clamp already, not a motion-safety concern the way
+    position/orientation are.
+
+    Exists because ``inference_node.py``'s ``action_limiter`` (the joint-space
+    per-tick delta-limiting safety net) is explicitly not applied in EE mode —
+    a one-shot absolute EE command (e.g. pre-replay homing) would otherwise
+    jump straight to its target regardless of how far the robot's current
+    pose is from it. Calling this every tick with the SAME fixed target and a
+    freshly-read ``current`` converges toward it gradually instead.
+
+    Position: clamps the step's magnitude, preserving direction (not
+    per-axis — a real safety speed limit is naturally expressed as total
+    Euclidean distance per tick, not per-component).
+
+    Orientation: clamps the geodesic rotation angle via SLERP (spherical
+    linear interpolation) — the correct way to take a bounded step along the
+    shortest rotation path between two quaternions; clamping components
+    independently would not stay on that path.
+    """
+    current = np.asarray(current, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+
+    pos_delta = target[0:3] - current[0:3]
+    pos_dist = float(np.linalg.norm(pos_delta))
+    if pos_dist > max_pos_delta_m and pos_dist > 1e-12:
+        ramped_pos = current[0:3] + pos_delta / pos_dist * max_pos_delta_m
+    else:
+        ramped_pos = target[0:3]
+
+    q0, q1 = current[3:7].copy(), target[3:7].copy()
+    dot = float(np.dot(q0, q1))
+    if dot < 0:  # shortest path — q and -q are the same rotation
+        q1 = -q1
+        dot = -dot
+    dot = float(np.clip(dot, -1.0, 1.0))
+    angle_deg = float(np.degrees(2.0 * np.arccos(dot)))
+    if angle_deg > max_rot_delta_deg and angle_deg > 1e-9:
+        theta_0 = np.arccos(dot)
+        theta = theta_0 * (max_rot_delta_deg / angle_deg)
+        q_perp = q1 - q0 * dot
+        q_perp_norm = float(np.linalg.norm(q_perp))
+        if q_perp_norm > 1e-12:
+            q_perp = q_perp / q_perp_norm
+            ramped_quat = q0 * np.cos(theta) + q_perp * np.sin(theta)
+        else:
+            ramped_quat = q0
+    else:
+        ramped_quat = q1
+
+    return np.concatenate([ramped_pos, ramped_quat, [target[7]]])
 
 
 def ee_poses_from_chunk(

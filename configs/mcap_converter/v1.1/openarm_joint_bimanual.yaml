@@ -10,6 +10,9 @@
 #
 # Velocity and effort are no longer emitted (observation_feature_mapping.others
 # is empty). Existing datasets converted with the legacy config are unaffected.
+#
+# See TEMPLATE_all_fields.yaml for the full field reference. Fields commented
+# out below are EE-mode-only / not applicable to joint mode and left at defaults.
 # =============================================================================
 
 schema_version: "1.1"
@@ -21,7 +24,7 @@ observation_topics:
 
 # Action source = separate per-arm command topics (Quest teleop pattern).
 # joint_order maps the flat Float64MultiArray.data array to canonical joint
-# slots; if omitted or empty, action[t] = observation.state[t] (act-from-obs).
+# slots; if omitted or empty, action[t] = observation.state[t+1] (act-from-obs).
 action_topics:
   left:
     topic: "/follower_l_forward_position_controller/commands"
@@ -29,6 +32,9 @@ action_topics:
   right:
     topic: "/follower_r_forward_position_controller/commands"
     joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
+
+# action_encoding: "absolute"       # EE-mode only — joint has no encoding knob, must stay default
+# observation_encoding: "quaternion"  # EE-mode only — joint has no encoding knob, must stay default
 
 # How to split a shared /joint_states topic into per-arm joints.
 joint_names:

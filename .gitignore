@@ -81,6 +81,9 @@ logs/
 wandb/
 runs/
 
+# GT-replayer correctness test scratch reports
+tests/smoke/.gt_replay_reports/
+
 # mcap-valid default report output (always written unless --output overrides)
 mcap_valid_reports/
 

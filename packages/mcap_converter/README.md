@@ -37,14 +37,14 @@ Key options:
 | `--vcodec` | Video codec (`h264`, `hevc`, `libsvtav1`) | `h264` |
 | `--resume` | Skip already-converted episodes | |
 | `--max-episodes N` | Convert only the first N episodes | |
-| `--act-from-obs` | Force `action[t] = obs[t]` even when action topics are configured | |
+| `--act-from-obs` | Force `action[t] = obs[t+1]` even when action topics are configured | |
 | `--push-to-hub` | Upload to HuggingFace Hub after conversion | |
 
-Output is saved to `<output-dir>/<data_space>-space/<input-dir-name>/` (`ee-delta-space/`
-for `action_encoding: delta` configs) — **requires a `mcap-valid` quality report for the
-same session to exist first** (auto-discovered, or `--quality-report PATH`); critical
-episodes are skipped by default (`--include-flagged` to override). See
-[docs/data-conversion.md](../../docs/data-conversion.md) for the full flow.
+Output is saved to `<output-dir>/<data_space>-<encoding>/<input-dir-name>/` — `joint-abs/`,
+`ee-abs/`, or `ee-delta/` (for `action_encoding: delta` configs) — **requires a `mcap-valid`
+quality report for the same session to exist first** (auto-discovered, or
+`--quality-report PATH`); critical episodes are skipped by default (`--include-flagged` to
+override). See [docs/data-conversion.md](../../docs/data-conversion.md) for the full flow.
 
 ### Other tools
 
@@ -118,7 +118,7 @@ observation_topics:
   right: "/ee_pose_right"
 
 # action_topics must be empty in EE mode —
-# action[t] = obs[t] (future window applied by delta_timestamps at train time)
+# action[t] = obs[t+1] (baked at convert time via a 1-frame lookahead)
 action_topics: {}
 
 camera_topics:
@@ -185,8 +185,8 @@ image_resolution: [640, 480]
 ```
 
 **Joint mode act-from-obs:** set `action_topics: {}` (or use `--act-from-obs` on the CLI) to write
-`action[t] = observation.state[t]`. The future prediction window is then deferred to LeRobot's
-`delta_timestamps` at train time.
+`action[t] = observation.state[t+1]` — the NEXT frame's observation, baked at convert time via a
+1-frame lookahead (the episode's own last frame is dropped).
 
 ### Available configs
 

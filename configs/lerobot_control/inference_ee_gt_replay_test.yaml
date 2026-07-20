@@ -1,0 +1,64 @@
+# =============================================================================
+# LeRobot Inference Configuration — EE Cartesian Space, GT-REPLAY CORRECTNESS TEST
+# =============================================================================
+# Copy of inference_ee.yaml with ONLY the gripper post-processing neutralized
+# (gripper_factor: 1.0, wide-open gripper_min/max) so gt_replay_verifier_node can
+# compare RAW gripper values against the dataset without reversing a config-driven
+# transform. gripper_factor tunes live-inference feel and is orthogonal to
+# converter/pipeline correctness, which is what tests/smoke/scripts/
+# gt_replay_correctness_test.py validates — see claude_docs/
+# gt-replayer-correctness-test-plan.md, "Gripper comparison — no gripper_factor".
+#
+# Not for production use — use inference_ee.yaml for real inference.
+# =============================================================================
+
+model:
+  task_description: null
+
+inference_tuning:
+  act:
+    n_action_steps: null
+    temporal_ensemble_coeff: null
+  diffusion:
+    n_action_steps: 8
+    num_inference_steps: 16
+  rtc:
+    inference_delay: 10
+    queue_trigger_threshold: 50
+    execution_horizon: 12
+    max_guidance_weight: 10.0
+    prefix_attention_schedule: EXP
+
+joint_names:
+  model_joint_order: []
+  arm_mapping:
+    l: left
+    r: right
+
+arms:
+  left:
+    ros_prefix: "follower_l"
+    ee_command_topic: "/commanded_ee_left"
+    ee_obs_topic: "/ee_pose_left"
+    action_start: 0
+    action_end: 10
+    gripper_factor: 1.0    # neutralized — see header comment
+    gripper_min: -1.0      # wide-open — never clips a real gripper value
+    gripper_max: 1.0
+  right:
+    ros_prefix: "follower_r"
+    ee_command_topic: "/commanded_ee_right"
+    ee_obs_topic: "/ee_pose_right"
+    action_start: 10
+    action_end: 20
+    gripper_factor: 1.0
+    gripper_min: -1.0
+    gripper_max: 1.0
+
+cameras:
+  fps: 30.0
+  mapping:
+    "/cam_waist/image_raw/compressed": "waist"
+    "/cam_wrist_r/image_raw/compressed": "wrist_r"
+    "/cam_chest/image_raw/compressed": "chest"
+    "/cam_wrist_l/image_raw/compressed": "wrist_l"

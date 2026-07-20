@@ -1,0 +1,29 @@
+# Smoke test config — EE Cartesian, SINGLE ARM (right only), delta action encoding.
+# action_topics: {} is mandatory — action is derived from the same /ee_pose_right
+# topic used for observation, re-encoded as rot6d.
+# Same as mcap-converter-smoke-test-ee.yaml plus action_encoding: "delta" (default is
+# "absolute") — bakes a per-frame Delta(n->n+1) action instead of the next frame's
+# absolute pose. Own SCENARIOS entry ("ee_delta") because the converted dataset differs
+# from ee_abs/ee_rel's (extractor appends <data_space>-<encoding> = "ee-delta" to the
+# output path, so it cannot share their converted dataset).
+
+data_space: "ee"
+
+observation_topics:
+  right: "/ee_pose_right"
+
+action_topics: {}
+
+action_encoding: "delta"
+
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed":  "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed":  "chest"
+
+image_resolution: [640, 480]

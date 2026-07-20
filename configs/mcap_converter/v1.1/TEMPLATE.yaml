@@ -1,0 +1,74 @@
+# =============================================================================
+# mcap-convert config template (schema v1.1) — every field, both data_space
+# variants. Copy the variant you need and delete what doesn't apply. Source of
+# truth: DataConfig / validate() in mcap_converter/config/schema.py.
+# =============================================================================
+
+schema_version: "1.1"
+
+# "joint" (shared /joint_states topic) | "ee" (per-arm pose topics)
+data_space: "ee"
+
+# { arm_id -> topic }. Insertion order = concat order in observation.state/action.
+#   joint: arms usually share ONE topic, e.g. {left: "/joint_states", right: "/joint_states"}
+#   ee:    each arm has its OWN topic, e.g. {left: "/ee_pose_left", right: "/ee_pose_right"}
+observation_topics:
+  right: "/ee_pose_right"
+  # left: "/ee_pose_left"
+
+# ee: MUST be {} — action is derived from observation_topics (act-from-obs).
+# joint: {} for act-from-obs too, or one {topic, joint_order} entry per arm
+#   for a real command topic (joint_order must match the observation ordering).
+action_topics: {}
+# action_topics:
+#   right:
+#     topic: "/follower_r_forward_position_controller/commands"
+#     joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
+
+# EE ONLY (joint must leave at default "absolute" — validate() rejects otherwise).
+#   absolute (default) — action[t] = ee_pose[t+1] (next frame, rot6d). subdir: ee-abs
+#   delta    — action[t] = ee_delta_forward(ee_pose[t+1], anchor=ee_pose[t]). subdir: ee-delta
+#              (gate with the dataset_gt_replayer_node ROS2 replay tool before training)
+#   relative — reserved, not yet implemented
+# Both absolute/delta drop the episode's last frame (no next observation to use).
+action_encoding: "absolute"
+# action_encoding: "delta"
+
+# EE ONLY (joint must leave at default "quaternion"). observation.state's rotation
+# only — `action` is always rot6d regardless of this.
+#   quaternion (default) — [x,y,z,qx,qy,qz,qw,gripper]   (8 dims/arm)
+#   rot6d                — [x,y,z,r0..r5,gripper]        (10 dims/arm)
+#   axis_angle           — [x,y,z,ax,ay,az,gripper]       (7 dims/arm)
+observation_encoding: "quaternion"
+# observation_encoding: "rot6d"
+# observation_encoding: "axis_angle"
+
+# JOINT ONLY — omit for EE. Splits a shared /joint_states message by name prefix:
+# "{source}{separator}{arm}{separator}{joint_id}", e.g. "follower_r_joint1".
+# joint_names:
+#   separator: "_"
+#   source: {follower: observation}    # must include "observation"
+#   arms: {r: right, l: left}
+
+# Which JointState fields to extract. Meaningful for joint mode only (EE has its
+# own hardcoded feature schema); new configs always leave others: [].
+observation_feature_mapping: {state: "position", others: []}
+action_feature_mapping: {state: "position", others: []}
+
+# Common to both. Every camera_topics entry needs a camera_topic_mapping key.
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+  # - "/cam_wrist_l/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed": "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed": "chest"
+  # "/cam_wrist_l/image_raw/compressed": "wrist_l"
+
+image_resolution: [640, 480]   # [480, 270] for the 16:9 / 1920x1080-source variant
+
+# Never set: robot_state_topics, motor_feature_mapping — legacy-only, unused by
+# the current loader, not even a recognized key under strict loading.

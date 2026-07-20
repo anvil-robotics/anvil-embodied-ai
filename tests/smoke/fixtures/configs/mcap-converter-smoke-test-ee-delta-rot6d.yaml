@@ -1,0 +1,34 @@
+# Smoke test config — EE Cartesian, SINGLE ARM (right only), delta action encoding,
+# rot6d OBSERVATION encoding (not just the always-rot6d action).
+# action_topics: {} is mandatory — action is derived from the same /ee_pose_right
+# topic used for observation, re-encoded as rot6d.
+# Same as mcap-converter-smoke-test-ee-delta.yaml plus observation_encoding: "rot6d"
+# (default is "quaternion") — exercises the ee_delta path with a non-default
+# observation.state layout (10 dims/arm instead of 8), the case that surfaced the
+# anvil_shared.ee_transform.py encoding-hardcoding bug fixed 2026-07-19 (see
+# claude_docs/ee-delta-training-flow-gaps-fix-plan.md, "Phase A+"). Own SCENARIOS
+# entry ("ee_delta_rot6d") with its own converted dataset dir — same action_encoding
+# as ee_delta's quaternion variant, but a different observation.state shape means a
+# different on-disk dataset.
+
+data_space: "ee"
+
+observation_topics:
+  right: "/ee_pose_right"
+
+action_topics: {}
+
+action_encoding: "delta"
+observation_encoding: "rot6d"
+
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed":  "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed":  "chest"
+
+image_resolution: [640, 480]

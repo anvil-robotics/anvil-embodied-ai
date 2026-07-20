@@ -4,7 +4,13 @@ Single home for "what values of action_encoding/observation_encoding are legal, 
 they look like on disk, what dimension do they produce" — the concrete fix for the
 "hardcoded independently in writer.py and extractor.py" pattern flagged in
 ``claude_docs/ee-delta-architecture-report.md``. Nothing here is EE math (that stays in
-``anvil_shared.rotation``) — this module is converter-domain policy only.
+``anvil_shared.rotation``) — this module is the shared on-disk layout contract, consumed
+by mcap_converter (writing), anvil_trainer (dataset-shape validation), anvil_eval, and the
+ROS2 inference stack alike.
+
+Moved here (2026-07-19) from ``mcap_converter.config.encodings`` — this table describes
+the shared on-disk EE contract, not mcap-converter-private schema, so every consumer reads
+the same definitions instead of guessing from feature-name suffixes.
 """
 from __future__ import annotations
 
@@ -48,9 +54,6 @@ def encode_rotation(quat_xyzw: Any, observation_encoding: str) -> Any:
     if observation_encoding == "quaternion":
         return np.asarray(quat_xyzw, dtype=np.float64)
 
-    # Lazy import: keeps this module (and its callers) free of a hard anvil_shared
-    # dependency except when a non-quaternion encoding is actually requested — mirrors the
-    # existing lazy-import convention already used elsewhere in mcap_converter.
     from anvil_shared.rotation import matrix_to_axis_angle, matrix_to_rot6d, quat_to_matrix
 
     R = quat_to_matrix(quat_xyzw)

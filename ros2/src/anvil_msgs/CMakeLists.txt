@@ -8,6 +8,7 @@ find_package(geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CommandedEEPose.msg"
+  "msg/MockEEPose.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

@@ -5,6 +5,11 @@ arm-keyed `observation_topics`/`action_topics`, EE support (`action_encoding`,
 `observation_encoding`), and `schema_version` itself. These configs are directly usable
 with `mcap-convert` today.
 
+**New to this schema?** See `TEMPLATE_all_fields.yaml` first — every field, both
+`data_space` variants, with comments on how each behaves in each situation. The configs
+below are smaller, focused, directly-usable examples; the template is the comprehensive
+reference.
+
 | Config | data_space | Arms | Notes |
 |---|---|---|---|
 | `openarm_joint_bimanual.yaml` | `joint` | left + right | migrated replacement for `v1.0/openarm_bimanual_quest.yaml` |

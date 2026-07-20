@@ -336,7 +336,7 @@ class LeRobotWriter:
 
         # EE mode — single canonical features keyed off observation_topics arms.
         if self.config.is_ee:
-            from ..config.encodings import observation_state_names_per_arm
+            from anvil_shared.ee_encodings import observation_state_names_per_arm
 
             obs_names_per_arm = observation_state_names_per_arm(self.config.observation_encoding)
             state_names: List[str] = []

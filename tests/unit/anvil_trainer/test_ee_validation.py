@@ -6,10 +6,15 @@ Covers:
   3. EE dataset + joint_abs → DataIntegrityError
   4. Joint dataset + ee_abs → DataIntegrityError
   5. Joint dataset + joint_abs → passes
-  6. EE dataset with bad state dim (not multiple of 8) → DataIntegrityError
+  6. EE dataset with state dim mismatched for its observation_encoding → DataIntegrityError
   7. EE dataset with bad action dim (not 10 * n_arms) → DataIntegrityError
   8. Missing info.json → passes silently (logged warning)
   9. Missing dataset_root (None) → passes silently
+  10. EE dataset + ee_delta → passes; joint dataset + ee_delta → DataIntegrityError
+  11. Per-observation_encoding validation (quaternion/rot6d/axis_angle), both via the
+      dataset's conversion_config.yaml (ground truth) and via the marker-suffix fallback
+      for datasets that predate it — this is the gap-3 fix: the old check hardcoded
+      quaternion's 8-per-arm layout and silently misclassified rot6d/axis_angle datasets.
 """
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.transforms import DataIntegrityError
@@ -64,6 +70,36 @@ def _joint_state_names(n_joints: int = 8) -> list[str]:
 
 def _joint_action_names(n_joints: int = 8) -> list[str]:
     return [f"joint{i}" for i in range(n_joints)]
+
+
+_ROTATION_SUFFIXES = {
+    "quaternion": ["qx", "qy", "qz", "qw"],
+    "rot6d": ["r0", "r1", "r2", "r3", "r4", "r5"],
+    "axis_angle": ["ax", "ay", "az"],
+}
+
+
+def _ee_state_names_encoded(observation_encoding: str, n_arms: int = 1) -> list[str]:
+    """EE state names for a given observation_encoding: [x,y,z,<rot>,gripper] per arm."""
+    dims = ["x", "y", "z", *_ROTATION_SUFFIXES[observation_encoding], "gripper"]
+    prefix = ["left", "right"]
+    return [f"{prefix[arm]}_{d}" for arm in range(n_arms) for d in dims]
+
+
+def _write_conversion_config(
+    tmp_dir: Path,
+    *,
+    data_space: str,
+    action_encoding: str = "absolute",
+    observation_encoding: str = "quaternion",
+) -> None:
+    """Write a minimal conversion_config.yaml, as mcap-convert would."""
+    cfg = {
+        "data_space": data_space,
+        "action_encoding": action_encoding,
+        "observation_encoding": observation_encoding,
+    }
+    Path(tmp_dir, "conversion_config.yaml").write_text(yaml.safe_dump(cfg))
 
 
 def _make_config(dataset_root: str | Path, action_type: str) -> TrainingConfig:
@@ -148,8 +184,8 @@ class TestEEDimensionValidation:
         }
         (meta_dir / "info.json").write_text(json.dumps(info))
 
-    def test_bad_state_dim_not_multiple_of_8(self):
-        """EE state dim 9 is not a multiple of 8 → error."""
+    def test_bad_state_dim_mismatch(self):
+        """EE state dim 9 doesn't match quaternion's per-arm dim (8) → error."""
         with tempfile.TemporaryDirectory() as tmp:
             # Use EE marker names but force a bad shape
             state_names = _ee_state_names(1) + ["extra"]  # 9 names
@@ -160,7 +196,7 @@ class TestEEDimensionValidation:
                 state_names=state_names, action_names=action_names,
             )
             cfg = _make_config(tmp, "ee_rel")
-            with pytest.raises(DataIntegrityError, match="multiple of 8"):
+            with pytest.raises(DataIntegrityError, match="observation.state dim 9"):
                 cfg.validate_action_space()
 
     def test_bad_action_dim_mismatch(self):
@@ -182,6 +218,70 @@ class TestEEDimensionValidation:
         with tempfile.TemporaryDirectory() as tmp:
             _write_info(Path(tmp), _ee_state_names(2), _ee_action_names(2))
             cfg = _make_config(tmp, "ee_rel")
+            cfg.validate_action_space()  # must not raise
+
+
+# ── 10: ee_delta action_type ─────────────────────────────────────────────────
+
+class TestEEDeltaActionType:
+    def test_ee_dataset_ee_delta_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_info(Path(tmp), _ee_state_names(), _ee_action_names())
+            cfg = _make_config(tmp, "ee_delta")
+            cfg.validate_action_space()  # must not raise
+
+    def test_joint_dataset_ee_delta_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_info(Path(tmp), _joint_state_names(), _joint_action_names())
+            cfg = _make_config(tmp, "ee_delta")
+            with pytest.raises(DataIntegrityError, match="ee_delta.*joint-space"):
+                cfg.validate_action_space()
+
+
+# ── 11: observation_encoding-aware validation (gap-3 fix) ────────────────────
+
+class TestObservationEncodingAware:
+    """validate_action_space must derive the expected per-arm state dim from the
+    dataset's own observation_encoding (quaternion=8, rot6d=10, axis_angle=7), not
+    assume quaternion — the pre-existing bug this fix addresses would silently
+    misclassify rot6d/axis_angle EE datasets as joint-space."""
+
+    @pytest.mark.parametrize("encoding", ["quaternion", "rot6d", "axis_angle"])
+    def test_ee_dataset_passes_with_conversion_config(self, encoding):
+        """conversion_config.yaml declares the encoding — the ground-truth path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_info(Path(tmp), _ee_state_names_encoded(encoding), _ee_action_names())
+            _write_conversion_config(Path(tmp), data_space="ee", observation_encoding=encoding)
+            cfg = _make_config(tmp, "ee_abs")
+            cfg.validate_action_space()  # must not raise
+
+    @pytest.mark.parametrize("encoding", ["quaternion", "rot6d", "axis_angle"])
+    def test_ee_dataset_passes_via_suffix_fallback(self, encoding):
+        """No conversion_config.yaml — falls back to marker-suffix detection, which
+        must recognize rot6d/axis_angle markers too, not just quaternion's."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_info(Path(tmp), _ee_state_names_encoded(encoding), _ee_action_names())
+            cfg = _make_config(tmp, "ee_abs")
+            cfg.validate_action_space()  # must not raise
+
+    def test_state_dim_mismatched_for_declared_encoding_raises(self):
+        """conversion_config.yaml says rot6d (10/arm) but state is quaternion-shaped
+        (8/arm) → error, not a silent pass."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_info(Path(tmp), _ee_state_names_encoded("quaternion"), _ee_action_names())
+            _write_conversion_config(Path(tmp), data_space="ee", observation_encoding="rot6d")
+            cfg = _make_config(tmp, "ee_abs")
+            with pytest.raises(DataIntegrityError, match="observation.state dim"):
+                cfg.validate_action_space()
+
+    def test_conversion_config_data_space_is_ground_truth(self):
+        """conversion_config.yaml's data_space=ee is trusted directly, independent of
+        feature-name suffix detection (the design intent: read the on-disk config
+        rather than guess)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_info(Path(tmp), _ee_state_names_encoded("rot6d"), _ee_action_names())
+            _write_conversion_config(Path(tmp), data_space="ee", observation_encoding="rot6d")
+            cfg = _make_config(tmp, "ee_delta")
             cfg.validate_action_space()  # must not raise
 
 

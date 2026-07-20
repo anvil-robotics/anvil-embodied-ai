@@ -1,5 +1,11 @@
 # EE Delta-Flow Pipeline — Architecture & Design Reference
 
+> **Later removed:** the GT-replay tool (`anvil-gt-replay` / `gt_replay.py`) documented
+> throughout this report was deleted and replaced by `dataset_gt_replayer_node`, a ROS2
+> node that replays recorded actions through the real `inference_node.py` pipeline at the
+> model-output seam instead of checking the transform math in isolation. See
+> `claude_docs/gt-replay/2026-07-17-dataset-gt-replayer-plan.md`. This report is left as originally generated.
+
 **Branch:** `patrick/implement-ee-space` · **Generated:** 2026-07-16
 **Scope:** the seven items built on this branch — terminology rename, `ee_delta_forward`/`ee_delta_inverse`, mcap_converter convert-time baking, `EEDeltaTransform`/stats, the decoupled delta-mode publish loop, the fake-hardware EE extension, and the GT-replay tool.
 
@@ -15,8 +21,8 @@ This is a deep-dive reference, not a status update. It is organized shallow → 
 Every file referenced was re-read in full from the current working tree — which includes **both** commits already on this branch **and** uncommitted changes sitting on top of them (`git diff main` was used throughout, not `git diff <merge-base>`, since a large second layer of edits exists uncommitted). Line numbers are cited against that current state, not against the plan document's own (now stale) citations. Where the plan and the code disagree, both versions are stated — the deviation is never silently normalized away.
 
 Two planning documents are referenced throughout:
-- `claude_docs/ee-delta-flow-plan.md` — the design plan (rotation math, the six-item plan, terminology lock-in proposal).
-- `claude_docs/ee-space-libero-vs-production-diagnosis.md` — the failure diagnosis that motivated this branch (n-0 chunk-wise relativization + normalization-range compression as primary cause).
+- `claude_docs/ee-delta/2026-07-17-flow-plan.md` — the design plan (rotation math, the six-item plan, terminology lock-in proposal).
+- `claude_docs/ee-delta/2026-07-17-libero-vs-production-diagnosis.md` — the failure diagnosis that motivated this branch (n-0 chunk-wise relativization + normalization-range compression as primary cause).
 
 A third doc, `docs/relative_ee_failure_analysis.md`, predates both — it's an earlier, since-superseded diagnosis (different primary-cause ranking) that this branch touched only to add a two-line "historical record" header note; its actual conclusions were left unreconciled with the later diagnosis (see Level 3, anvil_eval section).
 
@@ -321,7 +327,7 @@ Fully synthetic data, no real mcap/parquet fixtures — so these tests validate 
 Rewritten this branch to branch EE vs joint for MCAP-replay eval-config generation. `_detect_arms_from_conversion_config`: EE branch reads arm names from `observation_topics` keys (EE configs use that instead of `action_topics`). `_EE_DIMS_PER_ARM = 10` (new module constant — the fourth independent hardcoding of this layout convention). `generate_inference_config`: `is_ee = action_type in ("ee_abs","ee_relative","ee_rel")` (raw, unnormalized) — **omits `ee_delta`**; an ee_delta checkpoint takes the joint branch here, likely producing a wrong-shaped generated config. Fallback EE arm order hardcodes `["right"]` only — under-tested for a hypothetical bimanual-EE-without-conversion-config case. `main()`: the old `use_delta_actions`/`delta_exclude_joints` env-var surface (`EVAL_USE_DELTA_ACTIONS`, `EVAL_DELTA_EXCLUDE_JOINTS`) is removed entirely, replaced by a single `action_type` string read from `anvil_config.json` — a real breaking simplification of the eval-ros env-var contract.
 
 ### `docs/relative_ee_failure_analysis.md`
-This is the **original** root-cause diagnosis (predates this branch), concluding the primary cause was an obs/action anchor mismatch (H1) with mixed world/body-frame representation as a secondary factor (H2) — a **different ranking** from the later, more rigorous `claude_docs/ee-space-libero-vs-production-diagnosis.md`, which puts n-0 stats-pooling/normalization-range compression as primary and downgrades anchor-mismatch to "(c) not comparable." This branch only added a two-line header note clarifying it's a historical record under the old `ee_rel` name — the actual conclusions were **not reconciled** with the newer diagnosis, so a reader relying on this file alone would get an outdated causal story.
+This is the **original** root-cause diagnosis (predates this branch), concluding the primary cause was an obs/action anchor mismatch (H1) with mixed world/body-frame representation as a secondary factor (H2) — a **different ranking** from the later, more rigorous `claude_docs/ee-delta/2026-07-17-libero-vs-production-diagnosis.md`, which puts n-0 stats-pooling/normalization-range compression as primary and downgrades anchor-mismatch to "(c) not comparable." This branch only added a two-line header note clarifying it's a historical record under the old `ee_rel` name — the actual conclusions were **not reconciled** with the newer diagnosis, so a reader relying on this file alone would get an outdated causal story.
 
 ---
 
@@ -342,7 +348,7 @@ A related but distinct concern: `patches.py`'s `_compute_ee_relative_stats` log 
 
 ---
 
-# Deviations from `claude_docs/ee-delta-flow-plan.md`
+# Deviations from `claude_docs/ee-delta/2026-07-17-flow-plan.md`
 
 1. **mcap_converter's per-arm branching structure** (`extractor.py:1357-1424`) differs from the plan's literal phrasing ("only the `action_slices.append(...)` computation branches to the delta formula"): the actual delta call happens once, after the per-arm loop, on the fully-concatenated array — functionally equivalent (since `ee_delta_forward` loops per-arm internally) but structurally different from what the plan describes, if you're line-referencing the plan while reading the diff.
 2. **No shipped config ever sets `ee_action_encoding: "delta"`.** The plan's Item 4 calls for converting a real session with the new flag; empirically, zero YAML files in the repo (shipped configs or test fixtures) set it — the delta path is exercised only from Python unit tests constructing `DataConfig` directly. **Item 4 (the actual convert+train step) has not been run/wired up on this branch.** This is the single most concrete "what's actually left to do" signal in the whole codebase.

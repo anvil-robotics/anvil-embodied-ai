@@ -75,6 +75,16 @@ def generate_launch_description():
         "Empty = disabled.",
     )
 
+    mock_ee_pose_echo_arg = DeclareLaunchArgument(
+        "mock_ee_pose_echo",
+        default_value="false",
+        description="Fake-hardware-only: true iff /ee_pose_{arm} is the mock's MockEEPose "
+        "echo (sequence-guarded against stale echoes) rather than real hardware's plain "
+        "CommandedEEPose (no guard at all — see MockEEPose.msg/ee_obs_sequence_guard.py). "
+        "Set by the deployment, not per-model config: docker-compose.fake-hardware.yml "
+        "sets this true wherever mock-robot is co-launched; real hardware leaves it false.",
+    )
+
     # Node
     inference_node = Node(
         package="lerobot_control",
@@ -94,6 +104,7 @@ def generate_launch_description():
                 "debug_image_dir": LaunchConfiguration("debug_image_dir"),
                 "monitor_enable": LaunchConfiguration("monitor_enable"),
                 "monitor_video_dir": LaunchConfiguration("monitor_video_dir"),
+                "mock_ee_pose_echo": LaunchConfiguration("mock_ee_pose_echo"),
             }
         ],
     )
@@ -111,6 +122,7 @@ def generate_launch_description():
             debug_image_dir_arg,
             monitor_enable_arg,
             monitor_video_dir_arg,
+            mock_ee_pose_echo_arg,
             inference_node,
         ]
     )

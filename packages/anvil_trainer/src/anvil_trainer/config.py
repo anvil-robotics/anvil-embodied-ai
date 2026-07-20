@@ -19,6 +19,12 @@ from datetime import datetime
 from pathlib import Path
 
 from anvil_shared.action_types import normalize_action_type
+from anvil_shared.dataset_config import (
+    read_conversion_config,
+    resolve_data_space,
+    resolve_observation_encoding,
+)
+from anvil_shared.ee_encodings import observation_state_dim_per_arm
 
 log = logging.getLogger(__name__)
 
@@ -75,14 +81,19 @@ def _parse_names(info: dict, feat_key: str) -> list[str]:
 # as valid input; only "ee_relative" is ever stored on TrainingConfig after
 # construction (TrainingConfig.__post_init__ normalizes it).
 #
-# "ee_delta" is the Delta(n-(n-1)) mechanism: per-frame anchor, baked into the
+# "ee_delta" is the Delta(n->n+1) mechanism: per-frame anchor, baked into the
 # on-disk action column at mcap_converter time (action_encoding="delta") —
 # NOT computed live like "ee_relative". No legacy alias; it's new.
 _VALID_ACTION_TYPES = {"joint_abs", "ee_abs", "ee_relative", "ee_rel", "ee_delta"}
 
 # Suffix components that appear in EE datasets but not joint datasets.
 # Feature names may be bare ("qx") or arm-prefixed ("right_qx", "left_r0").
-_EE_STATE_MARKER_SUFFIXES = {"qx", "qy", "qz", "qw"}
+# State markers cover all three observation_encoding values mcap_converter supports
+# (quaternion/rot6d/axis_angle) — this is only a FALLBACK for legacy datasets lacking
+# conversion_config.yaml; when present, that file's own data_space field is ground
+# truth (see validate_action_space). r0..r5 overlaps with the action markers below —
+# expected, since action is always rot6d regardless of observation_encoding.
+_EE_STATE_MARKER_SUFFIXES = {"qx", "qy", "qz", "qw", "r0", "r1", "r2", "r3", "r4", "r5", "ax", "ay", "az"}
 _EE_ACTION_MARKER_SUFFIXES = {"r0", "r1", "r2", "r3", "r4", "r5"}
 
 
@@ -102,6 +113,27 @@ def _has_ee_markers(names: list[str], markers: set[str]) -> bool:
     return False
 
 
+# Per-encoding state marker suffixes, for inferring observation_encoding from
+# observation.state feature names alone — used only in validate_action_space's
+# fallback path (no conversion_config.yaml on disk to read it from directly).
+_OBSERVATION_ENCODING_STATE_MARKERS = {
+    "rot6d": {"r0", "r1", "r2", "r3", "r4", "r5"},
+    "quaternion": {"qx", "qy", "qz", "qw"},
+    "axis_angle": {"ax", "ay", "az"},
+}
+
+
+def _infer_observation_encoding(state_names: list[str]) -> str:
+    """Infer observation_encoding from observation.state suffixes (fallback path only).
+
+    Defaults to "quaternion" (the schema default) if no marker matches.
+    """
+    for encoding, markers in _OBSERVATION_ENCODING_STATE_MARKERS.items():
+        if _has_ee_markers(state_names, markers):
+            return encoding
+    return "quaternion"
+
+
 @dataclass
 class TrainingConfig:
     """
@@ -115,7 +147,7 @@ class TrainingConfig:
         action_type: One of "joint_abs", "ee_abs", "ee_relative", "ee_delta"
             ("ee_rel" is a permanent legacy alias for "ee_relative", normalized
             in __post_init__ — see anvil_shared.action_types). "ee_delta" is
-            the Delta(n-(n-1)) mechanism — its action is baked on disk by
+            the Delta(n->n+1) mechanism — its action is baked on disk by
             mcap_converter (action_encoding="delta"), not computed live.
         dataset_root: Path to local dataset (for validation)
         note: Free-text note attached to this run (stored in anvil_config.json and wandb)
@@ -130,12 +162,19 @@ class TrainingConfig:
     #   "ee_relative"  — EE Cartesian rot6d, SE(3) relative to the chunk anchor
     #                    (body-frame xyz + relative rotation). Legacy alias:
     #                    "ee_rel" (normalized to "ee_relative" in __post_init__).
-    #   "ee_delta"     — EE Cartesian rot6d, per-frame Delta(n-(n-1)) baked on
+    #   "ee_delta"     — EE Cartesian rot6d, per-frame Delta(n->n+1) baked on
     #                    disk by mcap_converter (world-frame xyz + rotation,
     #                    anchored to the immediately-preceding real state, not
     #                    a fixed chunk anchor). No live transform of action.
     action_type: str = "joint_abs"
     dataset_root: str | None = None
+    # Dataset's observation.state rotation encoding — NOT a CLI flag; resolved from
+    # the dataset's own conversion_config.yaml (or inferred from feature-name suffixes
+    # as a fallback) by validate_action_space(), which runs early in train.py before
+    # any transform/stats code needs it. Defaults to "quaternion" (the schema default)
+    # until resolved, and stays "quaternion" for joint_abs runs (unused there) or if
+    # dataset_root is unset / validation was skipped.
+    observation_encoding: str = "quaternion"
     output_dir: str | None = None
     resume_job_path: str | None = None   # Job root dir (before checkpoints/)
     resume_checkpoint: str = "last"       # Checkpoint to resume from ("last" or e.g. "020000")
@@ -339,8 +378,8 @@ class TrainingConfig:
         else:
             # Resolve output_dir for NEW job:
             #   model_zoo/{data_space}-space/{dataset_name}/{run_name}
-            # ee_abs/ee_relative → ee-space/; joint_abs → joint-space/
-            data_space = "ee" if action_type in ("ee_abs", "ee_relative") else "joint"
+            # ee_abs/ee_relative/ee_delta → ee-space/; joint_abs → joint-space/
+            data_space = "ee" if action_type in ("ee_abs", "ee_relative", "ee_delta") else "joint"
 
             # Extract job_name if provided (passed through to lerobot as-is)
             job_name = None
@@ -539,12 +578,26 @@ class TrainingConfig:
         state_names = _parse_names(info, "observation.state")
         action_names = _parse_names(info, "action")
 
-        # Determine whether this is an EE dataset from feature names.
+        # Determine whether this is an EE dataset, and its observation_encoding. Prefer
+        # the dataset's own conversion_config.yaml (ground truth, written by
+        # mcap-convert) when present — correct for any observation_encoding. Fall back
+        # to feature-name-suffix detection/inference only for legacy datasets that
+        # predate that file.
+        conv_cfg = read_conversion_config(self.dataset_root, logger=log)
         has_ee_state  = _has_ee_markers(state_names,  _EE_STATE_MARKER_SUFFIXES)
         has_ee_action = _has_ee_markers(action_names, _EE_ACTION_MARKER_SUFFIXES)
-        is_ee_dataset = has_ee_state and has_ee_action
+        if conv_cfg:
+            is_ee_dataset = resolve_data_space(conv_cfg) == "ee"
+            obs_encoding = resolve_observation_encoding(conv_cfg)
+        else:
+            is_ee_dataset = has_ee_state and has_ee_action
+            obs_encoding = _infer_observation_encoding(state_names) if is_ee_dataset else "quaternion"
+        # Cache on self so patches.py/transforms.py's EE stats/transform code can use
+        # the dataset's real encoding instead of assuming quaternion (validate_action_space
+        # runs early in train.py, before any of that code needs it).
+        self.observation_encoding = obs_encoding
 
-        if self.action_type in ("ee_abs", "ee_relative"):
+        if self.is_ee:   # ee_abs | ee_relative | ee_delta — all need this check
             if not is_ee_dataset:
                 raise DataIntegrityError(
                     f"[validate_action_space] --action-type={self.action_type!r} requires an EE-space "
@@ -555,26 +608,32 @@ class TrainingConfig:
                     f"  Expected EE markers in action: {sorted(_EE_ACTION_MARKER_SUFFIXES)}\n"
                     "Hint: use --action-type=joint_abs for joint-space datasets."
                 )
-            # Also validate EE dimensions
+            # Also validate EE dimensions. Action is always rot6d (10/arm) regardless of
+            # observation_encoding (see anvil_shared.ee_encodings), so n_arms is derived
+            # from action_dim; state_dim is then checked against whichever per-arm layout
+            # observation_encoding actually uses (quaternion=8, rot6d=10, axis_angle=7).
             feat = info.get("features", {})
             state_shape = feat.get("observation.state", {}).get("shape", [])
             action_shape = feat.get("action", {}).get("shape", [])
             state_dim = state_shape[0] if state_shape else len(state_names)
             action_dim = action_shape[0] if action_shape else len(action_names)
-            if state_dim % 8 != 0 or state_dim == 0:
+            if action_dim % 10 != 0 or action_dim == 0:
                 raise DataIntegrityError(
-                    f"[validate_action_space] EE dataset has unexpected observation.state dim {state_dim} "
-                    "(expected positive multiple of 8)."
+                    f"[validate_action_space] EE dataset has unexpected action dim {action_dim} "
+                    "(expected positive multiple of 10 — action is always rot6d)."
                 )
-            n_arms = state_dim // 8
-            if action_dim != 10 * n_arms:
+            n_arms = action_dim // 10
+            expected_state_dim = n_arms * observation_state_dim_per_arm(obs_encoding)
+            if state_dim != expected_state_dim:
                 raise DataIntegrityError(
-                    f"[validate_action_space] EE dataset action dim {action_dim} != "
-                    f"10 * {n_arms} arms = {10 * n_arms}."
+                    f"[validate_action_space] EE dataset observation.state dim {state_dim} != "
+                    f"{n_arms} arms * {observation_state_dim_per_arm(obs_encoding)} "
+                    f"({obs_encoding!r} per-arm dim) = {expected_state_dim}."
                 )
             log.info(
-                "[anvil_trainer] Validated action_type=%s with EE dataset (%d arm(s))",
-                self.action_type, n_arms,
+                "[anvil_trainer] Validated action_type=%s with EE dataset "
+                "(%d arm(s), observation_encoding=%s)",
+                self.action_type, n_arms, obs_encoding,
             )
 
         elif self.action_type == "joint_abs":
@@ -584,7 +643,8 @@ class TrainingConfig:
                     f"{self.dataset_root!r} appears to be EE-space.\n"
                     f"  observation.state names: {state_names}\n"
                     f"  action names:            {action_names}\n"
-                    "Hint: use --action-type=ee_abs or --action-type=ee_relative for EE datasets."
+                    "Hint: use --action-type=ee_abs, --action-type=ee_relative, or "
+                    "--action-type=ee_delta for EE datasets."
                 )
             log.info("[anvil_trainer] Validated action_type=joint_abs with joint-space dataset.")
 

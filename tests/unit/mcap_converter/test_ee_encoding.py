@@ -5,8 +5,9 @@ Tests the headline outputs of the EE feature:
 - _define_features (writer): EE feature schema names/shapes
 - gripper propagation: identical in state and action
 - insertion-order contract: observation_topics order = concat order
-- action_encoding="delta": baked per-frame Delta(n-(n-1)) action, self-anchor
-  first-frame convention, observation.state unaffected, config validation
+- action_encoding="delta": baked per-frame Delta(n->n+1) action (forward-looking,
+  finalized via _finalize_pending_action), observation.state unaffected, config
+  validation
 - observation_encoding="quaternion"|"rot6d"|"axis_angle": observation.state
   rotation representation, independent of action_encoding
 - strict=True/False unrecognized-key handling; the "relative" reserved value
@@ -66,16 +67,26 @@ def _identity_quat():
 
 
 class TestAlignEESignals:
+    """_align_ee_signals only computes observation.state + action_abs_own (this
+    frame's own pose in action representation) — it no longer bakes "action"
+    itself, since action[t] = observation[t+1] needs the NEXT frame's pose,
+    which extract_frames()'s 1-frame lookahead supplies (see
+    TestAlignEESignalsDeltaEncoding / TestActFromObsLookahead below). These
+    tests check action_abs_own's per-frame math (rot6d encoding, gripper
+    passthrough, insertion order) independent of that lookahead wiring.
+    """
+
     def test_left_only_shapes(self):
         cfg = _make_ee_config({"left": "/ee_pose_left"})
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
 
         ee_buffers = {"left": _make_ee_buffer([0.1, 0.2, 0.3], _identity_quat(), 0.02)}
-        out, state_quat = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        out, state_quat, action_abs_own = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
         assert out is not None
+        assert "action" not in out
         assert out["observation.state"].shape == (8,)
-        assert out["action"].shape == (10,)
+        assert action_abs_own.shape == (10,)
         assert state_quat.shape == (8,)
 
     def test_left_only_state_layout(self):
@@ -85,7 +96,7 @@ class TestAlignEESignals:
 
         pos, quat, g = [0.1, 0.2, 0.3], _identity_quat(), 0.025
         ee_buffers = {"left": _make_ee_buffer(pos, quat, g)}
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        out, _, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
         state = out["observation.state"]
         np.testing.assert_allclose(state[:3], pos, atol=1e-7)
@@ -98,32 +109,31 @@ class TestAlignEESignals:
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
 
         ee_buffers = {"left": _make_ee_buffer([0.1, 0.2, 0.3], _identity_quat(), 0.01)}
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        _, _, action_abs_own = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
-        action = out["action"]
-        np.testing.assert_allclose(action[3:9], [1, 0, 0, 0, 1, 0], atol=1e-6)
+        np.testing.assert_allclose(action_abs_own[3:9], [1, 0, 0, 0, 1, 0], atol=1e-6)
 
     def test_left_only_gripper_matches_state(self):
-        """Gripper slot in state == gripper slot in action."""
+        """Gripper slot in state == gripper slot in action_abs_own."""
         cfg = _make_ee_config({"left": "/ee_pose_left"})
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
 
         ee_buffers = {"left": _make_ee_buffer([0.0, 0.0, 0.3], _identity_quat(), 0.034)}
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        out, _, action_abs_own = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
-        assert np.isclose(out["observation.state"][7], out["action"][9])
+        assert np.isclose(out["observation.state"][7], action_abs_own[9])
 
     def test_left_only_xyz_matches_state_and_action(self):
-        """xyz is identical in both state and action."""
+        """xyz is identical in both state and action_abs_own."""
         cfg = _make_ee_config({"left": "/ee_pose_left"})
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
 
         pos = [0.45, -0.12, 0.61]
         ee_buffers = {"left": _make_ee_buffer(pos, _identity_quat(), 0.0)}
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        out, _, action_abs_own = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
         np.testing.assert_allclose(out["observation.state"][:3], pos, atol=1e-7)
-        np.testing.assert_allclose(out["action"][:3], pos, atol=1e-7)
+        np.testing.assert_allclose(action_abs_own[:3], pos, atol=1e-7)
 
     def test_bimanual_shapes(self):
         cfg = _make_ee_config({"left": "/ee_pose_left", "right": "/ee_pose_right"})
@@ -133,10 +143,10 @@ class TestAlignEESignals:
             "left":  _make_ee_buffer([0.1, 0.2, 0.3], _identity_quat(), 0.01),
             "right": _make_ee_buffer([0.4, 0.5, 0.6], _identity_quat(), 0.02),
         }
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        out, _, action_abs_own = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
         assert out["observation.state"].shape == (16,)
-        assert out["action"].shape == (20,)
+        assert action_abs_own.shape == (20,)
 
     def test_bimanual_concat_insertion_order(self):
         """Concat order = observation_topics insertion order (left, right)."""
@@ -148,13 +158,13 @@ class TestAlignEESignals:
             "left":  _make_ee_buffer(pos_l, _identity_quat(), 0.01),
             "right": _make_ee_buffer(pos_r, _identity_quat(), 0.02),
         }
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        out, _, action_abs_own = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
         # Left arm occupies indices 0-7 (state) and 0-9 (action)
         np.testing.assert_allclose(out["observation.state"][:3], pos_l, atol=1e-7)
         np.testing.assert_allclose(out["observation.state"][8:11], pos_r, atol=1e-7)
-        np.testing.assert_allclose(out["action"][:3], pos_l, atol=1e-7)
-        np.testing.assert_allclose(out["action"][10:13], pos_r, atol=1e-7)
+        np.testing.assert_allclose(action_abs_own[:3], pos_l, atol=1e-7)
+        np.testing.assert_allclose(action_abs_own[10:13], pos_r, atol=1e-7)
 
     def test_reversed_order_right_then_left(self):
         """If config lists right then left, right occupies the first slots."""
@@ -166,15 +176,15 @@ class TestAlignEESignals:
             "right": _make_ee_buffer(pos_r, _identity_quat(), 0.02),
             "left":  _make_ee_buffer(pos_l, _identity_quat(), 0.01),
         }
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        out, _, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
         # Right is listed first → occupies indices 0-7
         np.testing.assert_allclose(out["observation.state"][:3], pos_r, atol=1e-7)
         np.testing.assert_allclose(out["observation.state"][8:11], pos_l, atol=1e-7)
 
     def test_missing_arm_returns_none(self):
-        """If one arm's buffer is empty, return None (skip frame) — not a (None, None)
-        tuple; the whole call returns bare None on failure."""
+        """If one arm's buffer is empty, return None (skip frame) — not a 3-tuple of
+        Nones; the whole call returns bare None on failure."""
         cfg = _make_ee_config({"left": "/ee_pose_left", "right": "/ee_pose_right"})
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
 
@@ -195,9 +205,9 @@ class TestAlignEESignals:
         cfg = _make_ee_config({"left": "/ee_pose_left"})
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
         ee_buffers = {"left": _make_ee_buffer([0.0, 0.0, 0.5], quat_90z, 0.0)}
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        _, _, action_abs_own = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
-        np.testing.assert_allclose(out["action"][3:9], expected_rot6d, atol=1e-6)
+        np.testing.assert_allclose(action_abs_own[3:9], expected_rot6d, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +285,7 @@ class TestWriterEEFeatures:
 
 
 # ---------------------------------------------------------------------------
-# action_encoding="delta" — baked per-frame Delta(n-(n-1))
+# action_encoding="delta" — baked per-frame Delta(n->n+1)
 # ---------------------------------------------------------------------------
 
 
@@ -285,11 +295,24 @@ class TestActionEncodingConfig:
         assert cfg.action_encoding == "absolute"
         assert cfg.is_action_delta is False
 
+    def test_output_subdir_ee_absolute(self):
+        cfg = _make_ee_config({"left": "/ee_pose_left"}, action_encoding="absolute")
+        assert cfg.output_subdir == "ee-abs"
+
+    def test_output_subdir_joint(self):
+        cfg = ConfigLoader.from_dict({
+            "data_space": "joint",
+            "observation_topics": {"left": "/joint_states"},
+            "camera_topics": ["/cam_chest/image_raw/compressed"],
+            "camera_topic_mapping": {"/cam_chest/image_raw/compressed": "chest"},
+        })
+        assert cfg.output_subdir == "joint-abs"
+
     def test_delta_flag_sets_is_action_delta(self):
         cfg = _make_ee_config({"left": "/ee_pose_left"}, action_encoding="delta")
         assert cfg.action_encoding == "delta"
         assert cfg.is_action_delta is True
-        assert cfg.output_subdir == "ee-delta-space"
+        assert cfg.output_subdir == "ee-delta"
 
     def test_invalid_encoding_rejected_by_validate(self):
         cfg = ConfigLoader.from_dict({
@@ -342,95 +365,86 @@ class TestActionEncodingConfig:
 
 
 class TestAlignEESignalsDeltaEncoding:
-    def test_first_frame_self_anchor_zero_delta(self):
-        """No prev_state_quat (episode's first frame) → self-anchor → zero delta,
-        identity rot6d — same invariant as ee_delta_forward's own identity test."""
-        cfg = _make_ee_config({"left": "/ee_pose_left"}, action_encoding="delta")
-        ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
-
-        ee_buffers = {"left": _make_ee_buffer([0.4, -0.2, 0.5], _identity_quat(), 0.02)}
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0, prev_state_quat=None)
-
-        assert out is not None
-        np.testing.assert_allclose(out["action"][:3], 0.0, atol=1e-6)
-        np.testing.assert_allclose(out["action"][3:9], [1, 0, 0, 0, 1, 0], atol=1e-6)
+    """action_encoding="delta" is now finalized by _finalize_pending_action, using
+    the CURRENT frame's own state_quat as anchor and the NEXT frame's
+    action_abs_own as target — a forward-looking, single-frame transform
+    (t -> t+1), not the old backward-looking (t-1 -> t) self-anchor design.
+    There is no more "first frame self-anchor, zero delta" special case —
+    every frame with a successor gets a real delta; the episode's LAST frame
+    (no successor) is dropped entirely by extract_frames()'s lookahead, not
+    handled here (see TestActFromObsLookahead)."""
 
     def test_delta_matches_ee_delta_forward_directly(self):
-        """With a real prev_state_quat, the baked action must equal calling
-        ee_delta_forward(action_abs, prev_state_quat) directly — cross-checked
-        independently of the extractor's internals."""
+        """The finalized action must equal calling ee_delta_forward(next_action_abs,
+        anchor=this_frame's_own_state_quat) directly — cross-checked independently
+        of _finalize_pending_action's internals."""
         from anvil_shared.ee_transform import ee_delta_forward
 
         cfg = _make_ee_config({"left": "/ee_pose_left"}, action_encoding="delta")
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
 
+        cur_pos, cur_quat, cur_grip = [0.1, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0], 0.01
         s = np.sin(np.pi / 4)
-        prev_pos, prev_quat, prev_grip = [0.1, 0.0, 0.3], [0.0, 0.0, s, s], 0.01
-        cur_pos, cur_quat, cur_grip = [0.15, 0.05, 0.32], [0.0, 0.0, 0.0, 1.0], 0.015
+        next_pos, next_quat, next_grip = [0.15, 0.05, 0.32], [0.0, 0.0, s, s], 0.015
 
-        prev_state_quat = np.concatenate([prev_pos, prev_quat, [prev_grip]]).astype(np.float32)
-        ee_buffers = {"left": _make_ee_buffer(cur_pos, cur_quat, cur_grip)}
-        out, _ = ext._align_ee_signals(
-            ee_buffers, target_ts=0.0, prev_state_quat=prev_state_quat
-        )
+        ee_buffers_cur = {"left": _make_ee_buffer(cur_pos, cur_quat, cur_grip)}
+        ee_buffers_next = {"left": _make_ee_buffer(next_pos, next_quat, next_grip)}
 
-        # Reconstruct what the absolute action would have been (same as absolute mode).
-        cfg_abs = _make_ee_config({"left": "/ee_pose_left"}, action_encoding="absolute")
-        ext_abs = BufferedStreamExtractor(cfg_abs, fps=30, quiet=True)
-        out_abs, _ = ext_abs._align_ee_signals(ee_buffers, target_ts=0.0)
+        frame_cur, state_quat_cur, _ = ext._align_ee_signals(ee_buffers_cur, target_ts=0.0)
+        _, _, action_abs_own_next = ext._align_ee_signals(ee_buffers_next, target_ts=1.0)
+
+        ext._finalize_pending_action(frame_cur, state_quat_cur, action_abs_own_next)
+
         expected = ee_delta_forward(
-            out_abs["action"].astype(np.float64), prev_state_quat.astype(np.float64)
+            action_abs_own_next.astype(np.float64), state_quat_cur.astype(np.float64)
         )
-
-        np.testing.assert_allclose(out["action"], expected, atol=1e-5)
+        np.testing.assert_allclose(frame_cur["action"], expected, atol=1e-5)
 
     def test_observation_state_unaffected_by_encoding(self):
         """observation.state must be byte-identical between absolute and delta
-        encoding for the same input — only `action` changes."""
+        encoding for the same input — only `action` differs (and only once finalized)."""
         pos, quat, g = [0.2, -0.1, 0.4], [0.0, 0.0, 0.0, 1.0], 0.02
         ee_buffers_abs = {"left": _make_ee_buffer(pos, quat, g)}
         ee_buffers_delta = {"left": _make_ee_buffer(pos, quat, g)}
 
         cfg_abs = _make_ee_config({"left": "/ee_pose_left"}, action_encoding="absolute")
         cfg_delta = _make_ee_config({"left": "/ee_pose_left"}, action_encoding="delta")
-        out_abs, _ = BufferedStreamExtractor(cfg_abs, fps=30, quiet=True)._align_ee_signals(
+        out_abs, _, _ = BufferedStreamExtractor(cfg_abs, fps=30, quiet=True)._align_ee_signals(
             ee_buffers_abs, target_ts=0.0
         )
-        out_delta, _ = BufferedStreamExtractor(cfg_delta, fps=30, quiet=True)._align_ee_signals(
-            ee_buffers_delta, target_ts=0.0, prev_state_quat=None
+        out_delta, _, _ = BufferedStreamExtractor(cfg_delta, fps=30, quiet=True)._align_ee_signals(
+            ee_buffers_delta, target_ts=0.0
         )
 
         np.testing.assert_allclose(
             out_abs["observation.state"], out_delta["observation.state"], atol=1e-7
         )
 
-    def test_absolute_mode_ignores_prev_state_quat(self):
-        """Passing prev_state_quat under absolute encoding must have zero effect —
-        the flag, not the argument, gates delta computation."""
+    def test_absolute_mode_action_is_next_frame_pose_unchanged(self):
+        """Under absolute encoding, _finalize_pending_action must use the next
+        frame's action_abs_own as-is (no delta transform applied)."""
         cfg = _make_ee_config({"left": "/ee_pose_left"}, action_encoding="absolute")
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
 
         pos, quat, g = [0.3, 0.1, 0.2], _identity_quat(), 0.03
-        ee_buffers = {"left": _make_ee_buffer(pos, quat, g)}
-        arbitrary_prev = np.array([9.0, 9.0, 9.0, 0.0, 0.0, 0.0, 1.0, 0.05], dtype=np.float32)
+        ee_buffers_cur = {"left": _make_ee_buffer(pos, quat, g)}
+        next_pos = [0.31, 0.11, 0.21]
+        ee_buffers_next = {"left": _make_ee_buffer(next_pos, quat, g)}
 
-        out_with_prev, _ = ext._align_ee_signals(
-            ee_buffers, target_ts=0.0, prev_state_quat=arbitrary_prev
-        )
-        out_without_prev, _ = ext._align_ee_signals(
-            ee_buffers, target_ts=0.0, prev_state_quat=None
-        )
+        frame_cur, state_quat_cur, _ = ext._align_ee_signals(ee_buffers_cur, target_ts=0.0)
+        _, _, action_abs_own_next = ext._align_ee_signals(ee_buffers_next, target_ts=1.0)
 
-        np.testing.assert_allclose(out_with_prev["action"], out_without_prev["action"], atol=1e-7)
+        ext._finalize_pending_action(frame_cur, state_quat_cur, action_abs_own_next)
+
+        np.testing.assert_allclose(frame_cur["action"], action_abs_own_next, atol=1e-7)
 
     def test_delta_anchor_stays_quaternion_regardless_of_observation_encoding(self):
         """The critical interaction this refactor introduced: action_encoding="delta"
         must produce the IDENTICAL baked action column regardless of observation_encoding
         — the delta anchor is always the quaternion-encoded state_quat, never whatever
         rotation representation observation.state happens to be written as on disk."""
-        prev_pos, prev_quat, prev_grip = [0.1, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0], 0.01
-        cur_pos, cur_quat, cur_grip = [0.2, 0.1, 0.25], [0.0, 0.7071068, 0.0, 0.7071068], 0.02
-        prev_state_quat = np.concatenate([prev_pos, prev_quat, [prev_grip]]).astype(np.float32)
+        cur_pos, cur_quat, cur_grip = [0.1, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0], 0.01
+        next_pos, next_quat, next_grip = [0.2, 0.1, 0.25], [0.0, 0.7071068, 0.0, 0.7071068], 0.02
 
         results = {}
         for obs_enc in ("quaternion", "rot6d", "axis_angle"):
@@ -440,20 +454,23 @@ class TestAlignEESignalsDeltaEncoding:
                 observation_encoding=obs_enc,
             )
             ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
-            ee_buffers = {"left": _make_ee_buffer(cur_pos, cur_quat, cur_grip)}
-            out, state_quat = ext._align_ee_signals(
-                ee_buffers, target_ts=0.0, prev_state_quat=prev_state_quat
-            )
-            results[obs_enc] = out["action"]
-            # state_quat (the anchor-for-next-frame) is always quaternion, regardless
-            # of what observation_encoding selected for the on-disk observation.state.
-            np.testing.assert_allclose(state_quat[3:7], cur_quat, atol=1e-6)
+            ee_buffers_cur = {"left": _make_ee_buffer(cur_pos, cur_quat, cur_grip)}
+            ee_buffers_next = {"left": _make_ee_buffer(next_pos, next_quat, next_grip)}
+
+            frame_cur, state_quat_cur, _ = ext._align_ee_signals(ee_buffers_cur, target_ts=0.0)
+            _, _, action_abs_own_next = ext._align_ee_signals(ee_buffers_next, target_ts=1.0)
+            ext._finalize_pending_action(frame_cur, state_quat_cur, action_abs_own_next)
+
+            results[obs_enc] = frame_cur["action"]
+            # state_quat (the anchor) is always quaternion, regardless of what
+            # observation_encoding selected for the on-disk observation.state.
+            np.testing.assert_allclose(state_quat_cur[3:7], cur_quat, atol=1e-6)
 
         np.testing.assert_allclose(results["quaternion"], results["rot6d"], atol=1e-6)
         np.testing.assert_allclose(results["quaternion"], results["axis_angle"], atol=1e-6)
 
-    def test_prev_state_quat_thread_is_quaternion_shaped_even_with_non_quaternion_obs(self):
-        """state_quat returned for threading to the next call must always be 8-dim
+    def test_state_quat_thread_is_quaternion_shaped_even_with_non_quaternion_obs(self):
+        """state_quat returned for use as the delta anchor must always be 8-dim
         quaternion-per-arm, even when observation.state itself is rot6d/axis_angle
         (10/7-dim) — proves the two are genuinely decoupled, not just numerically equal
         by coincidence in the quaternion case."""
@@ -462,7 +479,7 @@ class TestAlignEESignalsDeltaEncoding:
         )
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
         ee_buffers = {"left": _make_ee_buffer([0.1, 0.2, 0.3], _identity_quat(), 0.01)}
-        out, state_quat = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        out, state_quat, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
         assert out["observation.state"].shape == (10,)  # rot6d on disk
         assert state_quat.shape == (8,)  # anchor is always quaternion
@@ -488,7 +505,7 @@ class TestObservationEncoding:
         cfg = _make_ee_config({"left": "/ee_pose_left"}, observation_encoding="rot6d")
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
         ee_buffers = {"left": _make_ee_buffer([0.1, 0.2, 0.3], quat, 0.05)}
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        out, _, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
         assert out["observation.state"].shape == (10,)
         np.testing.assert_allclose(out["observation.state"][3:9], expected_rot6d, atol=1e-6)
@@ -504,22 +521,22 @@ class TestObservationEncoding:
         cfg = _make_ee_config({"left": "/ee_pose_left"}, observation_encoding="axis_angle")
         ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
         ee_buffers = {"left": _make_ee_buffer([0.1, 0.2, 0.3], quat, 0.05)}
-        out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+        out, _, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
 
         assert out["observation.state"].shape == (7,)
         np.testing.assert_allclose(out["observation.state"][3:6], expected_aa, atol=1e-6)
         np.testing.assert_allclose(out["observation.state"][6], 0.05, atol=1e-7)
 
     def test_action_always_rot6d_regardless_of_observation_encoding(self):
-        """action is an independent knob from observation_encoding — always rot6d."""
+        """action_abs_own is an independent knob from observation_encoding — always rot6d."""
         s = np.sin(np.pi / 4)
         quat = [0.0, 0.0, s, s]
         for obs_enc in ("quaternion", "rot6d", "axis_angle"):
             cfg = _make_ee_config({"left": "/ee_pose_left"}, observation_encoding=obs_enc)
             ext = BufferedStreamExtractor(cfg, fps=30, quiet=True)
             ee_buffers = {"left": _make_ee_buffer([0.1, 0.2, 0.3], quat, 0.05)}
-            out, _ = ext._align_ee_signals(ee_buffers, target_ts=0.0)
-            assert out["action"].shape == (10,)
+            _, _, action_abs_own = ext._align_ee_signals(ee_buffers, target_ts=0.0)
+            assert action_abs_own.shape == (10,)
 
     def test_invalid_observation_encoding_rejected_by_validate(self):
         cfg = ConfigLoader.from_dict({

@@ -98,8 +98,8 @@ Pick a **v1.1** config for any new conversion.
 
 ### v1.1 — current schema (use these)
 
-Output lands in `<output-dir>/<joint|ee>-space/<input-dir-name>/` (or `ee-delta-space/`
-for `action_encoding: delta` configs).
+Output lands in `<output-dir>/<data_space>-<encoding>/<input-dir-name>/` — `joint-abs/`,
+`ee-abs/`, or `ee-delta/` (for `action_encoding: delta` configs).
 
 | Config | Teleop mode | Arms | `observation.state` | `action` |
 |--------|-------------|------|---------------------|---------|
@@ -115,7 +115,7 @@ observation.state per arm (8 dims): [x, y, z, qx, qy, qz, qw, gripper]
 action         per arm (10 dims): [x, y, z, r0, r1, r2, r3, r4, r5, gripper]
 ```
 
-The action uses [6D rotation representation](https://arxiv.org/abs/1812.07035) for regression stability. `action_encoding: absolute` (the default) is act-from-obs — `action[t] = ee_pose[t]`; the future prediction window is applied by LeRobot's `delta_timestamps` at train time. `action_encoding: delta` instead bakes a per-frame Delta(n-(n-1)) target at convert time — see `claude_docs/mcap-converter-encoding-refactor-plan.md`. `observation_encoding` (`quaternion`/`rot6d`/`axis_angle`) independently controls `observation.state`'s rotation representation.
+The action uses [6D rotation representation](https://arxiv.org/abs/1812.07035) for regression stability. `action_encoding: absolute` (the default) is act-from-obs — `action[t] = ee_pose[t+1]`, the NEXT frame's pose, baked at convert time via a 1-frame lookahead (the episode's own last frame is dropped — no next observation to bake an action from). `action_encoding: delta` instead bakes a per-frame Delta(n->n+1) target: `action[t] = ee_delta_forward(ee_pose[t+1], anchor=ee_pose[t])` — see `claude_docs/mcap-converter-encoding-refactor-plan.md`. `observation_encoding` (`quaternion`/`rot6d`/`axis_angle`) independently controls `observation.state`'s rotation representation.
 
 ### v1.0 — legacy, pre-unification schema (not directly usable — migrate first)
 
@@ -135,21 +135,21 @@ observation.state per arm (8 dims): [x, y, z, qx, qy, qz, qw, gripper]
 action         per arm (10 dims): [x, y, z, r0, r1, r2, r3, r4, r5, gripper]
 ```
 
-The action uses [6D rotation representation](https://arxiv.org/abs/1812.07035) for regression stability. EE mode is always act-from-obs — `action[t] = ee_pose[t]` in the converter; the future prediction window is applied by LeRobot's `delta_timestamps` at train time.
+The action uses [6D rotation representation](https://arxiv.org/abs/1812.07035) for regression stability. EE mode is always act-from-obs — `action[t] = ee_pose[t+1]` (the NEXT frame's pose) in the converter, baked at convert time via a 1-frame lookahead.
 
 ---
 
-**action_from_observation** — a `v1.0`-only mechanism (`v1.0/openarm_single_quest_afo.yaml`), used when `/follower_*/commands` was not recorded: instead of reading from command topics, the converter derived actions from the follower's own joint positions shifted N frames forward in time. **No longer accepted by the current loader** (`action_from_observation`/`action_from_observation_n` have no field-level equivalent in the current schema — `dataset-config-migrate` drops them, see `configs/mcap_converter/v1.0/README.md`). For a current joint config, use empty `action_topics: {}` instead — EE mode's own act-from-obs convention (`action[t] = observation.state[t]`, future window applied by LeRobot's `delta_timestamps` at train time) already works the same way for joint mode.
+**action_from_observation** — a `v1.0`-only mechanism (`v1.0/openarm_single_quest_afo.yaml`), used when `/follower_*/commands` was not recorded: instead of reading from command topics, the converter derived actions from the follower's own joint positions shifted N frames forward in time. **No longer accepted by the current loader** (`action_from_observation`/`action_from_observation_n` have no field-level equivalent in the current schema — `dataset-config-migrate` drops them, see `configs/mcap_converter/v1.0/README.md`). For a current joint config, use empty `action_topics: {}` instead — EE mode's own act-from-obs convention (`action[t] = observation.state[t+1]`, baked at convert time via a 1-frame lookahead) already works the same way for joint mode.
 
 ```bash
-# Joint space — output: data/datasets/joint-space/my-sessions/
+# Joint space — output: data/datasets/joint-abs/my-sessions/
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
   --config configs/mcap_converter/v1.1/openarm_joint_bimanual.yaml \
   --output-dir data/datasets \
   --fps 30
 
-# EE Cartesian — output: data/datasets/ee-space/my-sessions/
+# EE Cartesian — output: data/datasets/ee-abs/my-sessions/
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
   --config configs/mcap_converter/v1.1/openarm_ee_bimanual.yaml \

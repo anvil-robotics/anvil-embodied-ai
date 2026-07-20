@@ -158,7 +158,7 @@ Examples:
     --policy.type=act --job_name=grabbing-ee-relative \\
     --action-type=ee_relative
 
-  # Train Diffusion on EE-space dataset (baked per-frame Delta, n-(n-1))
+  # Train Diffusion on EE-space dataset (baked per-frame Delta, n->n+1)
   anvil-trainer --dataset.root=data/datasets/my-ee-delta-dataset \\
     --policy.type=diffusion --job_name=grabbing-ee-delta \\
     --action-type=ee_delta
@@ -188,7 +188,7 @@ Anvil-specific flags (stripped before passing to LeRobot):
                        delta xyz + relative rotation (requires EE-space dataset).
                        "ee_rel" is accepted as a permanent legacy alias (existing
                        checkpoints persist this value and always will).
-        ee_delta     — EE Cartesian per-frame Delta(n-(n-1)), world-frame xyz +
+        ee_delta     — EE Cartesian per-frame Delta(n->n+1), world-frame xyz +
                        rotation, anchored to the immediately-preceding real state
                        (not a fixed chunk anchor). Baked into the dataset's action
                        column by mcap_converter (action_encoding="delta") at

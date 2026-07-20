@@ -176,9 +176,14 @@ def _patch_obs_state_shape_8n_to_10n(
 ) -> None:
     """Patch dataset_to_policy_features to report observation.state as 10-dim/arm.
 
-    Shared by EEAbsTransform and EERelativeTransform — both convert obs.state from
-    quaternion layout (8 dims/arm) to rot6d layout (10 dims/arm), so the policy
-    must be initialised with the correct (larger) input dimension.
+    Shared by EEAbsTransform, EEDeltaTransform, and EERelativeTransform — all three
+    convert obs.state from the dataset's on-disk ``observation_encoding`` layout
+    (quaternion=8/arm, rot6d=10/arm, axis_angle=7/arm) to rot6d layout (10 dims/arm),
+    so the policy must be initialised with the correct (post-transform) input
+    dimension. Uses ``config.observation_encoding`` (resolved by
+    ``TrainingConfig.validate_action_space()``) instead of assuming quaternion's
+    8-dim/arm layout — a rot6d-encoded dataset is already 10/arm on disk, so for it
+    this patch is a no-op (dimension doesn't change), unlike quaternion/axis_angle.
 
     When ``runner`` is provided the patch is tracked by the TransformRunner and
     will be reverted automatically by :func:`patched_lerobot`.  Without a runner
@@ -186,15 +191,18 @@ def _patch_obs_state_shape_8n_to_10n(
     """
     import lerobot.datasets.feature_utils as _feat_utils
     import lerobot.policies.factory as _factory
+    from anvil_shared.ee_encodings import observation_state_dim_per_arm
     from lerobot.datasets.feature_utils import dataset_to_policy_features as _original
+
+    per_arm_in = observation_state_dim_per_arm(config.observation_encoding)
 
     def _patched(features: dict) -> dict:
         modified = {}
         for key, feat in features.items():
             if key == "observation.state":
                 shape = feat.get("shape", ())
-                if len(shape) == 1 and shape[0] % 8 == 0:
-                    modified[key] = {**feat, "shape": (shape[0] // 8 * 10,)}
+                if len(shape) == 1 and shape[0] % per_arm_in == 0:
+                    modified[key] = {**feat, "shape": (shape[0] // per_arm_in * 10,)}
                 else:
                     modified[key] = feat
             else:
@@ -237,22 +245,25 @@ class EEAbsTransform(Transform):
 
     def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
         import torch
+        from anvil_shared.ee_encodings import observation_state_dim_per_arm
         from anvil_shared.ee_transform import ee_obs_abs_forward
 
         if "observation.state" not in item:
             return item
 
-        obs_full = item["observation.state"]  # (T, 8*n_arms) or (8*n_arms,)
+        obs_full = item["observation.state"]  # (T, state_dim_per_arm*n_arms) or (state_dim_per_arm*n_arms,)
         obs_np = obs_full.detach().cpu().numpy().astype("float64")
 
-        obs_abs_np = ee_obs_abs_forward(obs_np)  # (..., 10*n_arms)
+        obs_abs_np = ee_obs_abs_forward(
+            obs_np, observation_encoding=config.observation_encoding
+        )  # (..., 10*n_arms)
         item["observation.state"] = torch.tensor(obs_abs_np, dtype=torch.float32)
 
         if self._first_apply:
-            n_arms = obs_np.shape[-1] // 8
+            n_arms = obs_np.shape[-1] // observation_state_dim_per_arm(config.observation_encoding)
             log.info(
-                "[ee_abs] active — %d arm(s), obs (8n quat) → (10n rot6d, absolute)",
-                n_arms,
+                "[ee_abs] active — %d arm(s), obs (%s) → (10n rot6d, absolute)",
+                n_arms, config.observation_encoding,
             )
             self._first_apply = False
 
@@ -276,12 +287,13 @@ class EEDeltaTransform(Transform):
     for the baked-delta ``ee_delta`` action_type.
 
     ``action`` is NOT transformed here — it is already a baked per-frame
-    Delta(n-(n-1)) value, written to disk by mcap_converter
+    Delta(n->n+1) value, written to disk by mcap_converter
     (``action_encoding="delta"``) at convert time, one arm-relativization
-    per frame against the immediately-preceding real state. Re-applying any
-    action-side relativization here would silently double-transform every
-    sample; ``action`` passes through completely unchanged, exactly as
-    EEAbsTransform already does for its own action column.
+    per frame against THIS frame's own state, targeting the NEXT frame's
+    pose. Re-applying any action-side relativization here would silently
+    double-transform every sample; ``action`` passes through completely
+    unchanged, exactly as EEAbsTransform already does for its own action
+    column.
 
     Structurally this mirrors EEAbsTransform's obs handling (layout
     conversion only, no relativization) — NOT EERelativeTransform's obs
@@ -305,25 +317,28 @@ class EEDeltaTransform(Transform):
 
     def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
         import torch
+        from anvil_shared.ee_encodings import observation_state_dim_per_arm
         from anvil_shared.ee_transform import ee_obs_abs_forward
 
         if "observation.state" not in item:
             return item
 
-        obs_full = item["observation.state"]  # (T, 8*n_arms) or (8*n_arms,)
+        obs_full = item["observation.state"]  # (T, state_dim_per_arm*n_arms) or (state_dim_per_arm*n_arms,)
         obs_np = obs_full.detach().cpu().numpy().astype("float64")
 
-        obs_abs_np = ee_obs_abs_forward(obs_np)  # (..., 10*n_arms)
+        obs_abs_np = ee_obs_abs_forward(
+            obs_np, observation_encoding=config.observation_encoding
+        )  # (..., 10*n_arms)
         item["observation.state"] = torch.tensor(obs_abs_np, dtype=torch.float32)
-        # item["action"] is left untouched — already the baked Delta(n-(n-1))
+        # item["action"] is left untouched — already the baked Delta(n->n+1)
         # target written by mcap_converter; no double-transform here.
 
         if self._first_apply:
-            n_arms = obs_np.shape[-1] // 8
+            n_arms = obs_np.shape[-1] // observation_state_dim_per_arm(config.observation_encoding)
             log.info(
-                "[ee_delta] active — %d arm(s), obs (8n quat) → (10n rot6d, absolute); "
-                "action untouched (baked per-frame Delta(n-(n-1)) from mcap_converter)",
-                n_arms,
+                "[ee_delta] active — %d arm(s), obs (%s) → (10n rot6d, absolute); "
+                "action untouched (baked per-frame Delta(n->n+1) from mcap_converter)",
+                n_arms, config.observation_encoding,
             )
             self._first_apply = False
 
@@ -370,10 +385,11 @@ class EERelativeTransform(Transform):
         if "action" not in item or "observation.state" not in item:
             return item
 
+        obs_encoding = config.observation_encoding
         action = item["action"]                   # (horizon, 10*n_arms) or (10*n_arms,)
-        obs_full = item["observation.state"]       # (T, 8*n_arms) or (8*n_arms,)
+        obs_full = item["observation.state"]       # (T, state_dim_per_arm*n_arms) or (state_dim_per_arm*n_arms,)
 
-        # Anchor = most recent obs step (8*n_arms,)
+        # Anchor = most recent obs step (state_dim_per_arm*n_arms,)
         if obs_full.dim() > 1:
             anchor_tensor = obs_full[-1]
         else:
@@ -385,18 +401,18 @@ class EERelativeTransform(Transform):
 
         # Validate action/state dims
         try:
-            n_arms = n_arms_from_dims(anchor_np.shape[-1], action_np.shape[-1])
+            n_arms = n_arms_from_dims(anchor_np.shape[-1], action_np.shape[-1], obs_encoding)
         except ValueError as exc:
             raise DataIntegrityError(str(exc)) from exc
 
-        # Transform obs: (T, 8*n) → (T, 10*n) relative to anchor
-        obs_rel_np = ee_obs_relative_forward(obs_np, anchor_np)
+        # Transform obs: (T, state_dim_per_arm*n) → (T, 10*n) relative to anchor
+        obs_rel_np = ee_obs_relative_forward(obs_np, anchor_np, observation_encoding=obs_encoding)
 
         # Transform action: (horizon, 10*n) relative to anchor
         single = action_np.ndim == 1
         if single:
             action_np = action_np[None, :]
-        delta_np = ee_relative_forward(action_np, anchor_np)
+        delta_np = ee_relative_forward(action_np, anchor_np, observation_encoding=obs_encoding)
         if single:
             delta_np = delta_np[0]
 
@@ -405,8 +421,8 @@ class EERelativeTransform(Transform):
 
         if self._first_apply:
             log.info(
-                "[ee_relative] active — %d arm(s), obs (8n abs) → (10n rel), action (abs rot6d) → SE(3) relative",
-                n_arms,
+                "[ee_relative] active — %d arm(s), obs (%s) → (10n rel), action (abs rot6d) → SE(3) relative",
+                n_arms, obs_encoding,
             )
             self._first_apply = False
 

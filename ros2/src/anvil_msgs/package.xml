@@ -5,7 +5,11 @@
   <version>0.1.0</version>
   <description>
     Anvil custom ROS 2 message definitions.
-    CommandedEEPose — target end-effector pose + gripper opening.
+    CommandedEEPose — target end-effector pose + gripper opening. Wire-compatible
+    with anvil-workcell's copy — real hardware depends on this shape staying
+    identical across both repos.
+    MockEEPose — fake-hardware-only extension (composes CommandedEEPose + a
+    sequence counter); never used against real hardware.
   </description>
   <maintainer email="dev@anvil.bot">Anvil Robotics</maintainer>
   <license>MIT</license>

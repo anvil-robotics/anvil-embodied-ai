@@ -1,8 +1,10 @@
 """Tests for mcap_converter.cli.validate — the dataset-valid CLI.
 
 Covers the raw-frame-printing feature merged in from the former standalone
-`dataset-inspect` command (`print_raw_frames`, gated behind --print-episodes), and the
-CLI wiring (`--print-episodes 0` = old default behavior only, `> 0` also prints).
+`dataset-inspect` command (`print_raw_frames`, gated behind --print-episodes), the
+CLI wiring (`--print-episodes 0` = old default behavior only, `> 0` also prints), the
+middle-of-episode frame window (the start of an episode is usually motionless), and
+the state/action side-by-side table for the common case where both are present.
 `test_dataset()` itself (the pre-existing LeRobotDataset load/read checks) is untouched
 and not re-tested here — it requires a fully valid, video-backed LeRobotDataset, which is
 exactly what `print_raw_frames` was designed to avoid needing.
@@ -70,8 +72,8 @@ def test_print_raw_frames_labels_by_feature_name(tiny_dataset, capsys):
     ok = print_raw_frames(str(tiny_dataset), n_episodes=2, n_frames=2)
     out = capsys.readouterr().out
     assert ok
-    assert "=== Episode 0 " in out
-    assert "=== Episode 1 " in out
+    assert "Episode 0 (" in out
+    assert "Episode 1 (" in out
     assert "right_qw" in out
     assert "right_gripper" in out
 
@@ -80,7 +82,8 @@ def test_print_raw_frames_no_labels_falls_back_to_indices(tiny_dataset, capsys):
     print_raw_frames(str(tiny_dataset), n_episodes=1, n_frames=1, no_labels=True)
     out = capsys.readouterr().out
     assert "right_qw" not in out
-    assert "[ 0]" in out or "[0]" in out.replace(" ", "")
+    # state/action side-by-side table falls back to bare dim indices as labels
+    assert "0 =  0.000000" in out
 
 
 def test_print_raw_frames_caps_at_actual_episode_and_frame_counts(tiny_dataset, capsys):
@@ -88,9 +91,9 @@ def test_print_raw_frames_caps_at_actual_episode_and_frame_counts(tiny_dataset, 
     ok = print_raw_frames(str(tiny_dataset), n_episodes=50, n_frames=50)
     out = capsys.readouterr().out
     assert ok
-    assert "=== Episode 0 " in out
-    assert "=== Episode 1 " in out
-    assert "Episode 2" not in out  # only 2 episodes exist
+    assert "Episode 0 (" in out
+    assert "Episode 1 (" in out
+    assert "Episode 2 (" not in out  # only 2 episodes exist
 
 
 def test_print_raw_frames_missing_dataset_fails_gracefully():
@@ -103,20 +106,59 @@ def test_print_raw_frames_excludes_video_features(tiny_dataset, capsys):
     print_raw_frames(str(tiny_dataset), n_episodes=1, n_frames=1)
     out = capsys.readouterr().out
     assert "observation.images.chest" not in out
-    assert "vector features found: ['observation.state', 'action']" in out
+    assert "vector features: observation.state, action" in out
 
 
 def test_print_raw_frames_respects_columns_filter(tiny_dataset, capsys):
     """--columns restricts which parquet columns are READ and printed per-frame — the
     summary header (from meta/info.json, independent of the filter) still lists every
     feature the dataset makes available, so check the per-frame BLOCK specifically, not
-    the whole output."""
+    the whole output. Excluding observation.state also disables the state/action
+    side-by-side table (needs both columns present), falling back to the plain
+    per-column block for action alone."""
     ok = print_raw_frames(str(tiny_dataset), n_episodes=1, n_frames=1,
                            columns="action,frame_index,episode_index")
     out = capsys.readouterr().out
     assert ok
-    assert "  observation.state:\n" not in out  # no per-frame block for the excluded column
-    assert "right_r0" in out  # from action, which was requested
+    # The summary header (from meta/info.json) always lists every feature the dataset
+    # makes available, independent of --columns — check the per-frame BLOCK instead.
+    per_frame_section = out.split("-- row", 1)[1]
+    assert "observation.state" not in per_frame_section  # excluded column never read or printed
+    assert "right_r0" in per_frame_section  # from action, which was requested
+
+
+def test_print_raw_frames_uses_middle_of_episode(capsys, tmp_path):
+    """The start of an episode is usually motionless — spot-check windows should be
+    centered in the episode, not anchored at frame 0."""
+    import numpy as np
+    import pandas as pd
+
+    root = tmp_path / "long-episode"
+    (root / "meta").mkdir(parents=True)
+    (root / "data" / "chunk-000").mkdir(parents=True)
+    info = {
+        "codebase_version": "v3.0", "total_episodes": 1, "total_frames": 20,
+        "features": {"observation.state": {"dtype": "float32", "shape": [1], "names": ["x"]}},
+    }
+    (root / "meta" / "info.json").write_text(json.dumps(info))
+    rows = [
+        {
+            "observation.state": np.array([float(f)], dtype=np.float32),
+            "frame_index": f, "episode_index": 0, "index": f, "task_index": 0,
+            "timestamp": f / 30.0,
+        }
+        for f in range(20)
+    ]
+    pd.DataFrame(rows).to_parquet(root / "data" / "chunk-000" / "file-000.parquet")
+
+    ok = print_raw_frames(str(root), n_episodes=1, n_frames=4)
+    out = capsys.readouterr().out
+
+    assert ok
+    assert "showing rows 8..11" in out
+    assert "row 0 " not in out
+    assert "x =  8.000000" in out
+    assert "x =  11.000000" in out
 
 
 # ---------------------------------------------------------------------------

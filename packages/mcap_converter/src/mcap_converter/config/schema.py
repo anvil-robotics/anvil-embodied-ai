@@ -25,7 +25,7 @@ unrecognized-key rejection); it does not itself decide whether a value is legal.
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-from .encodings import (
+from anvil_shared.ee_encodings import (
     IMPLEMENTED_ACTION_ENCODINGS,
     VALID_ACTION_ENCODINGS,
     VALID_OBSERVATION_ENCODINGS,
@@ -61,6 +61,12 @@ RECOGNIZED_YAML_KEYS = frozenset({
     "camera_topic_mapping",
     "image_resolution",
 })
+
+# Output-subdirectory abbreviation per action_encoding value, used only by
+# DataConfig.output_subdir. "absolute" -> "abs" is the only current abbreviation;
+# other encodings (e.g. a future "relative") pass through under their own name
+# unabbreviated unless added here.
+_ACTION_ENCODING_SUBDIR_ABBREV = {"absolute": "abs"}
 
 
 class ConfigurationError(Exception):
@@ -200,11 +206,13 @@ class DataConfig:
     observation_topics: Dict[str, str] = field(default_factory=dict)
     action_topics: Dict[str, ActionTopicSpec] = field(default_factory=dict)
 
-    # EE mode only: "absolute" (default, byte-identical to pre-existing behavior) writes
-    # the action column as the absolute EE pose (rot6d), same as observation.state's pose
-    # just re-encoded. "delta" bakes a per-frame Delta(n-(n-1)) target instead:
-    # action[t] = ee_delta_forward(pose[t], pose[t-1]) — world-frame, computed once at
-    # convert time, never recomputed during training. "relative" is reserved for future use
+    # EE mode only: "absolute" (default) writes the action column as the NEXT frame's
+    # absolute EE pose (rot6d) — action[t] = pose[t+1], the act-from-obs convention (there
+    # is no command topic in EE mode). "delta" bakes a per-frame Delta(n->n+1) target
+    # instead: action[t] = ee_delta_forward(pose[t+1], anchor=pose[t]) — world-frame,
+    # computed once at convert time (via extract_frames()'s 1-frame lookahead), never
+    # recomputed during training. Both drop the episode's own last frame (no next
+    # observation to bake an action from). "relative" is reserved for future use
     # and is not yet implemented (see IMPLEMENTED_ACTION_ENCODINGS / validate()).
     # observation.state is unaffected by this flag either way. Deliberately a scalar field
     # on the existing "ee" data_space, not a new data_space value, so is_ee and every
@@ -250,7 +258,7 @@ class DataConfig:
 
     @property
     def is_action_delta(self) -> bool:
-        """True when EE mode bakes a per-frame Delta(n-(n-1)) action at convert time.
+        """True when EE mode bakes a per-frame Delta(n->n+1) action at convert time.
 
         Renamed from is_ee_delta for consistency with the renamed action_encoding field.
         """
@@ -258,15 +266,19 @@ class DataConfig:
 
     @property
     def output_subdir(self) -> str:
-        """Canonical <space>-space/ output directory name for this config.
+        """Canonical output directory name for this config: "<data_space>-<encoding>",
+        e.g. "ee-abs", "ee-delta", "joint-abs".
 
         Single source of truth for convert.py's output path. A future action_encoding
-        value that needs its own subdirectory is a one-line addition HERE, not a new
-        branch in convert.py.
+        value that needs its own subdirectory is a one-line addition to
+        _ACTION_ENCODING_SUBDIR_ABBREV HERE, not a new branch in convert.py. Joint mode
+        has no action_encoding concept of its own (EE-only field) and is always
+        "-abs" — there's no joint-space equivalent of "delta"/"relative" yet.
         """
-        if self.is_action_delta:
-            return "ee-delta-space"
-        return f"{self.data_space}-space"
+        if self.data_space != "ee":
+            return f"{self.data_space}-abs"
+        abbrev = _ACTION_ENCODING_SUBDIR_ABBREV.get(self.action_encoding, self.action_encoding)
+        return f"ee-{abbrev}"
 
     @property
     def arms(self) -> List[str]:

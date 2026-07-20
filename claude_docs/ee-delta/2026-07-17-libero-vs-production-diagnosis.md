@@ -1,5 +1,11 @@
 # LIBERO validated EE-space vs. production `ee_rel`: implementation diagnosis
 
+> **Later removed:** the minimal GT-replay tool proposed and built in Part 4 below
+> (`anvil-gt-replay` / `gt_replay.py`) was deleted and replaced by
+> `dataset_gt_replayer_node`, a ROS2 node that replays recorded actions through the real
+> `inference_node.py` pipeline at the model-output seam. See
+> `claude_docs/gt-replay/2026-07-17-dataset-gt-replayer-plan.md`. This diagnosis is left as originally written.
+
 **Scope.** Diagnosis only, no fixes. Compares `patrick/sim-valid-dev` (LIBERO, 3
 confirmed-successful conditions) against `patrick/implement-ee-space` (production,
 stalled on real hardware). Every finding below is bucketed:

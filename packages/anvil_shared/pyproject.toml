@@ -9,9 +9,12 @@ authors = [
     { name = "Anvil Robotics", email = "dev@anvil.bot" }
 ]
 
-# Intentionally dep-free: importable from any context (offline eval, ROS nodes,
-# training) without pulling in torch / lerobot.
-dependencies = []
+# Deliberately kept minimal: importable from any context (offline eval, ROS nodes,
+# training) without pulling in torch / lerobot. pyyaml is the sole exception — it's
+# already a transitive dependency everywhere this package is used.
+dependencies = [
+    "pyyaml~=6.0",
+]
 
 [project.optional-dependencies]
 dev = [

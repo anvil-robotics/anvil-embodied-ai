@@ -113,6 +113,24 @@ arms:
 # Optional: coordinate frame for CommandedEEPose headers. Default: "world"
 # frame_id: "world"
 
+# Optional: consecutive stale/repeated /ee_pose_{arm} reads (per arm, judged by
+# CommandedEEPose.sequence not advancing) before an ERROR-level fault is
+# logged. Every stale read is logged at WARNING and the previous anchor is
+# reused regardless; this threshold only governs when a run of stale reads
+# escalates to a fault (a real degraded feed, not a one-off blip). Default: 10.
+# ee_obs_stale_threshold: 10
+
+# Optional: consecutive stale reads (per arm) before that arm's sequence guard
+# gives up entirely and falls back to accepting every read unconditionally —
+# restoring pre-guard "keep only latest" behavior with no staleness protection
+# for it, for the rest of the session (sticky, never re-arms). Exists because a
+# publisher that predates CommandedEEPose.sequence (e.g. an un-updated real
+# controller) sends the field's default (0) forever, which would otherwise
+# look identical to a stuck connection and freeze the observation feed
+# permanently. Deliberately well above ee_obs_stale_threshold, so the fault
+# above fires first as an early warning. Default: 50.
+# ee_obs_degraded_after_streak: 50
+
 # -----------------------------------------------------------------------------
 # Camera Configuration
 # -----------------------------------------------------------------------------

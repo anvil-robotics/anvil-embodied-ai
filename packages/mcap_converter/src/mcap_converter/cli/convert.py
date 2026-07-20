@@ -322,7 +322,7 @@ def convert_session(
             from ``config`` itself, not copied from this path — see the save-config note
             below)
         vcodec: Video codec for encoding ("h264", "hevc", or "libsvtav1")
-        cli_act_from_obs: Force ``action[t] = observation.state[t]`` even when
+        cli_act_from_obs: Force ``action[t] = observation.state[t+1]`` even when
             ``action_topics`` are configured (joint mode only; EE mode is
             always act-from-obs).
     """
@@ -720,7 +720,7 @@ examples:
   # Joint space bimanual (Quest teleop, action from command topics)
   mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/v1.1/openarm_joint_bimanual.yaml
 
-  # Joint space with action[t] = obs[t] (future window via delta_timestamps at train time)
+  # Joint space with action[t] = obs[t+1] (baked at convert time, 1-frame lookahead)
   mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/v1.1/openarm_joint_bimanual.yaml --act-from-obs
 
   # Common options
@@ -798,9 +798,10 @@ examples:
     parser.add_argument(
         "--act-from-obs", action="store_true",
         help=(
-            "force action[t] = observation.state[t] even when action_topics are "
-            "configured (joint mode only; EE mode is always act-from-obs). The "
-            "future window is applied by LeRobot delta_timestamps at train time."
+            "force action[t] = observation.state[t+1] even when action_topics are "
+            "configured (joint mode only; EE mode is always act-from-obs). Baked at "
+            "convert time via a 1-frame lookahead; the episode's own last frame is "
+            "dropped (no next observation to bake an action from)."
         ),
     )
     parser.add_argument(
@@ -890,12 +891,12 @@ examples:
         exit(1)
 
     # Resolve output path: --output-path wins; otherwise
-    # <output-dir>/<data_space>-space/<input-dir-name>/
-    # The <data_space>-space/ subdir (ee-space/ or joint-space/) splits EE and
-    # joint datasets cleanly when both are converted from the same raw sessions.
-    # action_encoding="delta" gets its own "ee-delta-space/" subdir so baked-delta
-    # datasets never land next to absolute-action ee-space/ datasets on disk. See
-    # DataConfig.output_subdir (schema.py) — the single source of truth for this decision.
+    # <output-dir>/<data_space>-<encoding>/<input-dir-name>/
+    # The subdir (ee-abs/, ee-delta/, joint-abs/) splits datasets by data_space AND
+    # action_encoding, so baked-delta datasets never land next to absolute-action
+    # ones on disk, and EE/joint stay cleanly separated when both are converted from
+    # the same raw sessions. See DataConfig.output_subdir (schema.py) — the single
+    # source of truth for this decision.
     space_suffix = config.output_subdir
     input_name = Path(args.input_dir.rstrip("/")).name
     if args.output_path:

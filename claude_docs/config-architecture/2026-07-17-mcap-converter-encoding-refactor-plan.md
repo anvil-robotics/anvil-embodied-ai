@@ -2,9 +2,20 @@
 
 ## Status
 
-**Design only — nothing in this document has been implemented.** Written in response to
+**Update 2026-07-20**: the core scope (items 1, 3, 5 — `action_encoding` rename,
+all three `observation_encoding` modes actually implemented, explicit schema
+versioning) is done and verified — confirmed via `mcap_converter/config/schema.py`,
+`versioning.py`, and the encoding table (since relocated to
+`anvil_shared/ee_encodings.py`, see
+`claude_docs/config-architecture/2026-07-20-dataset-config-consolidation-plan.md`).
+Item 2's cross-package consolidation and item 4's deferred `anvil_eval_ros/cli.py`
+piece are the subject of that same follow-up doc, which also supersedes the
+"NOT touched this pass" framing below.
+
+**Original status (left for historical context): Design only — nothing in this
+document has been implemented.** Written in response to
 three pieces of feedback on the current `ee_action_encoding`/`is_ee_delta` design (see
-`claude_docs/ee-delta-architecture-report.md`, "Known bugs, gaps, and rough edges" #12,
+`claude_docs/ee-delta/2026-07-16-architecture-report.md`, "Known bugs, gaps, and rough edges" #12,
 #16, #19 for the rough edges this plan directly addresses). Scope for the implementation
 pass, as decided:
 
@@ -309,7 +320,7 @@ MIGRATIONS: Tuple[VersionMigration, ...] = (
                 old_key="ee_action_encoding",
                 new_key="action_encoding",
                 reason="renamed for generality (joint-space encoding support planned) — "
-                       "see claude_docs/mcap-converter-encoding-refactor-plan.md",
+                       "see claude_docs/config-architecture/2026-07-17-mcap-converter-encoding-refactor-plan.md",
             ),
         ),
         custom=_migrate_legacy_v1_0_shape,  # main's real structural differences — see below
@@ -874,7 +885,7 @@ input handling rather than silent wrong output):
     output is unambiguous, no division needed.
   - `angle ≈ π`: `sin(angle) ≈ 0`, so the skew-symmetric extraction above is a 0/0 division
     — this is exactly the numerical regime the diagnosis doc
-    (`claude_docs/ee-space-libero-vs-production-diagnosis.md`, §1.3) flagged as a historical
+    (`claude_docs/ee-delta/2026-07-17-libero-vs-production-diagnosis.md`, §1.3) flagged as a historical
     axis-angle suspect on the LIBERO side (there, the concern was later disproven and turned
     out to be about a different representation's discontinuity — but the underlying
     "θ≈π needs a different extraction formula" fact about axis-angle itself is real and

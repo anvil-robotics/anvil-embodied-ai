@@ -581,7 +581,7 @@ class BufferedStreamExtractor:
             fps: Frame rate for buffer size calculation (default: 30)
             quiet: If True, suppress all print output (default: False)
             progress_callback: Called with frames_yielded count after each frame
-            cli_act_from_obs: When True, force ``action[t] = observation.state[t]``
+            cli_act_from_obs: When True, force ``action[t] = observation.state[t+1]``
                 regardless of whether ``action_topics`` are configured (joint mode
                 only; EE mode is always effectively act-from-obs).
         """
@@ -617,7 +617,7 @@ class BufferedStreamExtractor:
 
     @property
     def act_from_obs(self) -> bool:
-        """Whether ``action[t] = observation.state[t]`` (no command-topic source).
+        """Whether ``action[t] = observation.state[t+1]`` (no command-topic source).
 
         True when the CLI flag forces it or when action_topics is empty. In EE
         mode this is structurally true because action_topics is always empty,
@@ -734,12 +734,12 @@ class BufferedStreamExtractor:
                     if self._cli_act_from_obs and self.config.action_command_topics:
                         print(
                             "\n[ACTION SOURCE] --act-from-obs override: "
-                            "action[t] = observation.state[t]; command topics ignored.\n"
+                            "action[t] = observation.state[t+1]; command topics ignored.\n"
                         )
                     else:
                         print(
                             "\n[ACTION SOURCE] action_topics empty: "
-                            "action[t] = observation.state[t]\n"
+                            "action[t] = observation.state[t+1]\n"
                         )
             else:
                 action_topic_set = set(self.config.action_command_topics.keys())
@@ -754,13 +754,17 @@ class BufferedStreamExtractor:
         cursor = 0  # Index of frame to process next
         frames_yielded = 0
         next_yield_ts = None  # Next target timestamp for subsampling
-        # EE delta-encoding only: the immediately-preceding frame's absolute, ALWAYS
-        # quaternion-encoded state (never observation.state as actually written to disk,
-        # which may be rot6d/axis_angle — see _align_ee_signals), carried forward as the
-        # anchor for the NEXT frame's baked delta. None on the first frame of the episode
-        # (self-anchor — see _align_ee_signals). Reset per extract_frames call, i.e. per
-        # episode.
-        prev_ee_state_quat: Optional[np.ndarray] = None
+
+        # 1-frame lookahead: action[t] = observation[t+1] (EE mode always; joint
+        # mode when act_from_obs). A frame is held back (pending_frame) until the
+        # NEXT frame's own pose (action_abs_own) is known, which is spliced in as
+        # this held-back frame's "action" before it's finally yielded. The last
+        # frame of each episode has no successor and is dropped (see end of this
+        # generator). Joint mode with a real action source needs none of this —
+        # action is already baked into the frame at alignment time.
+        needs_lookahead = self.config.is_ee or self.act_from_obs
+        pending_frame: Optional[Dict[str, Any]] = None
+        pending_state_quat: Optional[np.ndarray] = None  # EE delta anchor for pending_frame
 
         for message in reader.read_messages(topics=all_topics):
             topic = message.channel.topic
@@ -811,17 +815,23 @@ class BufferedStreamExtractor:
 
                 # Subsampling: only yield if this frame is at or past the next target timestamp
                 if frame_ts >= next_yield_ts:
-                    frame, state_quat = self._align_frame_at_cursor(
+                    frame, state_quat, action_abs_own = self._align_frame_at_cursor(
                         camera_buffers, joint_buffers, ee_buffers,
                         cursor, main_cam, task, resize_image,
-                        prev_ee_state_quat=prev_ee_state_quat,
                     )
                     if frame is not None:
-                        yield frame
-                        frames_yielded += 1
                         next_yield_ts += self.frame_interval
-                        if self.config.is_ee:
-                            prev_ee_state_quat = state_quat
+                        if needs_lookahead:
+                            if pending_frame is not None:
+                                self._finalize_pending_action(
+                                    pending_frame, pending_state_quat, action_abs_own
+                                )
+                                yield pending_frame
+                                frames_yielded += 1
+                            pending_frame, pending_state_quat = frame, state_quat
+                        else:
+                            yield frame
+                            frames_yielded += 1
 
                 cursor += 1
 
@@ -853,21 +863,34 @@ class BufferedStreamExtractor:
         while cursor < len(camera_buffers[main_cam]):
             frame_ts = camera_buffers[main_cam][cursor][0]
             if next_yield_ts is None or frame_ts >= next_yield_ts:
-                frame, state_quat = self._align_frame_at_cursor(
+                frame, state_quat, action_abs_own = self._align_frame_at_cursor(
                     camera_buffers, joint_buffers, ee_buffers,
                     cursor, main_cam, task, resize_image,
-                    prev_ee_state_quat=prev_ee_state_quat,
                 )
                 if frame is not None:
-                    yield frame
-                    frames_yielded += 1
-                    if self.config.is_ee:
-                        prev_ee_state_quat = state_quat
                     if next_yield_ts is not None:
                         next_yield_ts += self.frame_interval
-                    if self.progress_callback:
-                        self.progress_callback(frames_yielded)
+                    if needs_lookahead:
+                        if pending_frame is not None:
+                            self._finalize_pending_action(
+                                pending_frame, pending_state_quat, action_abs_own
+                            )
+                            yield pending_frame
+                            frames_yielded += 1
+                            if self.progress_callback:
+                                self.progress_callback(frames_yielded)
+                        pending_frame, pending_state_quat = frame, state_quat
+                    else:
+                        yield frame
+                        frames_yielded += 1
+                        if self.progress_callback:
+                            self.progress_callback(frames_yielded)
             cursor += 1
+
+        # Last frame of each episode has no successor to borrow an action from —
+        # drop it (standard boundary rule for this technique: N frames -> N-1 pairs).
+        if needs_lookahead and pending_frame is not None and not self.quiet:
+            print("[BufferedStream] Dropping final frame of episode (no next observation for action)")
 
         if not self.quiet:
             print(f"[BufferedStream] [OK] Extracted {frames_yielded} frames total")
@@ -909,6 +932,35 @@ class BufferedStreamExtractor:
                     else:
                         print(f"  -> No action data parsed from joint_states (no leader prefix matched).")
 
+    def _finalize_pending_action(
+        self,
+        pending_frame: Dict[str, Any],
+        pending_state_quat: Optional[np.ndarray],
+        action_abs_own: np.ndarray,
+    ) -> None:
+        """Splice the NEXT frame's own pose into ``pending_frame`` as its
+        ``action`` (1-frame lookahead: action[t] = observation[t+1]).
+
+        - EE mode, ``action_encoding="delta"``: ``action_abs_own`` (the next
+          frame's own absolute pose) is transformed relative to
+          ``pending_state_quat`` (``pending_frame``'s own quaternion state) via
+          ``ee_delta_forward`` — the SE(3) transform from ``pending_frame``'s
+          pose to the next frame's pose, i.e. the motion to execute to get from
+          here to there. A genuine single-frame, forward-looking delta.
+        - EE mode, ``action_encoding="absolute"``, or joint-mode act-from-obs:
+          ``action_abs_own`` is used as-is — the next frame's own pose/state,
+          directly.
+
+        Mutates ``pending_frame`` in place by setting its ``"action"`` key.
+        """
+        if self.config.is_ee and self.config.is_action_delta:
+            from anvil_shared.ee_transform import ee_delta_forward
+
+            action_out = ee_delta_forward(action_abs_own, pending_state_quat)
+        else:
+            action_out = action_abs_own
+        pending_frame["action"] = action_out.astype(np.float32)
+
     def _align_frame_at_cursor(
         self,
         camera_buffers: Dict[str, deque],
@@ -918,8 +970,7 @@ class BufferedStreamExtractor:
         main_cam: str,
         task: str,
         resize_func,
-        prev_ee_state_quat: Optional[Any] = None,
-    ) -> Tuple[Optional[Dict[str, Any]], Optional[np.ndarray]]:
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[np.ndarray], Optional[np.ndarray]]:
         """
         Align frame at cursor position using entire buffer for matching.
 
@@ -931,17 +982,26 @@ class BufferedStreamExtractor:
             main_cam: Name of main camera
             task: Task name
             resize_func: Function to resize images
-            prev_ee_state_quat: EE delta-encoding only — the immediately-preceding
-                frame's absolute, quaternion-encoded state, forwarded to
-                ``_align_ee_signals`` as the delta anchor. ``None`` on an
-                episode's first frame (self-anchor). Unused outside EE mode.
 
         Returns:
-            ``(frame, state_quat)`` — ``frame`` is the aligned frame dictionary, or
-            ``None`` if not all data available. ``state_quat`` is the quaternion-encoded
-            EE state for this frame (EE mode only, else ``None``) — not part of the frame
-            dict itself, since it's not a dataset feature; callers thread it back in as
-            the next call's ``prev_ee_state_quat``.
+            ``(frame, state_quat, action_abs_own)``. ``frame`` is the aligned frame
+            dictionary, or ``None`` if not all data available.
+
+            For joint mode with a real action source (not act-from-obs): ``frame``
+            already has ``action`` baked in; ``state_quat``/``action_abs_own`` are
+            both ``None`` (no 1-frame lookahead needed — see ``extract_frames``).
+
+            For joint mode act-from-obs and EE mode (always act-from-obs or
+            baked-delta — both action-encodings need the NEXT frame's pose):
+            ``frame`` has NO ``action`` key yet. ``action_abs_own`` is this frame's
+            own pose in "action" representation (used as the NEXT-frame action
+            target for whichever frame preceded this one). ``state_quat`` is EE-only
+            (``None`` for joint act-from-obs) — this frame's own quaternion state,
+            used as ITS OWN delta anchor once it, in turn, becomes the held-back
+            frame. The caller (``extract_frames``) is responsible for the 1-frame
+            lookahead: holding a frame back until the next one's
+            ``action_abs_own``/``state_quat`` are known, splicing in ``action``,
+            then yielding — and dropping the final unpaired frame of each episode.
         """
         # Get main camera frame at cursor
         main_ts, main_img = camera_buffers[main_cam][cursor]
@@ -957,7 +1017,7 @@ class BufferedStreamExtractor:
 
             # If any camera has no data, skip this frame
             if len(buffer) == 0:
-                return None, None
+                return None, None, None
 
             # Search entire buffer for nearest timestamp match
             nearest_idx = self._find_nearest_in_buffer(buffer, main_ts)
@@ -966,30 +1026,31 @@ class BufferedStreamExtractor:
                 resized_img = resize_func(img, self.target_size)
                 frame[f"observation.images.{cam_name}"] = resized_img
             else:
-                return None, None
+                return None, None, None
 
         # Align non-camera signals — mode-specific
         state_quat: Optional[np.ndarray] = None
+        action_abs_own: Optional[np.ndarray] = None
         if self.config.is_ee:
-            result = self._align_ee_signals(
-                ee_buffers, main_ts, prev_state_quat=prev_ee_state_quat
-            )
+            result = self._align_ee_signals(ee_buffers, main_ts)
             if result is None:
-                return None, None
-            signals, state_quat = result
+                return None, None, None
+            signals, state_quat, action_abs_own = result
         elif joint_buffers:
             signals = self._align_joint_states(
                 joint_buffers, main_ts, act_from_obs=self.act_from_obs
             )
+            if signals is not None and self.act_from_obs:
+                action_abs_own = signals["observation.state"]
         else:
             signals = None
 
         if signals is None:
-            return None, None
+            return None, None, None
         frame.update(signals)
 
         frame["task"] = task
-        return frame, state_quat
+        return frame, state_quat, action_abs_own
 
     def _align_joint_states(
         self,
@@ -1007,10 +1068,12 @@ class BufferedStreamExtractor:
         Args:
             joint_buffers: Joint state buffers keyed by (role, robot)
             target_ts: Target timestamp for observation alignment
-            act_from_obs: When True, ``action[t] = observation.state[t]`` per arm
+            act_from_obs: When True, ``action[t] = observation.state[t+1]`` per arm
                 — used when ``action_topics`` is empty or ``--act-from-obs`` is
-                set. The future window is applied at train time by
-                ``delta_timestamps``.
+                set. This function only returns ``observation.state`` in that
+                case (no ``action`` key) — the caller (``extract_frames()``)
+                supplies ``action`` via a 1-frame lookahead once the next
+                frame's observation is known.
 
         Returns:
             Dictionary with aligned joint state features, or None if data missing
@@ -1056,22 +1119,27 @@ class BufferedStreamExtractor:
             action_data[robot] = {"pos": pos}
 
         # Unified act-from-obs rule: when no action source is configured (or
-        # the CLI forces it), set action[t] = observation.state[t] per arm.
-        # The future window is later applied by LeRobot's delta_timestamps at
-        # training time.
-        if act_from_obs and obs_data:
-            action_data = {robot: {"pos": v["pos"].copy()} for robot, v in obs_data.items()}
+        # the CLI forces it), action[t] = observation.state[t+1] — the NEXT
+        # frame's observation, not this one. This function only supplies
+        # observation.state here; "action" is intentionally left absent from
+        # the result. The streaming loop in extract_frames() holds this frame
+        # back (1-frame lookahead) and splices in "action" once the next
+        # frame's own observation.state is known, dropping the final
+        # unpaired frame of each episode (no next observation to borrow).
+        if act_from_obs:
+            action_data = {}
 
         # Check if multi-robot (has named robots like 'left', 'right')
         robots = sorted([r for r in set(obs_data.keys()) | set(action_data.keys()) if r])
 
         if robots:
-            # Multi-robot: require ALL robots to have both observation and action data
-            # to ensure consistent output shape (e.g., 16 = 8 left + 8 right)
+            # Multi-robot: require observation for every robot (always), and
+            # action for every robot too UNLESS act_from_obs (action is
+            # deliberately absent in that case — see above).
             for r in robots:
                 if r not in obs_data:
                     return None  # Observation data not yet available for this arm
-                if r not in action_data:
+                if not act_from_obs and r not in action_data:
                     return None  # Action data not yet available for this arm
 
             # Multi-robot: concatenate in sorted order (left, right)
@@ -1096,10 +1164,11 @@ class BufferedStreamExtractor:
                 if obs_efforts:
                     result["observation.effort"] = np.concatenate(obs_efforts)
 
-            # Concatenate action
-            action_positions = [action_data[r]["pos"] for r in robots]
-            if action_positions:
-                result["action"] = np.concatenate(action_positions)
+            # Concatenate action (absent entirely when act_from_obs)
+            if not act_from_obs:
+                action_positions = [action_data[r]["pos"] for r in robots]
+                if action_positions:
+                    result["action"] = np.concatenate(action_positions)
 
             return result
         else:
@@ -1115,7 +1184,7 @@ class BufferedStreamExtractor:
                     if obs_data[""]["eff"] is not None:
                         result["observation.effort"] = obs_data[""]["eff"]
 
-            if "" in action_data:
+            if not act_from_obs and "" in action_data:
                 result["action"] = action_data[""]["pos"]
 
             return result
@@ -1475,50 +1544,46 @@ class BufferedStreamExtractor:
         self,
         ee_buffers: Dict[str, deque],
         target_ts: float,
-        prev_state_quat: Optional[np.ndarray] = None,
-    ) -> Optional[Tuple[Dict[str, Any], np.ndarray]]:
+    ) -> Optional[Tuple[Dict[str, Any], np.ndarray, np.ndarray]]:
         """Align per-arm EE pose buffers to the camera frame at ``target_ts``.
 
         Builds the unified canonical features by concatenating per-arm slices in
         the insertion order of ``config.observation_topics``::
 
             observation.state  = concat([xyz, <rotation encoding>, gripper] per arm)
-            action             = concat([xyz, rot6d, gripper]   per arm)     (10 * n_arms,)
 
         ``observation.state``'s rotation component is written in
         ``config.observation_encoding`` (quaternion/rot6d/axis_angle — see
-        ``config/encodings.py`` for the per-encoding layout table). ``action`` is always
-        rot6d regardless — an independent knob from ``observation_encoding``.
+        ``config/encodings.py`` for the per-encoding layout table).
 
-        ``action`` is the absolute EE pose (re-encoded to rot6d) by default
-        (``config.action_encoding == "absolute"``). When ``config.is_action_delta``,
-        ``action`` instead becomes a baked per-frame Delta(n-(n-1)) target:
-        ``ee_delta_forward(action_abs, anchor)``, where ``anchor`` is
-        ``prev_state_quat`` — the immediately-preceding frame's absolute,
-        QUATERNION-encoded state (never the ``observation_encoding``-selected value
-        actually written to disk: ``ee_delta_forward``/``n_arms_from_dims`` hardcode an
-        8-dim-per-arm quaternion state layout, so the delta anchor must stay quaternion
-        regardless of what ``observation.state`` is encoded as on disk) — or, on an
-        episode's first frame (``prev_state_quat is None``), the CURRENT frame's own
-        quaternion state (self-anchor, yielding a zero delta; matches the identity-delta
-        invariant asserted by ``test_identity_state_identity_action_zero_delta`` and its
-        ``ee_delta_forward`` analogue — no LIBERO precedent exists for this boundary
-        case, since LIBERO's ``native`` never differences two states).
+        Does NOT compute ``action`` — EE mode's action is always derived from the
+        NEXT frame's pose (act-from-obs: action[t] = pose[t+1]; delta: action[t] =
+        transform from pose[t] to pose[t+1]), which isn't known yet at this frame's
+        own alignment time. The streaming loop in ``extract_frames()`` holds this
+        frame back (1-frame lookahead) and splices in ``action`` once the next
+        frame's own pose is known, using ``action_abs_own`` (this frame's own
+        absolute pose, rot6d-encoded — always rot6d regardless of
+        ``observation_encoding``, an independent knob) as the target for the
+        PRECEDING held-back frame, and ``state_quat`` as ITS OWN delta anchor once
+        it, in turn, becomes the held-back frame.
 
-        Returns ``(frame, state_quat)`` where ``state_quat`` is ALWAYS quaternion-encoded
-        (regardless of ``observation_encoding``) — it is NOT part of the dataset schema;
-        callers thread it back in as the next call's ``prev_state_quat`` rather than
-        smuggling it into ``frame`` and stripping it out later, so nothing downstream can
-        accidentally treat it as a real feature.
+        Returns ``(frame, state_quat, action_abs_own)``:
+          - ``frame``: ``{"observation.state": ...}`` only, no ``action`` key yet.
+          - ``state_quat``: this frame's own pos+quat+gripper per arm, ALWAYS
+            quaternion-encoded regardless of ``observation_encoding`` (not a
+            dataset feature — used only as the delta anchor when this frame is
+            later finalized as an action target for its predecessor).
+          - ``action_abs_own``: this frame's own pos+rot6d+gripper per arm — the
+            value used as the NEXT-frame action target for whichever frame
+            preceded this one.
 
         Returns ``None`` if any arm has no buffered pose yet.
         """
         # Lazy imports keep the converter independent of training packages except when
-        # EE mode (and, for non-quaternion observation_encoding or delta action_encoding,
-        # anvil_shared's transform/rotation modules) is actually used.
+        # EE mode (and, for non-quaternion observation_encoding, anvil_shared's
+        # rotation module) is actually used.
         from anvil_shared.rotation import matrix_to_rot6d, quat_to_matrix
-
-        from ..config.encodings import encode_rotation
+        from anvil_shared.ee_encodings import encode_rotation
 
         state_quat_slices: List[np.ndarray] = []
         state_encoded_slices: List[np.ndarray] = []
@@ -1543,23 +1608,12 @@ class BufferedStreamExtractor:
 
         state_quat = np.concatenate(state_quat_slices)
         state_encoded = np.concatenate(state_encoded_slices)
-        action_abs = np.concatenate(action_slices)
-
-        if self.config.is_action_delta:
-            # Lazy import: keeps the converter independent of training packages
-            # except when this specific encoding is actually requested.
-            from anvil_shared.ee_transform import ee_delta_forward
-
-            anchor = state_quat if prev_state_quat is None else prev_state_quat
-            action_out = ee_delta_forward(action_abs, anchor)
-        else:
-            action_out = action_abs
+        action_abs_own = np.concatenate(action_slices)
 
         frame = {
             "observation.state": state_encoded.astype(np.float32),
-            "action": action_out.astype(np.float32),
         }
-        return frame, state_quat
+        return frame, state_quat, action_abs_own
 
     def _sync_ee_buffers(
         self,

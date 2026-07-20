@@ -10,10 +10,17 @@ Covers:
   7. ee_obs_relative_forward — body-frame translation, identity, gripper passthrough,
      single vs per-sample anchor, bimanual, obs↔action frame consistency
   8. Inference queue prefill — queue entries are shape (1, 10n) not (10n,)
-  9. ee_delta_forward / ee_delta_inverse — WORLD-frame Delta(n-(n-1)): round-trip,
+  9. ee_delta_forward / ee_delta_inverse — WORLD-frame Delta(n->n+1): round-trip,
      identity/self-anchor zero-delta, single vs per-sample state, robosuite
      composition-order verification, and explicit divergence from the
      BODY-frame ee_relative_forward/inverse pair for the same non-trivial input
+  10. Multi-encoding (observation_encoding=quaternion/rot6d/axis_angle) correctness:
+      round-trips for ee_relative_forward/inverse and ee_delta_forward/inverse,
+      obs-conversion identity/dim checks, n_arms_from_dims validation per encoding,
+      and a direct regression test for the exact silent-corruption bug found in
+      production (a bimanual rot6d state, without an explicit observation_encoding,
+      used to floor-divide into a coincidentally-plausible n_arms and silently
+      produce wrong output — it must now raise instead)
 """
 from __future__ import annotations
 
@@ -22,6 +29,7 @@ from collections import deque
 import numpy as np
 import pytest
 
+from anvil_shared.ee_encodings import observation_state_dim_per_arm
 from anvil_shared.ee_transform import (
     EE_ACTION_DIM_PER_ARM,
     EE_STATE_DIM_PER_ARM,
@@ -34,7 +42,7 @@ from anvil_shared.ee_transform import (
     ee_relative_inverse,
     n_arms_from_dims,
 )
-from anvil_shared.rotation import matrix_to_quat, quat_to_matrix, rot6d_to_matrix
+from anvil_shared.rotation import matrix_to_axis_angle, matrix_to_quat, quat_to_matrix, rot6d_to_matrix
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -540,7 +548,7 @@ class TestEEObsAbsForward:
 
 
 # =============================================================================
-# 9. ee_delta_forward / ee_delta_inverse — WORLD-frame Delta(n-(n-1))
+# 9. ee_delta_forward / ee_delta_inverse — WORLD-frame Delta(n->n+1)
 # =============================================================================
 
 
@@ -580,14 +588,16 @@ class TestEeDeltaRoundTrip:
         np.testing.assert_allclose(recovered, actions_abs, atol=1e-10)
 
     def test_per_frame_anchor_sequence(self):
-        """The actual Delta(n-(n-1)) usage: state[t] anchored to state[t-1], per-sample."""
+        """The actual Delta(n->n+1) usage: action[t] anchored to state[t], targeting
+        the NEXT frame's pose, per-sample."""
         rng = np.random.default_rng(101)
         T = 6
         n_arms = 1
         states = np.stack([_random_state(rng, n_arms) for _ in range(T)])       # (T, 8)
         actions = np.stack([_random_action(rng, n_arms) for _ in range(T)])     # (T, 10)
 
-        # anchor[t] = states[t-1] for t=1..T-1 (per-frame anchor, not chunk-start)
+        # anchor[t] = states[t] for t=0..T-2, target[t] = actions[t+1] (per-frame
+        # anchor, forward-looking, not a fixed chunk-start anchor)
         anchors = states[:-1]       # (T-1, 8)
         targets = actions[1:]       # (T-1, 10)
 
@@ -610,9 +620,9 @@ class TestEeDeltaRoundTrip:
 
 class TestEeDeltaIdentity:
     def test_identity_state_identity_action_zero_delta(self):
-        """Self-anchor first-frame convention: state==action → zero xyz delta,
-        identity rot6d — same assertion as the body-frame TestIdentity, confirming
-        the identity/self-anchor convention is frame-convention-agnostic."""
+        """Self-anchor invariant: state==action → zero xyz delta, identity rot6d —
+        same assertion as the body-frame TestIdentity, confirming the
+        identity/self-anchor convention is frame-convention-agnostic."""
         state = _identity_state()
         action = _identity_action()
         action[:3] = 0.0  # zero position
@@ -624,8 +634,8 @@ class TestEeDeltaIdentity:
 
     def test_self_anchor_nonidentity_pose_zero_delta(self):
         """Self-anchor with a NON-identity pose (action == state's own pose) must
-        still yield zero delta — this is the actual mcap_converter first-frame
-        convention: action[0] = ee_delta_forward(action[0], state[0])."""
+        still yield zero delta — a general invariant of the transform, independent
+        of which two frames the caller happens to pass in."""
         rng = np.random.default_rng(202)
         state = _random_state(rng, n_arms=1)
         # Build an action at exactly the same pose as `state` (same xyz + rotation).
@@ -734,3 +744,131 @@ class TestEeDeltaWorldFrameComposition:
             "ee_delta_forward's rotation matches ee_relative_forward's body-frame "
             "rotation — this indicates the world-frame formula was NOT actually used."
         )
+
+
+# ── 10. Multi-encoding (quaternion / rot6d / axis_angle) correctness ─────────
+
+def _random_state_encoded(
+    rng: np.random.Generator, observation_encoding: str, n_arms: int = 1
+) -> np.ndarray:
+    """Random EE state with a valid rotation, in the given observation_encoding."""
+    per_arm = observation_state_dim_per_arm(observation_encoding)
+    state = np.zeros(per_arm * n_arms)
+    for arm in range(n_arms):
+        s0 = arm * per_arm
+        state[s0:s0 + 3] = rng.uniform(-0.5, 0.5, 3)  # xyz
+        Q, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+        if np.linalg.det(Q) < 0:
+            Q[:, 0] *= -1
+        if observation_encoding == "quaternion":
+            state[s0 + 3:s0 + 7] = matrix_to_quat(Q)
+            state[s0 + 7] = rng.uniform(0.0, 0.05)
+        elif observation_encoding == "rot6d":
+            state[s0 + 3:s0 + 9] = np.concatenate([Q[:, 0], Q[:, 1]])
+            state[s0 + 9] = rng.uniform(0.0, 0.05)
+        elif observation_encoding == "axis_angle":
+            state[s0 + 3:s0 + 6] = matrix_to_axis_angle(Q)
+            state[s0 + 6] = rng.uniform(0.0, 0.05)
+        else:
+            raise ValueError(observation_encoding)
+    return state
+
+
+_ENCODINGS = ["quaternion", "rot6d", "axis_angle"]
+
+
+class TestMultiEncodingRoundTrip:
+    """gap-3-adjacent fix: every function that reads a state/anchor/obs array must
+    handle rot6d and axis_angle observation_encoding correctly, not just the
+    quaternion default it used to hardcode."""
+
+    @pytest.mark.parametrize("encoding", _ENCODINGS)
+    def test_ee_relative_round_trip(self, encoding):
+        rng = np.random.default_rng(201)
+        action_abs = _random_action(rng)
+        state = _random_state_encoded(rng, encoding)
+        action_rel = ee_relative_forward(action_abs, state, observation_encoding=encoding)
+        recovered = ee_relative_inverse(action_rel, state, observation_encoding=encoding)
+        np.testing.assert_allclose(recovered, action_abs, atol=1e-8)
+
+    @pytest.mark.parametrize("encoding", _ENCODINGS)
+    def test_ee_delta_round_trip(self, encoding):
+        rng = np.random.default_rng(202)
+        action_abs = _random_action(rng)
+        state = _random_state_encoded(rng, encoding)
+        delta = ee_delta_forward(action_abs, state, observation_encoding=encoding)
+        recovered = ee_delta_inverse(delta, state, observation_encoding=encoding)
+        np.testing.assert_allclose(recovered, action_abs, atol=1e-8)
+
+    @pytest.mark.parametrize("encoding", _ENCODINGS)
+    def test_ee_relative_round_trip_bimanual(self, encoding):
+        rng = np.random.default_rng(203)
+        action_abs = _random_action(rng, n_arms=2)
+        state = _random_state_encoded(rng, encoding, n_arms=2)
+        action_rel = ee_relative_forward(action_abs, state, observation_encoding=encoding)
+        recovered = ee_relative_inverse(action_rel, state, observation_encoding=encoding)
+        np.testing.assert_allclose(recovered, action_abs, atol=1e-8)
+
+    @pytest.mark.parametrize("encoding", _ENCODINGS)
+    def test_ee_obs_abs_forward_shape(self, encoding):
+        rng = np.random.default_rng(204)
+        state = _random_state_encoded(rng, encoding, n_arms=2)
+        out = ee_obs_abs_forward(state, observation_encoding=encoding)
+        assert out.shape == (20,)  # 2 arms * 10 (rot6d), regardless of input encoding
+
+    @pytest.mark.parametrize("encoding", _ENCODINGS)
+    def test_ee_obs_relative_forward_self_anchor_is_identity(self, encoding):
+        """anchor == obs → zero translation, identity rot6d [1,0,0,0,1,0]."""
+        rng = np.random.default_rng(205)
+        state = _random_state_encoded(rng, encoding)
+        out = ee_obs_relative_forward(state, state, observation_encoding=encoding)
+        np.testing.assert_allclose(out[:3], 0.0, atol=1e-8)
+        np.testing.assert_allclose(out[3:9], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0], atol=1e-8)
+
+    def test_n_arms_from_dims_rot6d_bimanual(self):
+        assert n_arms_from_dims(20, 20, observation_encoding="rot6d") == 2
+
+    def test_n_arms_from_dims_axis_angle_single(self):
+        assert n_arms_from_dims(7, 10, observation_encoding="axis_angle") == 1
+
+    def test_n_arms_from_dims_rejects_mismatched_encoding(self):
+        """A quaternion-shaped (8-dim) state validated against rot6d (10/arm)
+        must be rejected, not silently accepted."""
+        with pytest.raises(ValueError, match="positive multiple"):
+            n_arms_from_dims(8, 10, observation_encoding="rot6d")
+
+    def test_default_encoding_is_quaternion_backward_compat(self):
+        """Omitting observation_encoding must behave exactly as explicit 'quaternion'
+        — every pre-existing call site relies on this default."""
+        rng = np.random.default_rng(206)
+        action_abs = _random_action(rng)
+        state = _random_state(rng)  # quaternion, no encoding kwarg used below
+        np.testing.assert_allclose(
+            ee_relative_forward(action_abs, state),
+            ee_relative_forward(action_abs, state, observation_encoding="quaternion"),
+        )
+        np.testing.assert_allclose(
+            ee_delta_forward(action_abs, state),
+            ee_delta_forward(action_abs, state, observation_encoding="quaternion"),
+        )
+
+    def test_ee_obs_abs_forward_bimanual_rot6d_without_encoding_now_raises(self):
+        """Direct regression test for the production bug: previously
+        ee_obs_abs_forward had NO dimension validation at all — a 20-dim bimanual
+        rot6d state passed without observation_encoding would silently floor-divide
+        (20 // 8 == 2, coincidentally the correct arm COUNT) and proceed to slice
+        completely misaligned rotation/gripper fields, producing wrong output with
+        no error whatsoever. It must now raise instead of silently guessing."""
+        rng = np.random.default_rng(207)
+        bimanual_rot6d_state = _random_state_encoded(rng, "rot6d", n_arms=2)  # dim=20
+        with pytest.raises(ValueError, match="positive multiple"):
+            ee_obs_abs_forward(bimanual_rot6d_state)  # default (wrong) quaternion encoding
+        # Passing the correct encoding succeeds and produces the right shape.
+        out = ee_obs_abs_forward(bimanual_rot6d_state, observation_encoding="rot6d")
+        assert out.shape == (20,)
+
+    def test_ee_obs_relative_forward_rejects_bad_dim(self):
+        """Same class of bug as above — ee_obs_relative_forward also had zero
+        dimension validation previously."""
+        with pytest.raises(ValueError, match="positive multiple"):
+            ee_obs_relative_forward(np.zeros(9), np.zeros(9), observation_encoding="quaternion")

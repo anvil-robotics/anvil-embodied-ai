@@ -285,7 +285,7 @@ class TransformRunner:
         elif isinstance(transform, EERelativeTransform):
             return "SE(3) relative: delta_xyz + R_state.T @ R_action"
         elif isinstance(transform, EEDeltaTransform):
-            return "Delta(n-(n-1)): world-frame, baked on disk by mcap_converter — action untouched here"
+            return "Delta(n->n+1): world-frame, baked on disk by mcap_converter — action untouched here"
         return "enabled"
 
     def _compute_ee_relative_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
@@ -327,7 +327,8 @@ class TransformRunner:
             if states_np.ndim == 3:
                 states_np = states_np[:, -1, :]  # multi-step obs → most recent step
 
-            n_arms = n_arms_from_dims(states_np.shape[-1], actions_np.shape[-1])
+            obs_encoding = self.config.observation_encoding
+            n_arms = n_arms_from_dims(states_np.shape[-1], actions_np.shape[-1], obs_encoding)
 
             # ------------------------------------------------------------------ #
             # Action stats (relative to current state, per-sample anchor)        #
@@ -356,7 +357,7 @@ class TransformRunner:
                     act = actions_np[:-k]
                     sta = states_np[k:]
                     mask = episode_idx_np[:-k] == episode_idx_np[k:]
-                return ee_relative_forward(act, sta)[mask]
+                return ee_relative_forward(act, sta, observation_encoding=obs_encoding)[mask]
 
             all_deltas = np.concatenate(
                 [_ee_relative_action_for_offset(d) for d in action_delta_indices], axis=0
@@ -406,7 +407,9 @@ class TransformRunner:
 
             obs_rel_samples = []
             # Identity steps — all N frames (obs relative to itself)
-            identity = ee_obs_relative_forward(states_np, states_np)  # zeros+[1,0,0,0,1,0]+grip
+            identity = ee_obs_relative_forward(
+                states_np, states_np, observation_encoding=obs_encoding
+            )  # zeros+[1,0,0,0,1,0]+grip
             obs_rel_samples.append(identity)
 
             # Prior steps — obs[t-j] relative to obs[t], episode-bounded
@@ -414,7 +417,7 @@ class TransformRunner:
                 past = states_np[:-j]
                 anchor = states_np[j:]
                 mask = episode_idx_np[:-j] == episode_idx_np[j:]
-                rel = ee_obs_relative_forward(past, anchor)
+                rel = ee_obs_relative_forward(past, anchor, observation_encoding=obs_encoding)
                 obs_rel_samples.append(rel[mask])
 
             all_obs_rel = np.concatenate(obs_rel_samples, axis=0)  # (N_total, 10*n_arms)
@@ -449,7 +452,7 @@ class TransformRunner:
             return None
 
     def _compute_ee_delta_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
-        """Compute EE stats for ``ee_delta`` (baked per-frame Delta(n-(n-1))) training.
+        """Compute EE stats for ``ee_delta`` (baked per-frame Delta(n->n+1)) training.
 
         Unlike ``_compute_ee_relative_stats`` (the n-0 mechanism), this does
         NOT replay any live transform or mask by episode boundary — the
@@ -488,7 +491,8 @@ class TransformRunner:
             if states_np.ndim == 3:
                 states_np = states_np[:, -1, :]  # multi-step obs -> most recent step
 
-            n_arms = n_arms_from_dims(states_np.shape[-1], actions_np.shape[-1])
+            obs_encoding = self.config.observation_encoding
+            n_arms = n_arms_from_dims(states_np.shape[-1], actions_np.shape[-1], obs_encoding)
 
             # ------------------------------------------------------------------ #
             # Action stats: read straight off the static baked delta column — no #
@@ -515,7 +519,7 @@ class TransformRunner:
             # Obs stats: observation.state stays absolute for ee_delta — same    #
             # treatment as _compute_ee_abs_stats.                                #
             # ------------------------------------------------------------------ #
-            all_obs_abs = ee_obs_abs_forward(states_np)  # (N, 10*n_arms)
+            all_obs_abs = ee_obs_abs_forward(states_np, observation_encoding=obs_encoding)  # (N, 10*n_arms)
 
             obs_mean = all_obs_abs.mean(axis=0)
             obs_std = np.where(all_obs_abs.std(axis=0) < 1e-6, 1e-6, all_obs_abs.std(axis=0))
@@ -591,7 +595,8 @@ class TransformRunner:
             if states_np.ndim == 3:
                 states_np = states_np[:, -1, :]  # multi-step obs → most recent step
 
-            n_arms = n_arms_from_dims(states_np.shape[-1], actions_np.shape[-1])
+            obs_encoding = self.config.observation_encoding
+            n_arms = n_arms_from_dims(states_np.shape[-1], actions_np.shape[-1], obs_encoding)
 
             # ------------------------------------------------------------------ #
             # Action stats: dataset already has absolute rot6d; just clamp rot6d #
@@ -620,7 +625,7 @@ class TransformRunner:
             # Obs stats: convert all frames to rot6d, then clamp rot6d dims.     #
             # xyz and gripper retain their true absolute distributions.           #
             # ------------------------------------------------------------------ #
-            all_obs_abs = ee_obs_abs_forward(states_np)  # (N, 10*n_arms)
+            all_obs_abs = ee_obs_abs_forward(states_np, observation_encoding=obs_encoding)  # (N, 10*n_arms)
 
             obs_mean = all_obs_abs.mean(axis=0)
             obs_std = np.where(all_obs_abs.std(axis=0) < 1e-6, 1e-6, all_obs_abs.std(axis=0))

@@ -20,6 +20,7 @@ setup(
         "numpy>=2.0,<2.3.0",
         "opencv-python-headless>=4.8.0,<5.0.0",
         "pyyaml>=6.0",
+        "pandas>=2.0.0,<3.0.0",
     ],
     zip_safe=True,
     maintainer="Patrick Hsu",
@@ -34,6 +35,8 @@ setup(
             "mcap_player_node = lerobot_control.mcap_player_node:main",
             "eval_recorder_node = lerobot_control.eval_recorder_node:main",
             "inference_monitor_node = lerobot_control.inference_monitor_node:main",
+            "dataset_gt_replayer_node = lerobot_control.dataset_gt_replayer_node:main",
+            "gt_replay_verifier_node = lerobot_control.gt_replay_verifier_node:main",
         ],
     },
 )

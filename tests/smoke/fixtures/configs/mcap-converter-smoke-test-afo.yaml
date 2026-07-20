@@ -1,5 +1,5 @@
 # Smoke test config — Quest teleop, SINGLE ARM (right only),
-# action[t] = observation.state[t] (act-from-obs opt-in via empty action_topics).
+# action[t] = observation.state[t+1] (act-from-obs opt-in via empty action_topics).
 # Ported to the new unified converter schema.
 
 data_space: "joint"
@@ -7,8 +7,8 @@ data_space: "joint"
 observation_topics:
   right: "/joint_states"
 
-# Empty action_topics triggers act-from-obs: action[t] = observation.state[t].
-# The future window is applied by LeRobot delta_timestamps at train time.
+# Empty action_topics triggers act-from-obs: action[t] = observation.state[t+1]
+# (the NEXT frame's observation), baked at convert time via a 1-frame lookahead.
 action_topics: {}
 
 joint_names:

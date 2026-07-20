@@ -2,8 +2,8 @@
 # OpenArm MCAP to LeRobot — EE Cartesian, BIMANUAL (primary EE default)
 # =============================================================================
 #
-# Output (per frame; LeRobot delta_timestamps applies the future window
-# at train time):
+# Output (per frame; action[t] = the NEXT frame's pose — act-from-obs, baked
+# at convert time via a 1-frame lookahead):
 #   observation.state  float32 (16,)  =  [left:  x,y,z, qx,qy,qz,qw, gripper]
 #                                        [right: x,y,z, qx,qy,qz,qw, gripper]
 #   action             float32 (20,)  =  [left:  x,y,z, rot6d(6), gripper]
@@ -12,18 +12,30 @@
 #
 # `action_topics: {}` is mandatory in EE mode — the action source is the same
 # /ee_pose_<arm> message used for observation, encoded with rot6d.
+#
+# See TEMPLATE_all_fields.yaml for the full field reference. Fields commented
+# out below are joint-mode-only / not applicable to EE and left at defaults.
 # =============================================================================
 
 schema_version: "1.1"
 data_space: "ee"
-action_encoding: "absolute"
-observation_encoding: "quaternion"
 
 observation_topics:
   left:  "/ee_pose_left"
   right: "/ee_pose_right"
 
-action_topics: {}
+action_topics: {}   # mandatory empty in EE mode
+
+action_encoding: "absolute"       # or "delta" — see openarm_ee_bimanual_delta_debug.yaml
+observation_encoding: "quaternion"  # or "rot6d" / "axis_angle"
+
+# joint_names:                    # joint-mode only — EE has no shared /joint_states to split
+#   separator: "_"
+#   source: {follower: observation}
+#   arms: {r: right, l: left}
+
+# observation_feature_mapping: {state: "position", others: []}   # joint-mode only; EE ignores this
+# action_feature_mapping: {state: "position", others: []}        # joint-mode only; EE ignores this
 
 camera_topics:
   - "/cam_waist/image_raw/compressed"

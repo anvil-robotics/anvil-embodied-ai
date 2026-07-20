@@ -119,7 +119,7 @@ class TestEEDeltaApply:
         result = EEDeltaTransform().apply(item, cfg)
         assert torch.equal(result["action"], action), (
             "EEDeltaTransform must not modify action at all — it is already "
-            "the baked Delta(n-(n-1)) target from mcap_converter."
+            "the baked Delta(n->n+1) target from mcap_converter."
         )
 
     def test_noop_without_obs_state(self):

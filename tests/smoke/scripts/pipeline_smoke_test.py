@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end CLI smoke test for the anvil training / eval stack.
 
-Six scenarios across two fixture sessions:
+Eight scenarios across two fixture sessions:
 
 Joint-space (tests/smoke/fixtures/test-session, 5 stub MCAPs, single right arm):
   joint_abs_afo              — action_from_observation=true,  action_type=joint_abs
@@ -10,20 +10,34 @@ Joint-space (tests/smoke/fixtures/test-session, 5 stub MCAPs, single right arm):
   joint_abs_delta_sequential — shares joint_abs's converted dataset, action_type=delta_sequential
 
 EE Cartesian (tests/smoke/fixtures/ee-session, 5 stub MCAPs, single right arm):
-  ee_abs — action_type=ee_abs  (EE absolute rot6d)
-  ee_rel — action_type=ee_rel  (EE SE(3) relative; shares converted dataset with ee_abs)
+  ee_abs         — action_type=ee_abs    (EE absolute rot6d)
+  ee_rel         — action_type=ee_rel    (EE SE(3) relative; shares converted dataset with ee_abs)
+  ee_delta       — action_type=ee_delta  (EE per-frame Delta(n->n+1), world-frame,
+                   observation_encoding="quaternion" — the schema default). Own converted
+                   dataset — action_encoding="delta" bakes a different action column than
+                   ee_abs/ee_rel's "absolute" encoding, so it cannot share their dataset.
+  ee_delta_rot6d — same as ee_delta but observation_encoding="rot6d" (10 dims/arm instead
+                   of quaternion's 8) — exercises the observation_encoding-aware path in
+                   anvil_shared/ee_transform.py (fixed 2026-07-19, see
+                   claude_docs/ee-delta-training-flow-gaps-fix-plan.md). Own converted
+                   dataset (different observation.state shape than ee_delta's).
 
 EE space is inherently AFO — /ee_pose_right is both observation and action source.
-ee_rel step 1 shows "cached" when the shared EE dataset already exists from ee_abs;
-same for joint_abs_delta_* against joint_abs.
+ee_rel step 1 shows "cached" when the shared EE dataset already exists from ee_abs.
+Same for joint_abs_delta_* against joint_abs. ee_delta/ee_delta_rot6d each always
+convert their own dataset.
 
-Each scenario runs all 4 steps: mcap-convert → anvil-trainer → anvil-eval → anvil-eval-ros
+Each scenario runs all 4 steps: mcap-convert → anvil-trainer → anvil-eval → anvil-eval-ros,
+EXCEPT ee_delta/ee_delta_rot6d, which today only support steps 1–2 (mcap-convert,
+anvil-trainer) — steps 3–4 need eval-side ee_delta support (anvil_eval / anvil_eval_ros
+action-type branches) that hasn't landed yet. Run them with `--select 1,2` until it does.
 
 Usage:
   uv run python tests/smoke/scripts/pipeline_smoke_test.py                               # all scenarios, all 4 steps
   uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario joint_abs_afo      # AFO only
   uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario joint_abs,joint_abs_afo  # joint only
   uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario ee_abs,ee_rel      # EE only
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario ee_delta,ee_delta_rot6d --select 1,2  # ee_delta convert+train only, both encodings
   uv run python tests/smoke/scripts/pipeline_smoke_test.py --select 1,2                 # steps 1+2 for all scenarios
   uv run python tests/smoke/scripts/pipeline_smoke_test.py --force                      # wipe + rerun
   uv run python tests/smoke/scripts/pipeline_smoke_test.py --no-docker                  # step 4 skips Docker
@@ -106,7 +120,7 @@ class Scenario:
     eval_out: Path
     eval_ros_out: Path
     convert_config: Path
-    action_type: str = "joint_abs"     # joint_abs | ee_abs | ee_rel
+    action_type: str = "joint_abs"     # joint_abs | ee_abs | ee_rel | ee_delta
     # Override the inference base config for step 4 (None = joint default)
     inference_config: Path | None = None
 
@@ -118,8 +132,8 @@ class Scenario:
         return self.train_out / "checkpoints" / f"{steps:06d}"
 
 
-# mcap-convert appends "<data_space>-space/<input-dir-name>" to the output path,
-# so the dataset ends up at <output_base>/joint-space/<name>/ or ee-space/<name>/.
+# mcap-convert appends "<data_space>-<encoding>/<input-dir-name>" to the output path,
+# so the dataset ends up at <output_base>/joint-abs/<name>/ or ee-abs/<name>/.
 # Use scenario-specific parent dirs under outputs/ to keep artifacts separate.
 # ee_abs and ee_rel point to the SAME dataset_dir — step 1 for ee_rel shows
 # "cached" when ee_abs has already converted, and re-converts if forced.
@@ -140,7 +154,7 @@ SCENARIOS: dict[str, Scenario] = {
         key="joint_abs_afo",
         label="joint_abs AFO",
         mcap_root=_MCAP_INPUT,
-        dataset_dir=OUTPUTS / "datasets" / "joint_abs_afo" / "joint-space" / _MCAP_NAME,
+        dataset_dir=OUTPUTS / "datasets" / "joint_abs_afo" / "joint-abs" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "joint_abs_afo" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "joint_abs_afo" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "joint_abs_afo" / "ros",
@@ -150,7 +164,7 @@ SCENARIOS: dict[str, Scenario] = {
         key="joint_abs",
         label="joint_abs CMD",
         mcap_root=_MCAP_INPUT,
-        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / "joint-space" / _MCAP_NAME,
+        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / "joint-abs" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "joint_abs" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "joint_abs" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "joint_abs" / "ros",
@@ -161,7 +175,7 @@ SCENARIOS: dict[str, Scenario] = {
         label="joint_abs CMD delta_obs_t",
         mcap_root=_MCAP_INPUT,
         # shared with joint_abs — step 1 is "cached" once joint_abs has converted
-        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / "joint-space" / _MCAP_NAME,
+        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / "joint-abs" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "joint_abs_delta_obs_t" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "joint_abs_delta_obs_t" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "joint_abs_delta_obs_t" / "ros",
@@ -173,7 +187,7 @@ SCENARIOS: dict[str, Scenario] = {
         label="joint_abs CMD delta_sequential",
         mcap_root=_MCAP_INPUT,
         # shared with joint_abs — step 1 is "cached" once joint_abs has converted
-        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / "joint-space" / _MCAP_NAME,
+        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / "joint-abs" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "joint_abs_delta_sequential" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "joint_abs_delta_sequential" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "joint_abs_delta_sequential" / "ros",
@@ -184,7 +198,7 @@ SCENARIOS: dict[str, Scenario] = {
         key="ee_abs",
         label="ee_abs",
         mcap_root=_EE_MCAP_INPUT,
-        dataset_dir=OUTPUTS / "datasets" / "ee" / "ee-space" / _EE_MCAP_NAME,
+        dataset_dir=OUTPUTS / "datasets" / "ee" / "ee-abs" / _EE_MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "ee_abs" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "ee_abs" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "ee_abs" / "ros",
@@ -197,12 +211,45 @@ SCENARIOS: dict[str, Scenario] = {
         label="ee_rel",
         mcap_root=_EE_MCAP_INPUT,
         # Same dataset as ee_abs — step 1 is "cached" when ee_abs already converted.
-        dataset_dir=OUTPUTS / "datasets" / "ee" / "ee-space" / _EE_MCAP_NAME,
+        dataset_dir=OUTPUTS / "datasets" / "ee" / "ee-abs" / _EE_MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "ee_rel" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "ee_rel" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "ee_rel" / "ros",
         convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-ee.yaml",
         action_type="ee_rel",
+        inference_config=_EE_INFERENCE_CFG,
+    ),
+    "ee_delta": Scenario(
+        key="ee_delta",
+        label="ee_delta (quaternion obs)",
+        mcap_root=_EE_MCAP_INPUT,
+        # Own dataset — delta is baked differently from ee_abs/ee_rel (per-frame
+        # Delta(n->n+1) action, not the next frame's absolute pose), so it cannot
+        # share their converted dataset. mcap-convert appends <data_space>-<encoding>
+        # = "ee-delta" to the output path (see the path-suffixing note above).
+        dataset_dir=OUTPUTS / "datasets" / "ee_delta" / "ee-delta" / _EE_MCAP_NAME,
+        train_out=OUTPUTS / "model_zoo" / "ee_delta" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "ee_delta" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "ee_delta" / "ros",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-ee-delta.yaml",
+        action_type="ee_delta",
+        inference_config=_EE_INFERENCE_CFG,
+    ),
+    "ee_delta_rot6d": Scenario(
+        key="ee_delta_rot6d",
+        label="ee_delta (rot6d obs)",
+        mcap_root=_EE_MCAP_INPUT,
+        # Same action_encoding="delta" as ee_delta above, but observation_encoding=
+        # "rot6d" instead of the default "quaternion" — a different observation.state
+        # shape (10/arm vs 8/arm), so its own dataset dir. Exercises the
+        # observation_encoding-aware path in anvil_shared/ee_transform.py fixed
+        # 2026-07-19 (see claude_docs/ee-delta-training-flow-gaps-fix-plan.md).
+        dataset_dir=OUTPUTS / "datasets" / "ee_delta_rot6d" / "ee-delta" / _EE_MCAP_NAME,
+        train_out=OUTPUTS / "model_zoo" / "ee_delta_rot6d" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "ee_delta_rot6d" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "ee_delta_rot6d" / "ros",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-ee-delta-rot6d.yaml",
+        action_type="ee_delta",
         inference_config=_EE_INFERENCE_CFG,
     ),
 }

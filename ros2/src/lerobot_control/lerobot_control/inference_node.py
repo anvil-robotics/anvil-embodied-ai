@@ -73,6 +73,7 @@ class LeRobotInferenceNode(Node):
             callback_group=self._subscription_callback_group,
             debug_image_dir=self._debug_image_dir,
             video_dir=self._monitor_video_dir if self._monitor_enable else None,
+            mock_ee_pose_echo=self._mock_ee_pose_echo,
         )
 
         # Non-VLA action buffer (ACT/Diffusion put actions here from obs timer)
@@ -94,6 +95,30 @@ class LeRobotInferenceNode(Node):
         # _obs_update; that would defeat the whole point (see claude_docs/
         # ee-delta-flow-plan.md, Item 2).
         self._ee_delta_latest_obs_quat: np.ndarray | None = None
+        # Per-arm CommandedEEPose.sequence backing _ee_delta_latest_obs_quat above,
+        # captured alongside it (see MultiProcessStrategy.get_ee_obs_sequence_snapshot).
+        # _publish_loop compares this against _ee_delta_last_published_seq to tell
+        # whether the anchor has genuinely advanced since the last tick it composed
+        # against — NOT whether the pose value looks different (a stationary arm's
+        # pose is legitimately unchanged; only sequence non-advancement means the
+        # mock/controller hasn't caught up to the last published command yet). If it
+        # hasn't advanced, that tick is held rather than composed — composing a new
+        # delta against an anchor the loop has already consumed once would silently
+        # skip one row of the recorded trajectory and never recover (see
+        # claude_docs/gt-replayer-correctness-test-plan.md's staleness investigation).
+        self._ee_delta_latest_obs_seq: tuple[int, ...] | None = None
+        self._ee_delta_last_published_seq: tuple[int, ...] | None = None
+        # Created unconditionally: used by the ee_delta obs/publish handoff above
+        # for ANY model type (classic or VLA), not just VLA's _latest_obs snapshot
+        # (which reuses this same lock — see _setup_vla_inference).
+        self._obs_lock = threading.Lock()
+
+        # TEMP DEBUG (gt_replay ee_delta divergence investigation): generation
+        # counter bumped every time _ee_delta_latest_obs_quat is refreshed, so
+        # _publish_loop can detect/log when it reuses a stale (already-consumed)
+        # anchor instead of a freshly-written one. Remove once root cause is fixed.
+        self._ee_delta_obs_gen: int = 0
+        self._ee_delta_last_published_gen: int | None = None
 
         self._shutting_down: bool = False
         self._has_published: bool = False
@@ -186,18 +211,27 @@ class LeRobotInferenceNode(Node):
         self.declare_parameter("debug_image_dir", "")
         self.declare_parameter("monitor_enable", False)
         self.declare_parameter("monitor_video_dir", "")
+        # Fake-hardware-only: true iff /ee_pose_{arm} is the mock's MockEEPose
+        # echo (sequence-guarded), never true for real hardware (plain
+        # CommandedEEPose, no guard at all) — see MockEEPose.msg and
+        # ee_obs_sequence_guard.py's module docstrings. Set by the deployment
+        # (compose file/launch args), not the YAML config, since it's a
+        # "which robot am I actually talking to" question, not a model/task
+        # tunable — docker-compose.fake-hardware.yml sets this true wherever
+        # mock-robot is co-launched; docker-compose.yml (real) leaves it false.
+        self.declare_parameter("mock_ee_pose_echo", False)
 
         # Static fields from ROS2 params
         self.echo_topic_only = self.get_parameter("echo_topic_only").value
         self._debug = self.get_parameter("debug").value
         self._monitor_enable: bool = self.get_parameter("monitor_enable").value
+        self._mock_ee_pose_echo: bool = self.get_parameter("mock_ee_pose_echo").value
         _debug_image_dir = self.get_parameter("debug_image_dir").value
         self._debug_image_dir: str | None = _debug_image_dir if _debug_image_dir else None
         _monitor_video_dir = self.get_parameter("monitor_video_dir").value
         self._monitor_video_dir: str | None = _monitor_video_dir if _monitor_video_dir else None
         self.model_path = self.get_parameter("model_path").value
-        if not self.model_path and not self.echo_topic_only:
-            raise ValueError("model_path parameter is required")
+        self._validate_required_params()
 
         self.control_freq = self.get_parameter("control_frequency").value
         self.device = self.get_parameter("device").value
@@ -232,9 +266,9 @@ class LeRobotInferenceNode(Node):
         # Inference tuning — per model type (resolved after model_type is known)
         self._tuning_config = self.config.get("inference_tuning", {})
 
-        # --- Checkpoint metadata (lightweight JSON reads, no tensor loading) ---
+        # --- Run metadata (checkpoint or, for subclasses, a dataset) ---
         # Skip in echo_topic_only mode — no checkpoint needed
-        meta = {} if self.echo_topic_only else self._read_checkpoint_metadata()
+        meta = {} if self.echo_topic_only else self._load_run_metadata()
 
         # image_shape: from config.json input_features — must match training
         # Default (480, 640, 3) is used only in echo_topic_only mode with no checkpoint
@@ -252,7 +286,7 @@ class LeRobotInferenceNode(Node):
         self.is_ee: bool = self.action_type in ("ee_abs", "ee_relative", "ee_delta")
         self.is_ee_relative: bool = self.action_type == "ee_relative"
         self.is_ee_abs: bool = self.action_type == "ee_abs"
-        # ee_delta: Delta(n-(n-1)) — decoupled delta-mode publish loop (see
+        # ee_delta: Delta(n->n+1) — decoupled delta-mode publish loop (see
         # _publish_loop). Model output is a DELTA, not a pre-restored absolute;
         # absolute_target = obs_pose ∘ delta is composed fresh at EACH publish
         # tick against the freshest observed pose, not at chunk-generation time.
@@ -288,11 +322,25 @@ class LeRobotInferenceNode(Node):
         with open(config_path) as f:
             return yaml.safe_load(f)
 
-    def _read_checkpoint_metadata(self) -> dict:
+    def _validate_required_params(self) -> None:
+        """Validate that required ROS2 params are set for this node's run source.
+
+        Base implementation requires ``model_path`` (a checkpoint). Overridden by
+        subclasses with a different run source — e.g. ``DatasetGtReplayerNode``
+        requires ``dataset`` instead.
+        """
+        if not self.model_path and not self.echo_topic_only:
+            raise ValueError("model_path parameter is required")
+
+    def _load_run_metadata(self) -> dict:
         """
         Read checkpoint metadata from config.json and anvil_config.json.
         Lightweight — JSON only, no tensor loading.
         Raises RuntimeError if model_path is set but config.json is missing/unreadable.
+
+        Overridden by subclasses that run from a source other than a checkpoint
+        (e.g. ``DatasetGtReplayerNode`` derives the same meta-dict shape from a
+        dataset's ``conversion_config.yaml`` / ``meta/info.json``).
         """
         if not self.model_path:
             return {}
@@ -548,7 +596,8 @@ class LeRobotInferenceNode(Node):
         self._action_queue = ActionQueue(self.model.config.rtc_config)
         self._latency_tracker = LatencyStats(maxlen=100)
         self._latest_obs = None
-        self._obs_lock = threading.Lock()
+        # _obs_lock is created unconditionally in __init__ (also guards the
+        # ee_delta obs/publish handoff); reused here for VLA's _latest_obs.
         self._inference_stop = threading.Event()
         self._rtc_threshold = self.rtc_config_yaml.get("queue_trigger_threshold", 30)
         self._rtc_delay_fallback = self.rtc_config_yaml.get("inference_delay", 4)
@@ -725,7 +774,11 @@ class LeRobotInferenceNode(Node):
                 # tick, under _obs_lock, regardless of monitor status).
                 # _raw_obs still points to the original observation dict before any
                 # in-place conversion, so this always holds the quat-layout state.
-                if self.is_ee and "observation.state" in _raw_obs and (self._monitor_enable or self.is_ee_delta):
+                if self.is_ee and "observation.state" in _raw_obs and (
+                    self._monitor_enable
+                    or self.is_ee_delta
+                    or not getattr(self, "_homing_confirmed", True)
+                ):
                     _mon_s = _raw_obs["observation.state"]
                     if hasattr(_mon_s, "numpy"):
                         _mon_np = _mon_s.squeeze(0).numpy() if _mon_s.dim() > 1 else _mon_s.numpy()
@@ -736,113 +789,149 @@ class LeRobotInferenceNode(Node):
                     if self.is_ee_delta:
                         with self._obs_lock:
                             self._ee_delta_latest_obs_quat = _mon_np
+                            self._ee_delta_latest_obs_seq = self.strategy.get_ee_obs_sequence_snapshot()
+                            self._ee_delta_obs_gen += 1
+                            if self._debug:
+                                self.get_logger().info(
+                                    f"[DEBUG-ANCHOR] obs_update wrote gen={self._ee_delta_obs_gen} "
+                                    f"seq={self._ee_delta_latest_obs_seq} "
+                                    f"full={_mon_np.round(6).tolist()} t={time.monotonic():.4f}"
+                                )
 
-                # True when the model will actually run a forward pass this tick.
-                # ACT uses self._action_queue; Diffusion uses self._queues["action"].
-                if hasattr(self.model, "_action_queue"):
-                    _will_run_forward = len(self.model._action_queue) == 0
-                elif hasattr(self.model, "_queues") and self.model._queues is not None:
-                    action_q = self.model._queues.get("action")
-                    _will_run_forward = action_q is None or len(action_q) == 0
-                else:
-                    _will_run_forward = True
+                # Pre-replay homing (DatasetGtReplayerNode only — see its
+                # _check_homing_arrival): hold here, never advance _produce_action's
+                # cursor, until the live pose is confirmed at the episode's start
+                # pose. getattr default keeps this a no-op for every other caller.
+                if self.is_ee and not getattr(self, "_homing_confirmed", True):
+                    self._check_homing_arrival()
+                    return
 
-                # Detect whether a new action chunk is about to be generated.
-                # When the queue is empty, select_action will run the model and fill
-                # it with n_action_steps new predictions, all computed relative to
-                # the current state.  We capture that state as the n-0 chunk anchor.
-                # Only ee_relative needs chunk-level restore; ee_abs/joint_abs do not.
-                _needs_restore = self.is_ee_relative
-                _is_new_chunk = (
-                    _needs_restore
-                    and hasattr(self.model, "_queues")
-                    and len(self.model._queues.get("action", [])) == 0
-                )
-
-                if self.preprocessor:
-                    observation = self.preprocessor(dict(observation))
-                observation = self._move_to_device(observation)
-
-                # ee_relative: pre-fill model's obs queue with normalized historical
-                # relative obs (anchored to current EE).  Must run after preprocessor
-                # (queue stores normalized tensors) and before select_action.
-                if self.is_ee_relative and _ee_obs_window_rel is not None and self._ee_n_obs_steps > 1:
-                    self._prefill_ee_relative_queue(_ee_obs_window_rel)
-
-                # [DEBUG] Point 1: obs.state after preprocessor (check normalization)
-                if self._debug and _is_new_chunk and "observation.state" in observation:
-                    _dbg_s = observation["observation.state"]
-                    if isinstance(_dbg_s, torch.Tensor):
-                        _dbg_s = _dbg_s.cpu().numpy()
-                    _dbg_s = np.asarray(_dbg_s).flatten()
-                    self.get_logger().info(
-                        f"[DEBUG] obs.state (post-preproc): [{', '.join(f'{v:.4f}' for v in _dbg_s)}]"
-                    )
-
-                with torch.inference_mode():
-                    if _will_run_forward:
-                        _t0 = time.monotonic()
-                    action = self.model.select_action(observation)
-                    if _will_run_forward:
-                        self._latency_tracker.add(time.monotonic() - _t0)
-                    # Collect remaining normalized queue items BEFORE postprocessing so
-                    # the whole chunk can be denormalized together for the ee_relative restore.
-                    if _is_new_chunk and _needs_restore and hasattr(self.model, "_queues"):
-                        _rest_norm = [a.detach().clone() for a in self.model._queues.get("action", [])]
-                    else:
-                        _rest_norm = None
-
-                # Capture reference state right after chunk generation.
-                # Use _ee_raw_obs_buf[-1] — the same raw absolute EE pose used as the
-                # obs anchor in _apply_ee_relative_obs — so the action-restore frame is
-                # explicitly identical to the obs-relativization frame.
-                if _is_new_chunk and self._ee_raw_obs_buf:
-                    self._relative_anchor_state = np.asarray(
-                        self._ee_raw_obs_buf[-1], dtype=np.float64
-                    ).flatten()
-
-                if self.postprocessor:
-                    action = self.postprocessor.process_action(action)
-
-                if isinstance(action, torch.Tensor):
-                    if action.dim() > 1:
-                        action = action.squeeze(0)
-                    action = action.cpu().numpy()
-
-                # [DEBUG] Point 3: action after postprocessor, before n-0 restore
-                if self._debug and _is_new_chunk:
-                    self.get_logger().info(
-                        f"[DEBUG] action (post-postproc): [{', '.join(f'{v:.4f}' for v in action)}]"
-                    )
-
-                # Chunk-level ee_relative restore via shadow queue.
-                # The model's internal queue stores normalized tensors; we denormalize
-                # the full chunk together, restore rel → absolute, then serve absolute
-                # values from a shadow queue so we never re-enter normalized space.
-                # ee_abs and joint_abs require no restore — model output is already absolute.
-                if self.is_ee_relative:
-                    if _is_new_chunk and self._relative_anchor_state is not None:
-                        if _rest_norm is not None:
-                            _rest_denorm = [self._denorm_queue_action(a) for a in _rest_norm]
-                            _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
-                        else:
-                            _chunk = action[np.newaxis]
-                        _abs = ee_relative_restore_chunk(_chunk, self._relative_anchor_state)
-                        self._abs_shadow_queue = deque(_abs[1:])
-                        action = _abs[0]
-                    elif self._abs_shadow_queue:
-                        action = self._abs_shadow_queue.popleft()
-                    elif not hasattr(self.model, "_queues") and self._relative_anchor_state is not None:
-                        action = ee_relative_restore_chunk(action[np.newaxis], self._relative_anchor_state)[0]
-
-                self._classic_action_deque.append(action)
-                if _will_run_forward:
-                    self.metrics.record_inference()
+                action = self._produce_action(observation, _ee_obs_window_rel)
+                if action is not None:
+                    self._classic_action_deque.append(action)
 
         except Exception as e:
             import traceback
             self.get_logger().error(f"Observation/inference error: {e}")
             self.get_logger().error(traceback.format_exc())
+
+    def _produce_action(
+        self, observation: dict, ee_obs_window_rel: np.ndarray | None
+    ) -> np.ndarray | None:
+        """Run the model forward pass and return the next physical-units action.
+
+        This is the classic (ACT/Diffusion) prediction seam: preprocess → run the
+        model → postprocess → restore (ee_relative only). Returns the action in
+        physical units, ready to enter ``_classic_action_deque`` — or ``None`` to
+        skip this tick (produce no action).
+
+        Overridden by ``DatasetGtReplayerNode`` to return a recorded ground-truth
+        action instead of a model prediction, at this exact seam, so the rest of
+        the pipeline (deque, decoupled delta-mode publish loop, restore/publish)
+        runs completely unmodified.
+        """
+        # True when the model will actually run a forward pass this tick.
+        # ACT uses self._action_queue; Diffusion uses self._queues["action"].
+        if hasattr(self.model, "_action_queue"):
+            _will_run_forward = len(self.model._action_queue) == 0
+        elif hasattr(self.model, "_queues") and self.model._queues is not None:
+            action_q = self.model._queues.get("action")
+            _will_run_forward = action_q is None or len(action_q) == 0
+        else:
+            _will_run_forward = True
+
+        # Detect whether a new action chunk is about to be generated.
+        # When the queue is empty, select_action will run the model and fill
+        # it with n_action_steps new predictions, all computed relative to
+        # the current state.  We capture that state as the n-0 chunk anchor.
+        # Only ee_relative needs chunk-level restore; ee_abs/joint_abs do not.
+        _needs_restore = self.is_ee_relative
+        _is_new_chunk = (
+            _needs_restore
+            and hasattr(self.model, "_queues")
+            and len(self.model._queues.get("action", [])) == 0
+        )
+
+        if self.preprocessor:
+            observation = self.preprocessor(dict(observation))
+        observation = self._move_to_device(observation)
+
+        # ee_relative: pre-fill model's obs queue with normalized historical
+        # relative obs (anchored to current EE).  Must run after preprocessor
+        # (queue stores normalized tensors) and before select_action.
+        if self.is_ee_relative and ee_obs_window_rel is not None and self._ee_n_obs_steps > 1:
+            self._prefill_ee_relative_queue(ee_obs_window_rel)
+
+        # [DEBUG] Point 1: obs.state after preprocessor (check normalization)
+        if self._debug and _is_new_chunk and "observation.state" in observation:
+            _dbg_s = observation["observation.state"]
+            if isinstance(_dbg_s, torch.Tensor):
+                _dbg_s = _dbg_s.cpu().numpy()
+            _dbg_s = np.asarray(_dbg_s).flatten()
+            self.get_logger().info(
+                f"[DEBUG] obs.state (post-preproc): [{', '.join(f'{v:.4f}' for v in _dbg_s)}]"
+            )
+
+        with torch.inference_mode():
+            if _will_run_forward:
+                _t0 = time.monotonic()
+            action = self.model.select_action(observation)
+            if _will_run_forward:
+                self._latency_tracker.add(time.monotonic() - _t0)
+            # Collect remaining normalized queue items BEFORE postprocessing so
+            # the whole chunk can be denormalized together for the ee_relative restore.
+            if _is_new_chunk and _needs_restore and hasattr(self.model, "_queues"):
+                _rest_norm = [a.detach().clone() for a in self.model._queues.get("action", [])]
+            else:
+                _rest_norm = None
+
+        # Capture reference state right after chunk generation.
+        # Use _ee_raw_obs_buf[-1] — the same raw absolute EE pose used as the
+        # obs anchor in _apply_ee_relative_obs — so the action-restore frame is
+        # explicitly identical to the obs-relativization frame.
+        if _is_new_chunk and self._ee_raw_obs_buf:
+            self._relative_anchor_state = np.asarray(
+                self._ee_raw_obs_buf[-1], dtype=np.float64
+            ).flatten()
+
+        if self.postprocessor:
+            action = self.postprocessor.process_action(action)
+
+        if isinstance(action, torch.Tensor):
+            if action.dim() > 1:
+                action = action.squeeze(0)
+            action = action.cpu().numpy()
+
+        # [DEBUG] Point 3: action after postprocessor, before n-0 restore
+        if self._debug and _is_new_chunk:
+            self.get_logger().info(
+                f"[DEBUG] action (post-postproc): [{', '.join(f'{v:.4f}' for v in action)}]"
+            )
+
+        # Chunk-level ee_relative restore via shadow queue.
+        # The model's internal queue stores normalized tensors; we denormalize
+        # the full chunk together, restore rel → absolute, then serve absolute
+        # values from a shadow queue so we never re-enter normalized space.
+        # ee_abs and joint_abs require no restore — model output is already absolute.
+        if self.is_ee_relative:
+            if _is_new_chunk and self._relative_anchor_state is not None:
+                if _rest_norm is not None:
+                    _rest_denorm = [self._denorm_queue_action(a) for a in _rest_norm]
+                    _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
+                else:
+                    _chunk = action[np.newaxis]
+                _abs = ee_relative_restore_chunk(_chunk, self._relative_anchor_state)
+                self._abs_shadow_queue = deque(_abs[1:])
+                action = _abs[0]
+            elif self._abs_shadow_queue:
+                action = self._abs_shadow_queue.popleft()
+            elif not hasattr(self.model, "_queues") and self._relative_anchor_state is not None:
+                action = ee_relative_restore_chunk(action[np.newaxis], self._relative_anchor_state)[0]
+
+        if _will_run_forward:
+            self.metrics.record_inference()
+
+        return action
 
     def _publish_loop(self) -> None:
         """Action publish timer (unified for all models).
@@ -860,6 +949,14 @@ class LeRobotInferenceNode(Node):
         """
         if self._shutting_down:
             return
+
+        # Pre-replay homing (DatasetGtReplayerNode only): republish the frozen
+        # home target every tick instead of popping/composing from the deque,
+        # until _obs_update's arrival check confirms it and flips this back.
+        if self.is_ee and not getattr(self, "_homing_confirmed", True):
+            self._publish_home_target()
+            return
+
         self.metrics.record_control_loop()
 
         if self._is_vla:
@@ -879,12 +976,60 @@ class LeRobotInferenceNode(Node):
             if self.is_ee_delta:
                 with self._obs_lock:
                     _latest_obs = self._ee_delta_latest_obs_quat
+                    _latest_seq = self._ee_delta_latest_obs_seq
+                    _gen = self._ee_delta_obs_gen
                 if _latest_obs is None:
                     # No observation yet (startup warm-up) — skip this tick rather
                     # than publish an un-composed delta; don't drop the queued
                     # delta, it will compose correctly once an obs arrives.
                     return
-                action = ee_delta_restore_step(self._classic_action_deque.popleft(), _latest_obs)
+
+                _prev_seq = self._ee_delta_last_published_seq
+                if (
+                    _prev_seq is not None
+                    and _latest_seq is not None
+                    and not all(
+                        # None means that arm's SequenceStalenessGuard has degraded
+                        # (peer doesn't populate CommandedEEPose.sequence — see
+                        # ee_obs_sequence_guard.py) and given up on sequence-based
+                        # gating for it; treat as trivially advanced rather than
+                        # holding forever on an arm we can no longer trust this way.
+                        cur is None or prev is None or cur > prev
+                        for cur, prev in zip(_latest_seq, _prev_seq)
+                    )
+                ):
+                    # The anchor hasn't genuinely advanced (per CommandedEEPose.sequence)
+                    # for at least one arm since the tick we last composed against — the
+                    # echo for our last published command hasn't arrived/been processed
+                    # yet. Hold: leave the delta queued and skip publishing this tick,
+                    # rather than compose a fresh delta against an anchor we've already
+                    # consumed once. Composing anyway would silently skip one row of the
+                    # recorded trajectory with no way to recover (see
+                    # claude_docs/gt-replayer-correctness-test-plan.md's staleness
+                    # investigation) — holding preserves the 1:1 obs/delta pairing the
+                    # decoupled compose design depends on. Retried automatically next
+                    # tick once the anchor catches up.
+                    self.get_logger().warn(
+                        f"[ee_delta] holding publish tick: obs sequence {_latest_seq} has "
+                        f"not advanced past {_prev_seq} for all arms — anchor not yet fresh"
+                    )
+                    return
+
+                _delta_popped = self._classic_action_deque.popleft()
+                if self._debug:
+                    _stale = (
+                        self._ee_delta_last_published_gen is not None
+                        and _gen == self._ee_delta_last_published_gen
+                    )
+                    self.get_logger().info(
+                        f"[DEBUG-ANCHOR] publish_loop read gen={_gen} stale_reuse={_stale} "
+                        f"seq={_latest_seq} "
+                        f"full={_latest_obs.round(6).tolist()} "
+                        f"delta={np.asarray(_delta_popped).round(6).tolist()} t={time.monotonic():.4f}"
+                    )
+                    self._ee_delta_last_published_gen = _gen
+                self._ee_delta_last_published_seq = _latest_seq
+                action = ee_delta_restore_step(_delta_popped, _latest_obs)
             else:
                 action = self._classic_action_deque.popleft()
 

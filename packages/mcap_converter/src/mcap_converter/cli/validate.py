@@ -4,12 +4,13 @@ Validate a Converted LeRobot Dataset
 
 Loads the dataset through LeRobotDataset and displays basic information to verify
 successful conversion. By default, also prints raw per-frame data (first 3 episodes, 5
-frames each — override with --print-episodes/--print-frames, or pass --print-episodes 0
-to skip it) straight from the parquet files — reading directly, not through
-LeRobotDataset, so it's independent of any training-time transform and shows exactly
-what mcap_converter wrote. This merges what used to be a separate `dataset-inspect`
-command into the one tool, so there's a single CLI for "does this dataset load" and
-"show me the actual numbers".
+frames each, taken from the MIDDLE of each episode — the start of an episode is usually
+motionless, so it's a poor spot-check window; override with
+--print-episodes/--print-frames, or pass --print-episodes 0 to skip it) straight from
+the parquet files — reading directly, not through LeRobotDataset, so it's independent of
+any training-time transform and shows exactly what mcap_converter wrote. This merges what
+used to be a separate `dataset-inspect` command into the one tool, so there's a single
+CLI for "does this dataset load" and "show me the actual numbers".
 """
 
 import argparse
@@ -18,6 +19,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+from rich.console import Console, Group
+from rich.padding import Padding
+from rich.panel import Panel
+from rich.table import Table
 
 try:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -29,84 +34,63 @@ except ImportError as e:
 
     sys.exit(1)
 
+console = Console()
 
-def test_dataset(repo_id: str, root: str):
-    """Test if dataset can be loaded normally"""
 
-    print("=" * 70)
-    print("LeRobot Dataset Test")
-    print("=" * 70)
-    print(f"Repo ID: {repo_id}")
-    print(f"Root: {root}")
-    print("=" * 70)
-
+def test_dataset(repo_id: str, root: str) -> bool:
+    """Load the dataset and do a basic read spot-check. Returns True on success."""
     try:
-        # Load dataset
-        print("\n[1/5] Load dataset...")
         dataset = LeRobotDataset(repo_id=repo_id, root=root)
-        print("[OK] Dataset loaded successfully")
 
-        # Display basic information
-        print("\n[2/5] Dataset Basic Information:")
-        print(f"  - Total episodes: {dataset.num_episodes}")
-        print(f"  - Total frames: {dataset.num_frames}")
-        print(f"  - FPS: {dataset.fps}")
-        print(f"  - Robot type: {dataset.meta.robot_type}")
+        info_table = Table(show_header=False, box=None, padding=(0, 2))
+        info_table.add_column(style="bold")
+        info_table.add_column()
+        info_table.add_row("Repo ID", repo_id)
+        info_table.add_row("Root", root)
+        info_table.add_row("Episodes", str(dataset.num_episodes))
+        info_table.add_row("Frames", str(dataset.num_frames))
+        info_table.add_row("FPS", str(dataset.fps))
+        info_table.add_row("Robot type", str(dataset.meta.robot_type))
 
-        # Display features
-        print("\n[3/5] Dataset Features:")
+        feat_table = Table(
+            title="Features", title_style="bold", title_justify="left", padding=(0, 1)
+        )
+        feat_table.add_column("Name")
+        feat_table.add_column("Dtype", justify="center")
+        feat_table.add_column("Shape", justify="right")
         for feat_name, feat_info in dataset.features.items():
-            print(f"  - {feat_name}:")
-            print(f"      dtype: {feat_info.get('dtype', 'N/A')}")
-            print(f"      shape: {feat_info.get('shape', 'N/A')}")
+            feat_table.add_row(
+                feat_name, str(feat_info.get("dtype", "N/A")), str(feat_info.get("shape", "N/A"))
+            )
 
-        # Test reading first frame
-        print("\n[4/5] Test reading data...")
         if len(dataset) > 0:
-            frame = dataset[0]
-            print("[OK] Successfully read first frame")
-            print(f"  Available keys: {list(frame.keys())}")
-
-            # Display feature shapes
-            print("\n  Shape of each feature:")
-            for key, value in frame.items():
-                if hasattr(value, "shape"):
-                    print(f"    - {key}: {value.shape}")
-                elif hasattr(value, "__len__"):
-                    print(f"    - {key}: len={len(value)}")
-                else:
-                    print(f"    - {key}: {type(value).__name__}")
+            n_read = min(10, len(dataset))
+            for i in range(n_read):
+                _ = dataset[i]
+            read_note = f"[dim]Read {n_read} frame(s) OK.[/dim]"
         else:
-            print("[WARNING] Warning: Dataset is empty")
+            read_note = "[yellow]Dataset is empty — nothing to read.[/yellow]"
 
-        # Test batch reading
-        print("\n[5/5] Test batch reading...")
-        num_test_frames = min(10, len(dataset))
-        if num_test_frames > 0:
-            for i in range(num_test_frames):
-                frame = dataset[i]
-            print(f"[OK] Successfully read {num_test_frames} frames")
+        stats_note = ""
+        if getattr(dataset.meta, "stats", None):
+            stats_note = (
+                f"\n[dim]Stats available for {len(dataset.meta.stats)} feature(s) "
+                f"— see meta/stats.json for full values.[/dim]"
+            )
 
-        # Statistics
-        if hasattr(dataset.meta, "stats") and dataset.meta.stats:
-            print("\n[Additional] Statistics:")
-            for key, stats in dataset.meta.stats.items():
-                if isinstance(stats, dict):
-                    print(f"  - {key}:")
-                    for stat_name, stat_value in stats.items():
-                        if isinstance(stat_value, list):
-                            print(f"      {stat_name}: [{len(stat_value)} values]")
-                        else:
-                            print(f"      {stat_name}: {stat_value}")
-
-        print("\n" + "=" * 70)
-        print("[OK] All tests passed! Dataset can be used normally")
-        print("=" * 70)
-
+        body = Group(info_table, "", Padding(feat_table, (0, 0, 0, 2)), "", read_note + stats_note)
+        console.print(Panel(
+            body,
+            title="[bold green]Dataset Load Check — PASSED",
+            border_style="green",
+            padding=(1, 2),
+        ))
         return True
 
     except Exception as e:
-        print(f"\n[ERROR] Test failed: {e}")
+        console.print(Panel(
+            str(e), title="[bold red]Dataset Load Check — FAILED", border_style="red", padding=(1, 2),
+        ))
         import traceback
 
         traceback.print_exc()
@@ -118,6 +102,8 @@ def test_dataset(repo_id: str, root: str):
 # command). Reads parquet directly — independent of LeRobotDataset/training-time
 # transforms, so it shows exactly what mcap_converter wrote to disk.
 # ---------------------------------------------------------------------------
+
+_SCALAR_COLUMNS = {"timestamp", "frame_index", "episode_index", "index", "task_index"}
 
 
 def _load_info(dataset_root: Path) -> Dict[str, Any]:
@@ -173,6 +159,46 @@ def _format_vector(name: str, vec: np.ndarray, labels: Optional[List[str]]) -> s
     return "\n".join(lines)
 
 
+def _print_frame(row, df_columns: List[str], info: Dict[str, Any], no_labels: bool) -> None:
+    """Print one frame's data. observation.state and action, when both present, are
+    shown side by side in one table (dim-for-dim) — the common case of spot-checking
+    whether action[t] tracks the next frame's observation is much easier to eyeball
+    that way than as two separate vertical blocks. Any other vector column falls back
+    to a plain labeled list."""
+    vector_cols = [
+        c for c in df_columns
+        if c not in _SCALAR_COLUMNS and isinstance(row[c], (list, np.ndarray))
+    ]
+
+    if "observation.state" in vector_cols and "action" in vector_cols:
+        state = np.asarray(row["observation.state"], dtype=float)
+        action = np.asarray(row["action"], dtype=float)
+        state_labels = None if no_labels else _feature_names(info, "observation.state")
+        action_labels = None if no_labels else _feature_names(info, "action")
+
+        table = Table(box=None, padding=(0, 2), show_edge=False)
+        table.add_column("#", style="dim", justify="right")
+        table.add_column("observation.state")
+        table.add_column("action")
+        for i in range(max(len(state), len(action))):
+            s_label = state_labels[i] if state_labels and i < len(state_labels) else str(i)
+            a_label = action_labels[i] if action_labels and i < len(action_labels) else str(i)
+            s_val = f"{s_label} = {state[i]: .6f}" if i < len(state) else ""
+            a_val = f"{a_label} = {action[i]: .6f}" if i < len(action) else ""
+            table.add_row(str(i), s_val, a_val)
+        console.print(table)
+        vector_cols = [c for c in vector_cols if c not in ("observation.state", "action")]
+
+    for col in vector_cols:
+        labels = None if no_labels else _feature_names(info, col)
+        print(_format_vector(col, np.asarray(row[col], dtype=float), labels))
+
+    for col in df_columns:
+        if col in _SCALAR_COLUMNS or col in vector_cols or col in ("observation.state", "action"):
+            continue
+        print(f"  {col} = {_format_scalar(row[col])}")
+
+
 def print_raw_frames(
     root: str,
     n_episodes: int,
@@ -180,60 +206,57 @@ def print_raw_frames(
     columns: Optional[str] = None,
     no_labels: bool = False,
 ) -> bool:
-    """Print raw per-frame data for the first n_episodes episodes, first n_frames frames
-    each. Returns True on success, False if the dataset couldn't be read this way."""
+    """Print raw per-frame data for the first n_episodes episodes, n_frames frames each,
+    taken from the MIDDLE of each episode (the start is usually motionless — a poor
+    window for spot-checking real values). Returns True on success, False if the dataset
+    couldn't be read this way."""
     dataset_root = Path(root)
     try:
         info = _load_info(dataset_root)
     except FileNotFoundError as e:
-        print(f"[ERROR] {e}")
+        console.print(f"[red]{e}[/red]")
         return False
 
     total_episodes = info.get("total_episodes", 0)
     n_episodes = min(n_episodes, total_episodes)
     if n_episodes == 0:
-        print(f"[dataset-valid] total_episodes=0 in {dataset_root} — nothing to print.")
+        console.print(f"[yellow]total_episodes=0 in {dataset_root} — nothing to print.[/yellow]")
         return False
 
     vector_columns = [col for col, feat in info.get("features", {}).items() if feat.get("dtype") != "video"]
-    scalar_columns = {"timestamp", "frame_index", "episode_index", "index", "task_index"}
     column_list = columns.split(",") if columns else None
 
-    print("\n" + "=" * 70)
-    print("Raw Frame Data")
-    print("=" * 70)
-    print(f"total_episodes={total_episodes}, showing first {n_episodes} episode(s), "
-          f"first {n_frames} frame(s) each")
-    print(f"vector features found: {vector_columns}")
-    print()
+    console.print(Panel(
+        f"episodes: {total_episodes} total, showing {n_episodes}\n"
+        f"frames per episode: {n_frames} (from the middle of the episode)\n"
+        f"vector features: {', '.join(vector_columns)}",
+        title="Raw Frame Data", border_style="cyan", padding=(1, 2),
+    ))
 
     for ep in range(n_episodes):
         df = _load_episode_df(dataset_root, ep, column_list)
         if df is None:
-            print(f"=== Episode {ep}: no frames found ===\n")
+            console.print(f"[yellow]Episode {ep}: no frames found[/yellow]\n")
             continue
 
-        print(f"=== Episode {ep} ({len(df)} total frames) ===")
-        ep_frames = min(n_frames, len(df))
-        for i in range(ep_frames):
-            row = df.iloc[i]
-            header_bits = []
-            for col in ("frame_index", "episode_index", "index", "task_index", "timestamp"):
-                if col in df.columns:
-                    header_bits.append(f"{col}={_format_scalar(row[col])}")
-            print(f"--- frame {i} ({', '.join(header_bits)}) ---")
+        total_frames = len(df)
+        ep_frames = min(n_frames, total_frames)
+        start = max(0, (total_frames - ep_frames) // 2)
 
-            for col in df.columns:
-                if col in scalar_columns:
-                    continue
-                value = row[col]
-                if isinstance(value, (list, np.ndarray)):
-                    labels = None if no_labels else _feature_names(info, col)
-                    print(_format_vector(col, np.asarray(value, dtype=float), labels))
-                else:
-                    print(f"  {col} = {_format_scalar(value)}")
-            print()
-        print()
+        console.print(
+            f"\n[bold]Episode {ep}[/bold] [dim]({total_frames} frames total, "
+            f"showing rows {start}..{start + ep_frames - 1})[/dim]"
+        )
+        for offset in range(ep_frames):
+            i = start + offset
+            row = df.iloc[i]
+            header_bits = [
+                f"{col}={_format_scalar(row[col])}"
+                for col in ("frame_index", "episode_index", "index", "task_index", "timestamp")
+                if col in df.columns
+            ]
+            console.print(f"[dim]-- row {i} ({', '.join(header_bits)}) --[/dim]")
+            _print_frame(row, list(df.columns), info, no_labels)
 
     return True
 
@@ -274,7 +297,8 @@ examples:
     parser.add_argument(
         "--print-frames", type=int, default=5,
         help="number of frames to print per episode when --print-episodes > 0 (default: 5; "
-             "capped at each episode's actual frame count via min() if fewer exist)",
+             "capped at each episode's actual frame count via min() if fewer exist), taken "
+             "from the MIDDLE of the episode — the start is usually motionless.",
     )
     parser.add_argument(
         "--columns", type=str, default=None,
@@ -295,8 +319,8 @@ def main(args: Optional[List[str]] = None) -> None:
     # Check if directory exists
     root_path = Path(parsed.root)
     if not root_path.exists():
-        print(f"[ERROR] Directory not found: {parsed.root}")
-        print("Run mcap-convert first to create a dataset.")
+        console.print(f"[red]Directory not found: {parsed.root}[/red]")
+        console.print("Run mcap-convert first to create a dataset.")
         exit(1)
 
     # Run test
