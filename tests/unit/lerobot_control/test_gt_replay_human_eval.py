@@ -30,12 +30,12 @@ def test_resolve_timeout_sec_explicit_override_wins():
 
 
 def test_resolve_timeout_sec_scales_with_nominal_duration():
-    # nominal = 300 / 30 = 10s; fake profile is (1.5, 10.0) -> 10*1.5 + 10 = 25
+    # nominal = 300 / 30 = 10s; fake profile is (1.5, 25.0) -> 10*1.5 + 25 = 40
     got = human_eval.resolve_timeout_sec(
         explicit=None, target="fake", n_frames=300, control_frequency=30.0,
         homing_enabled=False, homing_timeout_sec=30.0,
     )
-    assert got == 25.0
+    assert got == 40.0
 
 
 def test_resolve_timeout_sec_real_gets_larger_allowance_than_fake():

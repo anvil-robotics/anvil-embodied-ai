@@ -84,6 +84,9 @@ runs/
 # GT-replayer correctness test scratch reports
 tests/smoke/.gt_replay_reports/
 
+# gt_replay_human_eval.py default report output (always written unless --report-path overrides)
+/gt_replay_human_eval_report.json
+
 # mcap-valid default report output (always written unless --output overrides)
 mcap_valid_reports/
 

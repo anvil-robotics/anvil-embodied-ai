@@ -64,11 +64,25 @@ DEFAULT_SIGNAL_DIR = REPO / "tests" / "smoke" / ".gt_replay_reports" / "human_ev
 
 # (multiplier, fixed_margin_sec) applied to an episode's nominal duration
 # (n_frames / control_frequency) to compute the default completion-poll timeout.
-# Real hardware gets a larger allowance: tracking error/operator intervention can
-# genuinely extend wall-clock time beyond the nominal duration; the mock has none
-# of that variance.
+#
+# The fixed margin exists mainly to cover node-startup latency, NOT episode-to-
+# episode variance: `docker compose up -d` returns as soon as the container is
+# scheduled, well before dataset_gt_replayer_node has finished spawning image
+# workers and completing DDS discovery — that startup latency (observed ~12s,
+# more on a cold cache) elapses entirely *inside* the completion-poll loop,
+# silently eating into this budget before any GT row is even replayed. This
+# node-startup cost is identical for `replay` (fake) and `gt-replay-real`
+# (real) — same LeRobotInferenceNode-derived startup machinery either way —
+# so the fake margin must be comfortably above it too, not just a small
+# constant: an under-provisioned margin here reads as a false "timed_out"
+# on the very first (coldest) episode of a run, not a real failure.
+#
+# Real hardware additionally gets a larger allowance on top of that shared
+# startup cost: tracking error/operator intervention can genuinely extend
+# wall-clock time beyond the nominal duration in a way the mock's instantaneous
+# echo never does.
 TIMEOUT_PROFILE = {
-    "fake": (1.5, 10.0),
+    "fake": (1.5, 25.0),
     "real": (3.0, 30.0),
 }
 
