@@ -1,33 +1,51 @@
 #!/usr/bin/env python3
 """GT-replay evaluation via human judgment — real hardware (or fake, as a dry run).
 
-Unlike ``gt_replay_verifier_node``/``gt_replay_correctness_test.py`` (fake-hardware-only,
-numeric tolerance against the dataset's own recorded trajectory — see
-``claude_docs/dataset-gt-replayer-and-fake-hardware-architecture.md``), this tool replays
-one or more episodes and asks a HUMAN OPERATOR to judge task success, since a real robot's
+This tool's core job — unlike ``gt_replay_verifier_node``/``gt_replay_correctness_test.py``
+(fake-hardware-only numeric tolerance against the dataset's own recorded trajectory — see
+``claude_docs/gt-replay/2026-07-18-fake-hardware-architecture.md``) — is to replay one or
+more episodes and ask a HUMAN OPERATOR to judge task success, since a real robot's
 physically-measured pose legitimately deviates from the recording (actuation dynamics,
-tracking error, latency) in ways no numeric tolerance should flag as a bug.
+tracking error, latency) in ways no numeric tolerance should flag as a bug. For
+``--target fake`` specifically, ``gt_replay_verifier_node``'s numeric check also runs
+alongside the prompt (see step 3 below) since the mock, unlike a real robot, does have
+ground truth to compare against — a free extra signal on top of the harness rehearsal.
 
 For each selected episode, in order:
   1. Bring up one episode's replayer container (``--target real``:
      ``docker-compose.yml``'s ``gt-replay-real`` service, against a real robot's own
      already-running controller stack; ``--target fake``: ``docker-compose.fake-hardware.yml``'s
-     ``mock-robot`` + ``replay`` services, a free rehearsal of this tool's own control flow).
+     ``mock-robot`` + ``replay`` (+ ``gt-replay-verify``, staged before ``replay`` so it's
+     already subscribed) services, a free rehearsal of this tool's own control flow).
   2. Poll for the completion-signal sentinel the replayer writes (see
      ``dataset_gt_replayer_node.py``'s ``_write_signal``) up to a per-episode timeout that
      scales with the episode's own nominal duration. Classify ``homing_status``
      (confirmed/failed/skipped) and ``replay_status`` (completed/timed_out/crashed/
      not_attempted) from whatever the sentinel (or its absence) says.
-  3. If replay completed: prompt the operator for a pass/fail judgment + optional comment.
+  3. ``--target fake`` only, once replay completes: also read ``gt_replay_verifier_node``'s
+     own numeric-tolerance report and surface it as ``auto_verify`` (pass/fail + max pos/rot
+     error) — a free extra signal, since the mock has ground truth to compare against. This
+     is purely additive: the operator prompt (below) still runs regardless, since real
+     hardware never has this signal and the prompt itself needs rehearsing too.
+
+     IMPORTANT: pass ``configs/lerobot_control/inference_ee_gt_replay_test.yaml`` (not the
+     production ``inference_ee.yaml``) if you want ``auto_verify``'s gripper channel to be
+     meaningful — production configs' ``gripper_factor``/``gripper_min``/``gripper_max``
+     deliberately transform the published gripper value for real-robot feel, which will
+     show up as a persistent, expected ``auto_verify`` gripper mismatch against the
+     dataset's raw recorded value (pos/rot are unaffected either way). Use the production
+     config when you specifically want to rehearse against it; a gripper-only
+     ``auto_verify`` failure there is not a bug.
+  4. If replay completed: prompt the operator for a pass/fail judgment + optional comment.
      If it didn't (homing failure, timeout, crash): skip the prompt — there's nothing to
      judge — and record ``operator_verdict: null``. These are never conflated.
-  4. Tear the episode's container(s) down before the next episode.
+  5. Tear the episode's container(s) down before the next episode.
 
 After all episodes: write a JSON report (episode-by-episode + summary counts, including a
 ``pass_rate`` computed only over episodes that actually completed replay) and print a
 compact summary to stdout.
 
-See claude_docs/real-hardware-gt-replay-eval-plan.md for the full design.
+See claude_docs/gt-replay/2026-07-18-real-hardware-eval-plan.md for the full design.
 
 Usage:
     scripts/gt_replay_human_eval.py --target real --dataset /path/to/dataset --episodes 0:5 \\
@@ -61,6 +79,25 @@ REAL_REPLAY_CONTAINER = "lerobot-gt-replay-real"
 
 DEFAULT_REPORT_PATH = REPO / "gt_replay_human_eval_report.json"
 DEFAULT_SIGNAL_DIR = REPO / "tests" / "smoke" / ".gt_replay_reports" / "human_eval_signals"
+DEFAULT_VERIFY_REPORTS_DIR = REPO / "tests" / "smoke" / ".gt_replay_reports" / "human_eval_verify"
+
+# Fake-target only: gt_replay_verifier_node's own numeric tolerance check
+# (see gt_replay_verifier_node.py) runs ALONGSIDE the operator prompt, not
+# instead of it — the mock has ground truth to compare against (unlike real
+# hardware), so this is a free extra signal, but the prompt still rehearses
+# the exact interaction real-hardware runs depend on. --target real never
+# runs a verifier at all: a real robot's physically-measured pose legitimately
+# deviates from the recording, so there is no numeric tolerance that would be
+# meaningful there (see module docstring).
+VERIFY_TIMEOUT_SEC_DEFAULT = 120.0
+# Mirrors gt_replay_correctness_test.py's staged bring-up: the verifier must
+# already be subscribed before `replay` starts publishing, or it can miss the
+# episode's early rows entirely.
+DDS_DISCOVERY_SLEEP_SEC = 3.0
+# Extra polling time after replay's own completion signal arrives, in case
+# gt_replay_verifier_node's finalize (driven by the same message stream) lags
+# slightly behind dataset_gt_replayer_node's own completion write.
+VERIFY_GRACE_SEC = 15.0
 
 # (multiplier, fixed_margin_sec) applied to an episode's nominal duration
 # (n_frames / control_frequency) to compute the default completion-poll timeout.
@@ -154,6 +191,28 @@ def classify_signal(signal: dict | None, container_exited: bool, timed_out: bool
     return None, "crashed"
 
 
+def summarize_auto_verify(verify_report: dict | None) -> dict | None:
+    """Compact ``gt_replay_verifier_node`` report -> ``{all_passed, max_pos_err_m,
+    max_rot_err_deg}``, or ``None`` if no report was available (--target real,
+    or the verifier crashed/never finalized in time).
+
+    ``max_*_err`` is the max over all arms — enough to answer "did anything
+    drift" without embedding the full per-arm/per-index report inline in every
+    episode record (the full ``gt_replay_verifier_node`` report, if written,
+    still lives on disk at --verify-reports-dir for deeper inspection).
+    """
+    if verify_report is None:
+        return None
+    arms = verify_report.get("arms", {})
+    max_pos_err = max((a["max_pos_err_m"] for a in arms.values()), default=0.0)
+    max_rot_err = max((a["max_rot_err_deg"] for a in arms.values()), default=0.0)
+    return {
+        "all_passed": bool(verify_report.get("all_passed")),
+        "max_pos_err_m": max_pos_err,
+        "max_rot_err_deg": max_rot_err,
+    }
+
+
 def prompt_operator_verdict(episode: int, rows_replayed: int, elapsed_sec: float) -> tuple[str, str]:
     """Foreground, blocking pass/fail + optional-comment prompt.
 
@@ -186,6 +245,7 @@ def build_episode_record(
     operator_verdict: str | None,
     comment: str | None,
     timestamp: str,
+    auto_verify: dict | None = None,
 ) -> dict:
     return {
         "episode": episode,
@@ -194,6 +254,9 @@ def build_episode_record(
         "operator_verdict": operator_verdict,
         "comment": comment,
         "timestamp": timestamp,
+        # Fake-target only (see summarize_auto_verify) — always None for
+        # --target real, since no verifier ever runs there.
+        "auto_verify": auto_verify,
     }
 
 
@@ -215,6 +278,13 @@ def build_report(
     n_operator_fail = sum(1 for r in episode_records if r["operator_verdict"] == "fail")
     pass_rate = (n_operator_pass / n_completed_replay) if n_completed_replay else None
 
+    # Fake-target only — always None/0 for --target real (auto_verify is
+    # always None there, never conflated with "the verifier ran and failed").
+    auto_verify_records = [r["auto_verify"] for r in episode_records if r["auto_verify"] is not None]
+    n_auto_verify_pass = sum(1 for v in auto_verify_records if v["all_passed"])
+    n_auto_verify_fail = len(auto_verify_records) - n_auto_verify_pass
+    auto_verify_pass_rate = (n_auto_verify_pass / len(auto_verify_records)) if auto_verify_records else None
+
     return {
         "dataset": dataset,
         "target": target,
@@ -232,6 +302,9 @@ def build_report(
             "n_operator_pass": n_operator_pass,
             "n_operator_fail": n_operator_fail,
             "pass_rate": pass_rate,
+            "n_auto_verify_pass": n_auto_verify_pass,
+            "n_auto_verify_fail": n_auto_verify_fail,
+            "auto_verify_pass_rate": auto_verify_pass_rate,
         },
         "episodes": episode_records,
     }
@@ -254,10 +327,22 @@ def print_summary(report: dict) -> None:
         )
     else:
         print("  operator verdict: n/a (no episode completed replay)")
+    if s["auto_verify_pass_rate"] is not None:
+        print(
+            f"  auto-verify (fake-target only): {s['n_auto_verify_pass']} pass, "
+            f"{s['n_auto_verify_fail']} fail (pass_rate={s['auto_verify_pass_rate']:.2f})"
+        )
     for r in report["episodes"]:
+        auto = r["auto_verify"]
+        auto_str = ""
+        if auto is not None:
+            auto_str = (
+                f" auto_verify={'PASS' if auto['all_passed'] else 'FAIL'}"
+                f"(max_pos_err={auto['max_pos_err_m']:.4g}m, max_rot_err={auto['max_rot_err_deg']:.4g}deg)"
+            )
         print(
             f"    episode {r['episode']}: homing={r['homing_status']} "
-            f"replay={r['replay_status']} verdict={r['operator_verdict']}"
+            f"replay={r['replay_status']} verdict={r['operator_verdict']}{auto_str}"
             + (f" — {r['comment']}" if r["comment"] else "")
         )
 
@@ -327,12 +412,16 @@ def run_episode(
     dataset_root: Path,
     args: argparse.Namespace,
     signal_dir: Path,
+    verify_reports_dir: Path,
 ) -> dict:
     """Bring up one episode's replay, wait for it, prompt if applicable, tear down."""
     print(f"\n=== Episode {episode} ({args.target}) ===")
     signal_path = signal_dir / f"episode_{episode}.json"
     if signal_path.exists():
         signal_path.unlink()
+    verify_report_path = verify_reports_dir / "gt_replay_report.json"
+    if args.target == "fake" and verify_report_path.exists():
+        verify_report_path.unlink()
 
     _actions = dataset_reader.load_episode_actions(dataset_root, episode)
     n_frames = len(_actions) if _actions is not None else 0
@@ -364,13 +453,23 @@ def run_episode(
             env["EE_MODE"] = "true"
             env["EE_ARMS"] = args.arms
             env["EE_SEED_POSE"] = _compute_ee_seed(dataset_root, episode)
-            if _compose(FAKE_COMPOSE_FILE, "replay", "up", "-d", "mock-robot", env_extra=env) != 0:
+            env["REPORTS_DIR"] = str(verify_reports_dir)
+            env["VERIFY_TIMEOUT_SEC"] = str(VERIFY_TIMEOUT_SEC_DEFAULT)
+            if _compose(FAKE_COMPOSE_FILE, "replay-verify", "up", "-d", "mock-robot", env_extra=env) != 0:
                 print("  mock-robot failed to start")
                 return build_episode_record(episode, None, "crashed", None, None, _now())
             if not _wait_healthy(MOCK_CONTAINER):
                 print("  mock-robot never became healthy")
                 return build_episode_record(episode, None, "crashed", None, None, _now())
-            if _compose(FAKE_COMPOSE_FILE, "replay", "up", "-d", "replay", env_extra=env) != 0:
+            # gt-replay-verify must already be subscribed before replay starts
+            # publishing (mirrors gt_replay_correctness_test.py's staged
+            # bring-up) — bring it up first, give DDS discovery a moment, then
+            # start replay.
+            if _compose(FAKE_COMPOSE_FILE, "replay-verify", "up", "-d", "gt-replay-verify", env_extra=env) != 0:
+                print("  gt-replay-verify failed to start")
+                return build_episode_record(episode, None, "crashed", None, None, _now())
+            time.sleep(DDS_DISCOVERY_SLEEP_SEC)
+            if _compose(FAKE_COMPOSE_FILE, "replay-verify", "up", "-d", "replay", env_extra=env) != 0:
                 print("  replay failed to start")
                 return build_episode_record(episode, None, "crashed", None, None, _now())
         else:
@@ -393,6 +492,29 @@ def run_episode(
 
         homing_status, replay_status = classify_signal(signal, exited, timed_out)
 
+        auto_verify = None
+        if args.target == "fake" and replay_status == "completed":
+            # gt_replay_verifier_node finalizes off the same message stream
+            # replay just finished publishing, so its report should already be
+            # there or arrive within a few ticks — short grace poll, not the
+            # full episode timeout again.
+            verify_deadline = time.monotonic() + VERIFY_GRACE_SEC
+            verify_report = None
+            while time.monotonic() < verify_deadline:
+                verify_report = _read_signal(verify_report_path)
+                if verify_report is not None:
+                    break
+                time.sleep(POLL_INTERVAL_SEC)
+            auto_verify = summarize_auto_verify(verify_report)
+            if auto_verify is None:
+                print("  auto-verify: report never arrived (verifier crashed or its own timeout elapsed)")
+            else:
+                print(
+                    f"  auto-verify: {'PASS' if auto_verify['all_passed'] else 'FAIL'} "
+                    f"(max_pos_err={auto_verify['max_pos_err_m']:.4g}m, "
+                    f"max_rot_err={auto_verify['max_rot_err_deg']:.4g}deg)"
+                )
+
         if replay_status == "completed":
             elapsed = time.monotonic() - start
             rows_replayed = signal.get("rows_replayed", n_frames) if signal else n_frames
@@ -401,11 +523,11 @@ def run_episode(
             verdict, comment = None, None
             print(f"  homing_status={homing_status} replay_status={replay_status} — skipping operator prompt")
 
-        return build_episode_record(episode, homing_status, replay_status, verdict, comment, _now())
+        return build_episode_record(episode, homing_status, replay_status, verdict, comment, _now(), auto_verify)
 
     finally:
         if args.target == "fake":
-            _compose(FAKE_COMPOSE_FILE, "replay", "down", env_extra=env)
+            _compose(FAKE_COMPOSE_FILE, "replay-verify", "down", env_extra=env)
         else:
             _compose(REAL_COMPOSE_FILE, "gt-replay-real", "down", env_extra=env)
 
@@ -431,6 +553,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config-file", required=True, help="Path to the inference config YAML")
     parser.add_argument("--report-path", default=str(DEFAULT_REPORT_PATH))
     parser.add_argument("--signal-dir", default=str(DEFAULT_SIGNAL_DIR))
+    parser.add_argument(
+        "--verify-reports-dir", default=str(DEFAULT_VERIFY_REPORTS_DIR),
+        help="Fake-target only: where gt_replay_verifier_node's per-episode numeric-tolerance "
+        "report is written (see module docstring's auto-verify note).",
+    )
     parser.add_argument(
         "--completion-timeout-sec", type=float, default=None,
         help="Override the per-episode completion-poll timeout (default: scales with the "
@@ -477,6 +604,8 @@ def main(argv: list[str] | None = None) -> int:
     args.config_file = str(Path(args.config_file).resolve())
     signal_dir = Path(args.signal_dir)
     signal_dir.mkdir(parents=True, exist_ok=True)
+    verify_reports_dir = Path(args.verify_reports_dir)
+    verify_reports_dir.mkdir(parents=True, exist_ok=True)
 
     total_episodes = dataset_reader.load_info(dataset_root)["total_episodes"]
     try:
@@ -491,7 +620,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Resolved episodes: {episodes} (of {total_episodes} total)")
 
     started_at = _now()
-    records = [run_episode(ep, dataset_root, args, signal_dir) for ep in episodes]
+    records = [run_episode(ep, dataset_root, args, signal_dir, verify_reports_dir) for ep in episodes]
     finished_at = _now()
 
     report = build_report(

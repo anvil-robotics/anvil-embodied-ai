@@ -98,6 +98,38 @@ def test_classify_signal_no_signal_timeout_elapsed():
 
 
 # --------------------------------------------------------------------------- #
+# summarize_auto_verify — fake-target-only extra signal from
+# gt_replay_verifier_node's own numeric-tolerance report
+# --------------------------------------------------------------------------- #
+
+
+def test_summarize_auto_verify_none_when_no_report():
+    """--target real (or a crashed/timed-out verifier) never has a report."""
+    assert human_eval.summarize_auto_verify(None) is None
+
+
+def test_summarize_auto_verify_extracts_max_error_across_arms():
+    report = {
+        "all_passed": False,
+        "arms": {
+            "left": {"max_pos_err_m": 0.002, "max_rot_err_deg": 0.3},
+            "right": {"max_pos_err_m": 0.0001, "max_rot_err_deg": 0.9},
+        },
+    }
+    got = human_eval.summarize_auto_verify(report)
+    assert got == {"all_passed": False, "max_pos_err_m": 0.002, "max_rot_err_deg": 0.9}
+
+
+def test_summarize_auto_verify_all_passed_true():
+    report = {
+        "all_passed": True,
+        "arms": {"left": {"max_pos_err_m": 0.0, "max_rot_err_deg": 0.0}},
+    }
+    got = human_eval.summarize_auto_verify(report)
+    assert got["all_passed"] is True
+
+
+# --------------------------------------------------------------------------- #
 # prompt_operator_verdict — foreground input(), monkeypatched (mirrors
 # mcap_converter's migrate_config.py test precedent)
 # --------------------------------------------------------------------------- #
@@ -158,3 +190,38 @@ def test_build_report_pass_rate_null_when_nothing_completed():
     records = [human_eval.build_episode_record(0, "failed", "not_attempted", None, None, "t0")]
     report = human_eval.build_report("ds", "real", "0", records, "start", "end")
     assert report["summary"]["pass_rate"] is None
+
+
+def test_build_report_auto_verify_null_for_real_target():
+    """--target real never runs a verifier — auto_verify stays None on every
+    episode, and the summary must not fabricate a 0/0 pass_rate for it."""
+    records = [
+        human_eval.build_episode_record(0, "confirmed", "completed", "pass", "", "t0"),
+    ]
+    report = human_eval.build_report("ds", "real", "0", records, "start", "end")
+    assert report["episodes"][0]["auto_verify"] is None
+    s = report["summary"]
+    assert s["n_auto_verify_pass"] == 0
+    assert s["n_auto_verify_fail"] == 0
+    assert s["auto_verify_pass_rate"] is None
+
+
+def test_build_report_auto_verify_pass_rate_over_fake_episodes():
+    records = [
+        human_eval.build_episode_record(
+            0, "skipped", "completed", "pass", "", "t0",
+            auto_verify={"all_passed": True, "max_pos_err_m": 0.0001, "max_rot_err_deg": 0.01},
+        ),
+        human_eval.build_episode_record(
+            1, "skipped", "completed", "pass", "", "t1",
+            auto_verify={"all_passed": False, "max_pos_err_m": 0.05, "max_rot_err_deg": 3.0},
+        ),
+        # Timed out before the verifier ever finalized -- auto_verify is None,
+        # not counted as a fail.
+        human_eval.build_episode_record(2, "skipped", "timed_out", None, None, "t2", auto_verify=None),
+    ]
+    report = human_eval.build_report("ds", "fake", "0:3", records, "start", "end")
+    s = report["summary"]
+    assert s["n_auto_verify_pass"] == 1
+    assert s["n_auto_verify_fail"] == 1
+    assert s["auto_verify_pass_rate"] == 0.5
