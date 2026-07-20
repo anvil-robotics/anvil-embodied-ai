@@ -260,7 +260,7 @@ class MockControllerNode(Node):
 
         self._ee_pose_pubs: dict[str, object] = {}
         self._ee_command_subs = []
-        # Per-arm monotonically-incrementing counter for CommandedEEPose.sequence.
+        # Per-arm monotonically-incrementing counter for MockEEPose.sequence.
         # Bumped in _ee_command_callback — i.e. once per actually-received command,
         # NOT once per publish_ee_poses() tick. This distinction is the whole
         # point: publish_ee_poses runs on its own fixed-rate timer and would
@@ -268,7 +268,7 @@ class MockControllerNode(Node):
         # if a command is still in flight, which is exactly the stale-echo bug
         # this exists to let a consumer detect. Incrementing per publish instead
         # would advance even on a re-publish of unchanged state, defeating the
-        # whole mechanism. See ee_obs_sequence_guard.py and CommandedEEPose.msg.
+        # whole mechanism. See ee_obs_sequence_guard.py and MockEEPose.msg.
         self._ee_seq_by_arm: dict[str, int] = {arm: 0 for arm in self._ee_arms}
         for arm in self._ee_arms:
             obs_topic = f"/ee_pose_{arm}"

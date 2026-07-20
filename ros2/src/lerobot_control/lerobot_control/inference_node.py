@@ -95,17 +95,21 @@ class LeRobotInferenceNode(Node):
         # _obs_update; that would defeat the whole point (see claude_docs/
         # ee-delta-flow-plan.md, Item 2).
         self._ee_delta_latest_obs_quat: np.ndarray | None = None
-        # Per-arm CommandedEEPose.sequence backing _ee_delta_latest_obs_quat above,
+        # Per-arm MockEEPose.sequence backing _ee_delta_latest_obs_quat above,
         # captured alongside it (see MultiProcessStrategy.get_ee_obs_sequence_snapshot).
-        # _publish_loop compares this against _ee_delta_last_published_seq to tell
-        # whether the anchor has genuinely advanced since the last tick it composed
-        # against — NOT whether the pose value looks different (a stationary arm's
-        # pose is legitimately unchanged; only sequence non-advancement means the
-        # mock/controller hasn't caught up to the last published command yet). If it
-        # hasn't advanced, that tick is held rather than composed — composing a new
-        # delta against an anchor the loop has already consumed once would silently
-        # skip one row of the recorded trajectory and never recover (see
-        # claude_docs/gt-replayer-correctness-test-plan.md's staleness investigation).
+        # Fake-hardware-only: None outright against real hardware (mock_ee_pose_echo
+        # false), since real hardware's pose is physically driven and structurally
+        # cannot exhibit the mock's stale-echo failure mode this exists to catch — see
+        # ee_obs_sequence_guard.py's module docstring. _publish_loop compares this
+        # against _ee_delta_last_published_seq to tell whether the anchor has
+        # genuinely advanced since the last tick it composed against — NOT whether
+        # the pose value looks different (a stationary arm's pose is legitimately
+        # unchanged; only sequence non-advancement means the mock hasn't caught up to
+        # the last published command yet). If it hasn't advanced, that tick is held
+        # rather than composed — composing a new delta against an anchor the loop has
+        # already consumed once would silently skip one row of the recorded
+        # trajectory and never recover (see claude_docs/gt-replay/
+        # 2026-07-18-fake-hardware-architecture.md's staleness investigation).
         self._ee_delta_latest_obs_seq: tuple[int, ...] | None = None
         self._ee_delta_last_published_seq: tuple[int, ...] | None = None
         # Created unconditionally: used by the ee_delta obs/publish handoff above
@@ -990,24 +994,28 @@ class LeRobotInferenceNode(Node):
                     and _latest_seq is not None
                     and not all(
                         # None means that arm's SequenceStalenessGuard has degraded
-                        # (peer doesn't populate CommandedEEPose.sequence — see
-                        # ee_obs_sequence_guard.py) and given up on sequence-based
-                        # gating for it; treat as trivially advanced rather than
-                        # holding forever on an arm we can no longer trust this way.
+                        # (fake-hardware-only — the mock stopped advancing
+                        # MockEEPose.sequence, see ee_obs_sequence_guard.py) and given
+                        # up on sequence-based gating for it; treat as trivially
+                        # advanced rather than holding forever on an arm we can no
+                        # longer trust this way. Also None outright against real
+                        # hardware, where get_ee_obs_sequence_snapshot() always
+                        # returns None (no guard ever constructed) — making this
+                        # whole hold-gate a no-op there, exactly as intended.
                         cur is None or prev is None or cur > prev
                         for cur, prev in zip(_latest_seq, _prev_seq)
                     )
                 ):
-                    # The anchor hasn't genuinely advanced (per CommandedEEPose.sequence)
+                    # The anchor hasn't genuinely advanced (per MockEEPose.sequence)
                     # for at least one arm since the tick we last composed against — the
-                    # echo for our last published command hasn't arrived/been processed
-                    # yet. Hold: leave the delta queued and skip publishing this tick,
-                    # rather than compose a fresh delta against an anchor we've already
-                    # consumed once. Composing anyway would silently skip one row of the
-                    # recorded trajectory with no way to recover (see
-                    # claude_docs/gt-replayer-correctness-test-plan.md's staleness
-                    # investigation) — holding preserves the 1:1 obs/delta pairing the
-                    # decoupled compose design depends on. Retried automatically next
+                    # mock's echo for our last published command hasn't arrived/been
+                    # processed yet. Hold: leave the delta queued and skip publishing
+                    # this tick, rather than compose a fresh delta against an anchor
+                    # we've already consumed once. Composing anyway would silently skip
+                    # one row of the recorded trajectory with no way to recover (see
+                    # claude_docs/gt-replay/2026-07-18-fake-hardware-architecture.md's
+                    # staleness investigation) — holding preserves the 1:1 obs/delta
+                    # pairing the decoupled compose design depends on. Retried automatically next
                     # tick once the anchor catches up.
                     self.get_logger().warn(
                         f"[ee_delta] holding publish tick: obs sequence {_latest_seq} has "
