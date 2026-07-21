@@ -39,6 +39,7 @@ from .ee_runtime import (
     ee_delta_restore_step,
     ee_poses_from_chunk,
     ee_relative_restore_chunk,
+    pose_arrival_error,
     resolve_action_type,
 )
 from .metrics_tracker import MetricsTracker
@@ -112,6 +113,18 @@ class LeRobotInferenceNode(Node):
         # 2026-07-18-fake-hardware-architecture.md's staleness investigation).
         self._ee_delta_latest_obs_seq: tuple[int, ...] | None = None
         self._ee_delta_last_published_seq: tuple[int, ...] | None = None
+        # Per-arm quat-layout absolute target from the last tick's composed-and-
+        # published action (set in _publish_loop right after publish). Backs the
+        # position-proximity hold-gate below: unlike the sequence-based check
+        # above (fake-hardware-only, since real hardware carries no sequence
+        # field), this compares the live observed pose directly against where we
+        # last commanded the arm to go — catching "the anchor hasn't genuinely
+        # caught up yet" regardless of *why* (a real robot's nonzero settling
+        # time, an occasional dropped command, anything), which the sequence
+        # check alone cannot see for real hardware. Harmless no-op against the
+        # mock: its echo is instantaneous and exact, so this always reads as
+        # "already arrived" there, same tick the sequence check also passes.
+        self._ee_delta_last_commanded_quat: np.ndarray | None = None
         # Created unconditionally: used by the ee_delta obs/publish handoff above
         # for ANY model type (classic or VLA), not just VLA's _latest_obs snapshot
         # (which reuses this same lock — see _setup_vla_inference).
@@ -266,6 +279,19 @@ class LeRobotInferenceNode(Node):
 
         self.arms_config = self.config.get("arms", {})
         self.joint_names_config = self.config.get("joint_names", {})
+
+        # ee_delta only: position-proximity hold-gate tolerance (see
+        # _ee_delta_last_commanded_quat's docstring in __init__). Defaults match
+        # home_atol_pos_m/home_atol_rot_deg's reasoning — slightly above
+        # anvil_eval's real-hardware pass/fail threshold (0.02m/5.0deg) to allow
+        # for normal physical tracking lag, not just anvil_eval's tighter task-
+        # success bar.
+        self._ee_delta_anchor_atol_pos_m = float(
+            self.config.get("ee_delta_anchor_atol_pos_m", 0.025)
+        )
+        self._ee_delta_anchor_atol_rot_deg = float(
+            self.config.get("ee_delta_anchor_atol_rot_deg", 6.0)
+        )
 
         # Inference tuning — per model type (resolved after model_type is known)
         self._tuning_config = self.config.get("inference_tuning", {})
@@ -950,6 +976,21 @@ class LeRobotInferenceNode(Node):
             predicted). This is what makes full open-loop chunk execution
             safe without anchor staleness or forward-integration — see
             claude_docs/ee-delta-flow-plan.md, Item 2.
+
+            Popping the next delta is gated by TWO independent hold checks,
+            either of which can hold: (1) the sequence-based check (fake-
+            hardware-only — see ee_obs_sequence_guard.py), and (2) a
+            position-proximity check comparing the live observed pose against
+            the last absolute target actually commanded (see
+            _ee_delta_last_commanded_quat) — the only protection real hardware
+            has, since (1) is a structural no-op there. (2) catches "the
+            anchor hasn't genuinely caught up yet" regardless of cause: a real
+            robot's nonzero settling time for larger steps, an occasional
+            dropped command, anything — advancing to the next delta before the
+            robot has actually reached the previous target applies the wrong
+            increment to the wrong starting point, and that error compounds
+            every subsequent tick (unlike ee_abs, where each tick's absolute
+            target is self-contained and can't compound this way).
         """
         if self._shutting_down:
             return
@@ -1023,6 +1064,39 @@ class LeRobotInferenceNode(Node):
                     )
                     return
 
+                # Position-proximity hold-gate: has the live observed pose actually
+                # caught up to the LAST target we commanded, regardless of *why* it
+                # might not have (a real robot's nonzero settling time, an occasional
+                # dropped command — anything)? This is the only protection real
+                # hardware has, since the sequence check above is a structural no-op
+                # there (no MockEEPose.sequence field exists on real hardware's
+                # CommandedEEPose — see ee_obs_sequence_guard.py). Harmless against
+                # the mock too: its echo is instantaneous and exact, so this always
+                # reads as "already arrived" the same tick the sequence check passes.
+                _prev_commanded = self._ee_delta_last_commanded_quat
+                if _prev_commanded is not None:
+                    _n_arms = len(_latest_obs) // 8
+                    for _i in range(_n_arms):
+                        _s0 = _i * 8
+                        _pos_err, _rot_err = pose_arrival_error(
+                            _latest_obs[_s0:_s0 + 8], _prev_commanded[_s0:_s0 + 8]
+                        )
+                        if (
+                            _pos_err > self._ee_delta_anchor_atol_pos_m
+                            or _rot_err > self._ee_delta_anchor_atol_rot_deg
+                        ):
+                            # Same hold semantics as the sequence check above: leave
+                            # the delta queued, skip publishing this tick, retry once
+                            # the anchor has genuinely caught up.
+                            self.get_logger().warn(
+                                f"[ee_delta] holding publish tick: arm index {_i} pos_err="
+                                f"{_pos_err:.4f}m rot_err={_rot_err:.2f}deg vs last commanded "
+                                f"target (tolerance: pos<={self._ee_delta_anchor_atol_pos_m}m "
+                                f"rot<={self._ee_delta_anchor_atol_rot_deg}deg) — anchor not "
+                                "yet caught up"
+                            )
+                            return
+
                 _delta_popped = self._classic_action_deque.popleft()
                 if self._debug:
                     _stale = (
@@ -1038,6 +1112,19 @@ class LeRobotInferenceNode(Node):
                     self._ee_delta_last_published_gen = _gen
                 self._ee_delta_last_published_seq = _latest_seq
                 action = ee_delta_restore_step(_delta_popped, _latest_obs)
+
+                # Snapshot this tick's composed absolute target (quat layout) for
+                # next tick's position-proximity check above.
+                _n_arms = len(_latest_obs) // 8
+                _commanded_poses = ee_poses_from_chunk(action[np.newaxis, :], n_arms=_n_arms)[0]
+                self._ee_delta_last_commanded_quat = np.concatenate([
+                    np.concatenate([
+                        _commanded_poses[_i]["pos"],
+                        _commanded_poses[_i]["quat_xyzw"],
+                        [_commanded_poses[_i]["gripper"]],
+                    ])
+                    for _i in range(_n_arms)
+                ])
             else:
                 action = self._classic_action_deque.popleft()
 

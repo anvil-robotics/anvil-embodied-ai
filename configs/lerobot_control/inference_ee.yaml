@@ -138,6 +138,24 @@ arms:
 # cannot exhibit the mock's echo-skip failure mode these two knobs exist for.
 # ee_obs_degraded_after_streak: 50
 
+# Optional, ee_delta mode only, applies to BOTH real and fake hardware:
+# position-proximity hold-gate tolerance. Before composing/publishing the next
+# recorded delta, the publish loop confirms the live observed pose is actually
+# close to the last absolute target it commanded — if not, it holds (retries
+# next tick) rather than applying the next delta on top of a pose that hasn't
+# caught up yet. This is the only anchor-staleness protection real hardware
+# has (the sequence-based guard above is fake-hardware-only, since real
+# hardware's CommandedEEPose carries no sequence field) — it catches a real
+# robot's nonzero settling time for larger steps, an occasional dropped
+# command, or anything else that leaves the arm behind where it was told to
+# go. Defaults slightly above anvil_eval's real-hardware pass/fail threshold
+# (0.02m/5.0deg, metrics.py), for the same reason home_atol_pos_m/
+# home_atol_rot_deg do — observed live, a real controller can plateau just
+# past that exact threshold. Harmless no-op against the mock: its echo is
+# instantaneous and exact, so this always reads as "already arrived."
+# ee_delta_anchor_atol_pos_m: 0.025
+# ee_delta_anchor_atol_rot_deg: 6.0
+
 # -----------------------------------------------------------------------------
 # Camera Configuration
 # -----------------------------------------------------------------------------
