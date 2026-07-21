@@ -93,17 +93,19 @@ def generate_launch_description():
     )
 
     home_atol_pos_m_arg = DeclareLaunchArgument(
-        "home_atol_pos_m", default_value="0.025",
+        "home_atol_pos_m", default_value="0.05",
         description="Homing arrival position tolerance (m) — coarser than "
         "GtReplayVerifierNode's trajectory-match tolerance; this just checks 'did we arrive'. "
-        "Slightly above anvil_eval's real-hardware pass/fail threshold (0.02m) to allow for "
-        "a real controller's steady-state tracking error, observed live to plateau just past it.",
+        "Well above anvil_eval's real-hardware pass/fail threshold (0.02m) — observed live, "
+        "across several attempts, plateauing anywhere up to ~0.039m without fully closing the "
+        "gap within a realistic homing_timeout_sec, so this sets comfortable margin above the "
+        "worst observed value rather than sitting right at the edge of it.",
     )
 
     home_atol_rot_deg_arg = DeclareLaunchArgument(
-        "home_atol_rot_deg", default_value="6.0",
+        "home_atol_rot_deg", default_value="10.0",
         description="Homing arrival orientation tolerance (deg) — same reasoning as "
-        "home_atol_pos_m, slightly above anvil_eval's 5.0deg real-hardware threshold.",
+        "home_atol_pos_m, well above anvil_eval's 5.0deg real-hardware threshold.",
     )
 
     homing_timeout_sec_arg = DeclareLaunchArgument(

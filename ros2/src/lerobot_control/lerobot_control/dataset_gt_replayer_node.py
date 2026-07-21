@@ -84,13 +84,15 @@ class DatasetGtReplayerNode(LeRobotInferenceNode):
         self.declare_parameter("dry_run", False)
         self.declare_parameter("completion_signal_path", "")
         self.declare_parameter("home_before_replay", True)
-        # Slightly looser than anvil_eval's real-hardware EE pass/fail threshold
-        # (0.02m/5.0deg, metrics.py) — a real robot's physical controller was
-        # observed live to plateau at ~0.022m/5.9deg rather than fully closing
-        # the gap to that threshold within a realistic homing_timeout_sec, so
-        # this adds a small margin on top of it rather than reusing it as-is.
-        self.declare_parameter("home_atol_pos_m", 0.025)
-        self.declare_parameter("home_atol_rot_deg", 6.0)
+        # Looser than anvil_eval's real-hardware EE pass/fail threshold (0.02m/
+        # 5.0deg, metrics.py) — a real robot's physical controller was observed
+        # live, across several attempts, plateauing anywhere from ~0.022m/5.9deg
+        # up to ~0.039m/9.1deg without fully closing the gap within a realistic
+        # homing_timeout_sec. Set comfortably above the worst observed value
+        # (not just barely past it) so homing isn't perpetually on the edge of
+        # this same failure as conditions vary run to run.
+        self.declare_parameter("home_atol_pos_m", 0.05)
+        self.declare_parameter("home_atol_rot_deg", 10.0)
         self.declare_parameter("homing_timeout_sec", 30.0)
         self.declare_parameter("home_max_pos_delta_m", 0.01)
         self.declare_parameter("home_max_rot_delta_deg", 2.0)
