@@ -257,6 +257,21 @@ class DatasetGtReplayerNode(LeRobotInferenceNode):
             return
 
         elapsed = time.monotonic() - self._homing_start_time
+        # TEMP DEBUG (real-hardware homing-plateau investigation): throttled to
+        # once/sec, not every tick, to see whether pos_err/rot_err is actually
+        # still closing on the target or has already plateaued well before
+        # homing_timeout_sec — distinguishes "just needs more time" from a
+        # genuine steady-state tracking-error ceiling on the real controller.
+        if getattr(self, "_debug", False):
+            last_logged = getattr(self, "_last_homing_debug_log_sec", -1)
+            elapsed_sec = int(elapsed)
+            if elapsed_sec != last_logged:
+                self._last_homing_debug_log_sec = elapsed_sec
+                self.get_logger().info(
+                    f"[DEBUG-HOMING] t={elapsed:.1f}s pos_err={max_pos_err:.4f}m "
+                    f"rot_err={max_rot_err:.2f}deg (tolerance: pos<={self.home_atol_pos_m}m "
+                    f"rot<={self.home_atol_rot_deg}deg)"
+                )
         if elapsed > self.homing_timeout_sec:
             self._homing_status = "failed"
             self.get_logger().error(
