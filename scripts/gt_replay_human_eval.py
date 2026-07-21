@@ -649,8 +649,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-home-before-replay", dest="home_before_replay", action="store_false",
         help="Force homing off, even for --target real.",
     )
-    parser.add_argument("--home-atol-pos-m", type=float, default=0.01)
-    parser.add_argument("--home-atol-rot-deg", type=float, default=5.0)
+    parser.add_argument(
+        "--home-atol-pos-m", type=float, default=0.025,
+        help="Homing arrival position tolerance (m). Slightly above anvil_eval's real-hardware "
+        "pass/fail threshold (0.02m, metrics.py) to allow for a real controller's steady-state "
+        "tracking error, observed live to plateau just past it.",
+    )
+    parser.add_argument(
+        "--home-atol-rot-deg", type=float, default=6.0,
+        help="Homing arrival orientation tolerance (deg) — same reasoning as --home-atol-pos-m, "
+        "slightly above anvil_eval's 5.0deg real-hardware threshold.",
+    )
     parser.add_argument("--homing-timeout-sec", type=float, default=30.0)
     parser.add_argument(
         "--home-max-pos-delta-m", type=float, default=0.01,

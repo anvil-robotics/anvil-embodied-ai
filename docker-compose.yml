@@ -77,7 +77,13 @@ services:
       - CYCLONEDDS_URI=${CYCLONEDDS_URI:-file:///workspace/configs/cyclonedds/single_pc.xml}
       - DEBUG=${DEBUG:-false}
     volumes:
-      - ${DATASET_PATH:?DATASET_PATH is required}:/workspace/dataset:ro
+      # Soft default (not :?required): this volume belongs to the gt-replay-real
+      # profile only, but compose interpolates every service's variables up
+      # front regardless of --profile selection — a hard-required var here
+      # would abort `up` for every OTHER profile (e.g. plain `monitor`) too.
+      # The real requirement is enforced by scripts/gt_replay_human_eval.py,
+      # which sets DATASET_PATH before invoking this service.
+      - ${DATASET_PATH:-/tmp}:/workspace/dataset:ro
       - ${CONFIG_FILE:-./configs/lerobot_control/inference_ee.yaml}:/workspace/config.yaml:ro
       - ${COMPLETION_SIGNAL_DIR:-./gt_replay_signals}:/workspace/signals
     command: >
@@ -87,8 +93,8 @@ services:
         debug:=${DEBUG:-false} control_frequency:=${CONTROL_FREQ:-30.0}
         completion_signal_path:=/workspace/signals/episode_${EPISODE:-0}.json
         home_before_replay:=${HOME_BEFORE_REPLAY:-true}
-        home_atol_pos_m:=${HOME_ATOL_POS_M:-0.01}
-        home_atol_rot_deg:=${HOME_ATOL_ROT_DEG:-5.0}
+        home_atol_pos_m:=${HOME_ATOL_POS_M:-0.025}
+        home_atol_rot_deg:=${HOME_ATOL_ROT_DEG:-6.0}
         homing_timeout_sec:=${HOMING_TIMEOUT_SEC:-30.0}
         home_max_pos_delta_m:=${HOME_MAX_POS_DELTA_M:-0.01}
         home_max_rot_delta_deg:=${HOME_MAX_ROT_DELTA_DEG:-2.0}

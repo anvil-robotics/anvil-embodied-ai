@@ -188,8 +188,8 @@ services:
         dry_run:=${DRY_RUN:-false} debug:=${DEBUG:-false} control_frequency:=${CONTROL_FREQ:-30.0}
         completion_signal_path:=/workspace/signals/episode_${EPISODE:-0}.json
         home_before_replay:=${HOME_BEFORE_REPLAY:-false}
-        home_atol_pos_m:=${HOME_ATOL_POS_M:-0.01}
-        home_atol_rot_deg:=${HOME_ATOL_ROT_DEG:-5.0}
+        home_atol_pos_m:=${HOME_ATOL_POS_M:-0.025}
+        home_atol_rot_deg:=${HOME_ATOL_ROT_DEG:-6.0}
         homing_timeout_sec:=${HOMING_TIMEOUT_SEC:-30.0}
         home_max_pos_delta_m:=${HOME_MAX_POS_DELTA_M:-0.01}
         home_max_rot_delta_deg:=${HOME_MAX_ROT_DELTA_DEG:-2.0}
