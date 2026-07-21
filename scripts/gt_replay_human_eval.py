@@ -39,7 +39,12 @@ For each selected episode, in order:
   4. If replay completed: prompt the operator for a pass/fail judgment + optional comment.
      If it didn't (homing failure, timeout, crash): skip the prompt — there's nothing to
      judge — and record ``operator_verdict: null``. These are never conflated.
-  5. Tear the episode's container(s) down before the next episode.
+  5. If the outcome is worth debugging (see ``episode_needs_saved_logs`` — anything short of
+     a clean pass: crash/timeout/homing-failure, operator "fail", or auto-verify "fail"),
+     save each container's full log to ``--logs-dir``/episode_<n>/ BEFORE tearing down —
+     ``docker logs`` on an already-removed container returns nothing, so this must happen
+     first. Skipped for clean passes, so this isn't a full audit trail of every run.
+  6. Tear the episode's container(s) down before the next episode.
 
 After all episodes: write a JSON report (episode-by-episode + summary counts, including a
 ``pass_rate`` computed only over episodes that actually completed replay) and print a
@@ -75,11 +80,16 @@ REAL_COMPOSE_FILE = REPO / "docker-compose.yml"
 
 MOCK_CONTAINER = "lerobot-fake-robot"
 FAKE_REPLAY_CONTAINER = "lerobot-fake-replay"
+VERIFY_CONTAINER = "lerobot-gt-replay-verify"
 REAL_REPLAY_CONTAINER = "lerobot-gt-replay-real"
+
+FAKE_CONTAINERS = [MOCK_CONTAINER, FAKE_REPLAY_CONTAINER, VERIFY_CONTAINER]
+REAL_CONTAINERS = [REAL_REPLAY_CONTAINER]
 
 DEFAULT_REPORT_PATH = REPO / "gt_replay_human_eval_report.json"
 DEFAULT_SIGNAL_DIR = REPO / "tests" / "smoke" / ".gt_replay_reports" / "human_eval_signals"
 DEFAULT_VERIFY_REPORTS_DIR = REPO / "tests" / "smoke" / ".gt_replay_reports" / "human_eval_verify"
+DEFAULT_LOGS_DIR = REPO / "tests" / "smoke" / ".gt_replay_reports" / "human_eval_logs"
 
 # Fake-target only: gt_replay_verifier_node's own numeric tolerance check
 # (see gt_replay_verifier_node.py) runs ALONGSIDE the operator prompt, not
@@ -393,6 +403,47 @@ def _read_signal(path: Path) -> dict | None:
         return None  # mid-write race — caller just polls again next tick
 
 
+def episode_needs_saved_logs(
+    replay_status: str,
+    operator_verdict: str | None,
+    auto_verify: dict | None,
+) -> bool:
+    """Whether this episode's outcome is worth keeping container logs for.
+
+    Anything that isn't a clean, verified-good completion: replay itself
+    didn't complete (crashed/timed_out/not_attempted — the homing-failure
+    case that motivated this), the operator judged the task a failure, or
+    (fake-target only) the numeric auto-verify check failed. A clean pass on
+    all fronts doesn't need its logs kept — this is a debugging aid, not a
+    full audit trail.
+    """
+    if replay_status != "completed":
+        return True
+    if operator_verdict == "fail":
+        return True
+    if auto_verify is not None and not auto_verify["all_passed"]:
+        return True
+    return False
+
+
+def _save_docker_logs(log_dir: Path, containers: list[str]) -> None:
+    """Dump each container's full log (whatever the container still has,
+    even if it already exited) to <log_dir>/<container>.log.
+
+    Mirrors gt_replay_correctness_test.py's _save_docker_logs. Must be called
+    BEFORE `docker compose down` removes the containers — logs are gone once
+    the container is removed, ``docker compose logs`` after the fact returns
+    nothing.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    for name in containers:
+        result = subprocess.run(
+            ["docker", "logs", "--timestamps", name], capture_output=True, text=True,
+        )
+        if result.returncode == 0 or result.stdout or result.stderr:
+            (log_dir / f"{name}.log").write_text(result.stdout + result.stderr)
+
+
 def _compute_ee_seed(dataset_root: Path, episode: int) -> str:
     """The episode's own first observation.state row, quat layout, comma-formatted.
 
@@ -413,8 +464,15 @@ def run_episode(
     args: argparse.Namespace,
     signal_dir: Path,
     verify_reports_dir: Path,
+    logs_dir: Path,
 ) -> dict:
-    """Bring up one episode's replay, wait for it, prompt if applicable, tear down."""
+    """Bring up one episode's replay, wait for it, prompt if applicable, tear down.
+
+    Container logs are saved to <logs_dir>/episode_<n>/ (see
+    episode_needs_saved_logs) BEFORE teardown whenever the outcome is worth
+    debugging — teardown removes the containers, and `docker logs` on a
+    removed container returns nothing, so this must happen first.
+    """
     print(f"\n=== Episode {episode} ({args.target}) ===")
     signal_path = signal_dir / f"episode_{episode}.json"
     if signal_path.exists():
@@ -422,6 +480,8 @@ def run_episode(
     verify_report_path = verify_reports_dir / "gt_replay_report.json"
     if args.target == "fake" and verify_report_path.exists():
         verify_report_path.unlink()
+    episode_logs_dir = logs_dir / f"episode_{episode}"
+    containers = FAKE_CONTAINERS if args.target == "fake" else REAL_CONTAINERS
 
     _actions = dataset_reader.load_episode_actions(dataset_root, episode)
     n_frames = len(_actions) if _actions is not None else 0
@@ -457,9 +517,11 @@ def run_episode(
             env["VERIFY_TIMEOUT_SEC"] = str(VERIFY_TIMEOUT_SEC_DEFAULT)
             if _compose(FAKE_COMPOSE_FILE, "replay-verify", "up", "-d", "mock-robot", env_extra=env) != 0:
                 print("  mock-robot failed to start")
+                _save_docker_logs(episode_logs_dir, containers)
                 return build_episode_record(episode, None, "crashed", None, None, _now())
             if not _wait_healthy(MOCK_CONTAINER):
                 print("  mock-robot never became healthy")
+                _save_docker_logs(episode_logs_dir, containers)
                 return build_episode_record(episode, None, "crashed", None, None, _now())
             # gt-replay-verify must already be subscribed before replay starts
             # publishing (mirrors gt_replay_correctness_test.py's staged
@@ -467,14 +529,17 @@ def run_episode(
             # start replay.
             if _compose(FAKE_COMPOSE_FILE, "replay-verify", "up", "-d", "gt-replay-verify", env_extra=env) != 0:
                 print("  gt-replay-verify failed to start")
+                _save_docker_logs(episode_logs_dir, containers)
                 return build_episode_record(episode, None, "crashed", None, None, _now())
             time.sleep(DDS_DISCOVERY_SLEEP_SEC)
             if _compose(FAKE_COMPOSE_FILE, "replay-verify", "up", "-d", "replay", env_extra=env) != 0:
                 print("  replay failed to start")
+                _save_docker_logs(episode_logs_dir, containers)
                 return build_episode_record(episode, None, "crashed", None, None, _now())
         else:
             if _compose(REAL_COMPOSE_FILE, "gt-replay-real", "up", "-d", "gt-replay-real", env_extra=env) != 0:
                 print("  gt-replay-real failed to start")
+                _save_docker_logs(episode_logs_dir, containers)
                 return build_episode_record(episode, None, "crashed", None, None, _now())
 
         deadline = time.monotonic() + timeout_sec
@@ -523,6 +588,10 @@ def run_episode(
             verdict, comment = None, None
             print(f"  homing_status={homing_status} replay_status={replay_status} — skipping operator prompt")
 
+        if episode_needs_saved_logs(replay_status, verdict, auto_verify):
+            _save_docker_logs(episode_logs_dir, containers)
+            print(f"  container logs saved to {episode_logs_dir}")
+
         return build_episode_record(episode, homing_status, replay_status, verdict, comment, _now(), auto_verify)
 
     finally:
@@ -557,6 +626,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--verify-reports-dir", default=str(DEFAULT_VERIFY_REPORTS_DIR),
         help="Fake-target only: where gt_replay_verifier_node's per-episode numeric-tolerance "
         "report is written (see module docstring's auto-verify note).",
+    )
+    parser.add_argument(
+        "--logs-dir", default=str(DEFAULT_LOGS_DIR),
+        help="Where per-episode container logs are saved (see episode_needs_saved_logs) — "
+        "written BEFORE teardown, so they survive a crash/timeout/homing-failure/operator-fail "
+        "for post-mortem debugging. Skipped for clean-pass episodes.",
     )
     parser.add_argument(
         "--completion-timeout-sec", type=float, default=None,
@@ -606,6 +681,8 @@ def main(argv: list[str] | None = None) -> int:
     signal_dir.mkdir(parents=True, exist_ok=True)
     verify_reports_dir = Path(args.verify_reports_dir)
     verify_reports_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = Path(args.logs_dir)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     total_episodes = dataset_reader.load_info(dataset_root)["total_episodes"]
     try:
@@ -620,7 +697,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Resolved episodes: {episodes} (of {total_episodes} total)")
 
     started_at = _now()
-    records = [run_episode(ep, dataset_root, args, signal_dir, verify_reports_dir) for ep in episodes]
+    records = [run_episode(ep, dataset_root, args, signal_dir, verify_reports_dir, logs_dir) for ep in episodes]
     finished_at = _now()
 
     report = build_report(

@@ -98,6 +98,49 @@ def test_classify_signal_no_signal_timeout_elapsed():
 
 
 # --------------------------------------------------------------------------- #
+# episode_needs_saved_logs — anything short of a clean pass gets its
+# container logs kept for post-mortem debugging
+# --------------------------------------------------------------------------- #
+
+
+def test_episode_needs_saved_logs_clean_pass_does_not_save():
+    assert human_eval.episode_needs_saved_logs(
+        "completed", "pass", {"all_passed": True, "max_pos_err_m": 0.0, "max_rot_err_deg": 0.0},
+    ) is False
+
+
+def test_episode_needs_saved_logs_no_auto_verify_clean_pass_does_not_save():
+    """--target real never has auto_verify (always None) -- must not be
+    mistaken for a failure on its own."""
+    assert human_eval.episode_needs_saved_logs("completed", "pass", None) is False
+
+
+def test_episode_needs_saved_logs_homing_failure_saves():
+    """The exact scenario that motivated this: replay never even attempted."""
+    assert human_eval.episode_needs_saved_logs("not_attempted", None, None) is True
+
+
+def test_episode_needs_saved_logs_timed_out_saves():
+    assert human_eval.episode_needs_saved_logs("timed_out", None, None) is True
+
+
+def test_episode_needs_saved_logs_crashed_saves():
+    assert human_eval.episode_needs_saved_logs("crashed", None, None) is True
+
+
+def test_episode_needs_saved_logs_operator_fail_saves():
+    assert human_eval.episode_needs_saved_logs(
+        "completed", "fail", {"all_passed": True, "max_pos_err_m": 0.0, "max_rot_err_deg": 0.0},
+    ) is True
+
+
+def test_episode_needs_saved_logs_auto_verify_fail_saves():
+    assert human_eval.episode_needs_saved_logs(
+        "completed", "pass", {"all_passed": False, "max_pos_err_m": 0.05, "max_rot_err_deg": 3.0},
+    ) is True
+
+
+# --------------------------------------------------------------------------- #
 # summarize_auto_verify — fake-target-only extra signal from
 # gt_replay_verifier_node's own numeric-tolerance report
 # --------------------------------------------------------------------------- #
