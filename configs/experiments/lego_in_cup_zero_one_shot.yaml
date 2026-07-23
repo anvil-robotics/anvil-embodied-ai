@@ -1,0 +1,58 @@
+# Compile an iPhone scan with anvil-openarm-mujoco/scripts/anvil_scene.py first,
+# then update this path. It is resolved relative to this file.
+scene_bundle: ../../../anvil-openarm-mujoco/generated/lego_in_cup.anvilscene
+instruction: Put the yellow Lego piece in the red cup
+success_threshold: 0.8
+observation_renderer:
+  type: gaussian_mujoco_hybrid
+  scene_definition: ../../../anvil-openarm-scenes/scenes/openarm_work_area_2026_07_12/scene.json
+  cameras: [waist, wrist_l, wrist_r, chest]
+  gaussian:
+    backend: gsplat
+    render_mode: RGB+ED
+  dynamic_layer:
+    backend: mujoco
+    bodies: [openarm, target_cup, lego_piece]
+  composition:
+    method: depth
+    epsilon_m: 0.002
+seeds: [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
+        1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019]
+
+one_shot:
+  # Intentionally absent until zero-shot evaluation fails its advancement gate.
+  demonstration: null
+
+models:
+  - model_type: pi05
+    arm: l
+    action_surface: joint_position
+    normalization_source: embodiment_limits
+    active_state_dim: 8
+    active_action_dim: 8
+    padded_capacity: 32
+    camera_roles:
+      base_0_rgb: waist
+      left_wrist_0_rgb: wrist_l
+      right_wrist_0_rgb: wrist_r
+
+  - model_type: groot
+    arm: l
+    action_surface: relative_end_effector
+    normalization_source: embodiment_limits
+    active_state_dim: 8
+    active_action_dim: 7
+    camera_roles:
+      primary: waist
+      wrist: wrist_l
+
+  - model_type: smolvla
+    arm: l
+    action_surface: joint_position
+    normalization_source: embodiment_limits
+    active_state_dim: 8
+    active_action_dim: 8
+    camera_roles:
+      camera1: waist
+      camera2: wrist_l
+      camera3: wrist_r

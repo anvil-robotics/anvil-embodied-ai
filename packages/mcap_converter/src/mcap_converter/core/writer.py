@@ -1,5 +1,6 @@
 """LeRobot dataset writer"""
 
+import inspect
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List
@@ -195,6 +196,17 @@ class LeRobotWriter:
         self.vcodec = vcodec
         self.quiet = quiet
 
+    def _video_kwargs(self, fn: Any) -> dict[str, Any]:
+        """Return video-encoding kwargs supported by the installed LeRobot API."""
+        params = inspect.signature(fn).parameters
+        if "rgb_encoder" in params:
+            from lerobot.configs.video import RGBEncoderConfig
+
+            return {"rgb_encoder": RGBEncoderConfig(vcodec=self.vcodec)}
+        if "vcodec" in params:
+            return {"vcodec": self.vcodec}
+        return {}
+
     def create_dataset(
         self,
         joint_names: Dict[str, List[str]],
@@ -230,7 +242,7 @@ class LeRobotWriter:
             robot_type=self.robot_type,
             features=features,
             use_videos=True,
-            vcodec=self.vcodec,
+            **self._video_kwargs(LeRobotDataset.create),
         )
 
         return dataset
@@ -419,7 +431,7 @@ class LeRobotWriter:
         dataset = LeRobotDataset.resume(
             repo_id=self.repo_id,
             root=str(self.output_dir),
-            vcodec=self.vcodec,
+            **self._video_kwargs(LeRobotDataset.resume),
         )
         _patch_resume_video_continuation(dataset)
         return dataset

@@ -1,15 +1,15 @@
 """Tests for the patched_lerobot context manager + patch restoration."""
+
 from __future__ import annotations
 
 import sys
 import types
-from unittest.mock import MagicMock
+from pathlib import Path
 
-import pytest
+import torch
 
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.patches import TransformRunner
-
 
 # =============================================================================
 # _patch / restore_all_patches
@@ -42,10 +42,10 @@ class TestPatchInfrastructure:
         runner._patch(mod, "foo", 2)
         # Second call MUST NOT re-wrap / save the wrapped value as "original"
         runner._patch(mod, "foo", 3)
-        assert mod.foo == 2            # second patch was skipped
+        assert mod.foo == 2  # second patch was skipped
         assert len(runner._saved_originals) == 1
         runner.restore_all_patches()
-        assert mod.foo == 1            # restored to the true original
+        assert mod.foo == 1  # restored to the true original
 
     def test_restore_is_lifo(self):
         runner = self._make_runner()
@@ -73,6 +73,96 @@ class TestPatchInfrastructure:
         assert m1.x == "new1" and m2.x == "new2"
         runner.restore_all_patches()
         assert m1.x == "orig1" and m2.x == "orig2"
+
+
+class TestConfigSequencePatch:
+    def test_ordered_lists_reach_lerobot_cli_and_patch_restores(self):
+        import lerobot.configs.parser as parser
+
+        original = parser._flatten_to_cli_args
+        runner = TransformRunner(TrainingConfig())
+        runner.apply_config_sequence_patch()
+        try:
+            args = parser._flatten_to_cli_args(
+                {
+                    "path": "ignored/checkpoint",
+                    "action_feature_names": [
+                        "right_joint_2.pos",
+                        "right_joint_1.pos",
+                        "left_joint_1.pos",
+                    ],
+                    "relative_exclude_joints": ["gripper"],
+                    "optimizer_betas": [0.9, 0.95],
+                }
+            )
+            assert args == [
+                '--action_feature_names=["right_joint_2.pos","right_joint_1.pos","left_joint_1.pos"]',
+                '--relative_exclude_joints=["gripper"]',
+                "--optimizer_betas=[0.9,0.95]",
+            ]
+        finally:
+            runner.restore_all_patches()
+
+        assert parser._flatten_to_cli_args is original
+
+    def test_pretrained_yaml_lists_survive_path_extraction(self, tmp_path):
+        import lerobot.configs.parser as parser
+
+        recipe = tmp_path / "recipe.yaml"
+        recipe.write_text(
+            """
+policy:
+  path: example/checkpoint
+  action_feature_names: [right_joint_2.pos, right_joint_1.pos, left_joint_1.pos]
+  relative_exclude_joints: [gripper]
+  optimizer_betas: [0.9, 0.95]
+""".lstrip()
+        )
+        runner = TransformRunner(TrainingConfig())
+        runner.apply_config_sequence_patch()
+        cleaned_path = None
+        parser._config_path_args.clear()
+        parser._config_yaml_overrides.clear()
+        try:
+            cleaned_path = Path(parser.extract_path_fields_from_config(str(recipe), ["policy"]))
+            assert parser.get_path_arg("policy") == "example/checkpoint"
+            assert parser.get_yaml_overrides("policy") == [
+                '--action_feature_names=["right_joint_2.pos","right_joint_1.pos","left_joint_1.pos"]',
+                '--relative_exclude_joints=["gripper"]',
+                "--optimizer_betas=[0.9,0.95]",
+            ]
+        finally:
+            runner.restore_all_patches()
+            parser._config_path_args.clear()
+            parser._config_yaml_overrides.clear()
+            if cleaned_path is not None:
+                cleaned_path.unlink(missing_ok=True)
+
+
+class TestVLAJEPAInputPatch:
+    def test_stacked_state_is_replaced_with_current_timestep(self, monkeypatch):
+        from lerobot.policies.vla_jepa.modeling_vla_jepa import VLAJEPAPolicy
+
+        def upstream_prepare(_policy, batch, training=True):
+            del training
+            return {"state": batch["observation.state"][:, -1:, :].float()}
+
+        monkeypatch.setattr(VLAJEPAPolicy, "_prepare_model_inputs", upstream_prepare)
+        runner = TransformRunner(TrainingConfig())
+        runner.apply_vla_jepa_input_patch()
+        state = torch.arange(2 * 8 * 8, dtype=torch.float32).reshape(2, 8, 8)
+
+        result = VLAJEPAPolicy._prepare_model_inputs(
+            object(), {"observation.state": state}, training=True
+        )
+
+        assert torch.equal(result["state"][:, 0], state[:, 0])
+        assert not torch.equal(result["state"][:, 0], state[:, -1])
+        runner.restore_all_patches()
+        restored = VLAJEPAPolicy._prepare_model_inputs(
+            object(), {"observation.state": state}, training=True
+        )
+        assert torch.equal(restored["state"][:, 0], state[:, -1])
 
 
 # =============================================================================
@@ -132,59 +222,73 @@ class TestTransformPatchMetadataUsesRunner:
 
 
 class TestProcessorCompatAliases:
-    """Tests for the relative_actions_processor → delta_actions_processor alias."""
+    """Tests for relative_actions_processor / delta_actions_processor aliases."""
 
     def _make_runner(self) -> TransformRunner:
         return TransformRunner(TrainingConfig())
 
-    def test_alias_registered_after_apply(self):
-        """relative_actions_processor should resolve after apply_processor_compat_aliases."""
-        from lerobot.processor.pipeline import ProcessorStepRegistry
+    @staticmethod
+    def _canonical_and_alias():
         from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
 
+        canonical = RelativeActionsProcessorStep._registry_name
+        alias = (
+            "delta_actions_processor"
+            if canonical == "relative_actions_processor"
+            else "relative_actions_processor"
+        )
+        return canonical, alias, RelativeActionsProcessorStep
+
+    def test_alias_registered_after_apply(self):
+        """The non-canonical processor name should resolve after alias setup."""
+        from lerobot.processor.pipeline import ProcessorStepRegistry
+
+        canonical, alias, step_cls = self._canonical_and_alias()
         runner = self._make_runner()
-        # Ensure clean state — unregister if a previous test left it behind.
-        ProcessorStepRegistry.unregister("relative_actions_processor")
+        ProcessorStepRegistry.unregister(alias)
 
         runner.apply_processor_compat_aliases()
         try:
-            assert ProcessorStepRegistry.get("relative_actions_processor") is RelativeActionsProcessorStep
+            assert canonical in ProcessorStepRegistry.list()
+            assert ProcessorStepRegistry.get(alias) is step_cls
         finally:
             runner.restore_all_patches()
 
     def test_canonical_registry_name_preserved(self):
-        """_registry_name must stay 'delta_actions_processor' so checkpoints use the new name."""
+        """_registry_name must stay on the installed release's canonical name."""
         from lerobot.processor.pipeline import ProcessorStepRegistry
-        from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
 
+        canonical, alias, step_cls = self._canonical_and_alias()
         runner = self._make_runner()
-        ProcessorStepRegistry.unregister("relative_actions_processor")
+        ProcessorStepRegistry.unregister(alias)
 
         runner.apply_processor_compat_aliases()
         try:
-            assert RelativeActionsProcessorStep._registry_name == "delta_actions_processor"
+            assert step_cls._registry_name == canonical
         finally:
             runner.restore_all_patches()
 
     def test_alias_unregistered_after_restore(self):
-        """restore_all_patches must remove the alias and leave delta_actions_processor intact."""
+        """restore_all_patches must remove only the compat alias."""
         from lerobot.processor.pipeline import ProcessorStepRegistry
 
+        canonical, alias, _ = self._canonical_and_alias()
         runner = self._make_runner()
-        ProcessorStepRegistry.unregister("relative_actions_processor")
+        ProcessorStepRegistry.unregister(alias)
 
         runner.apply_processor_compat_aliases()
         runner.restore_all_patches()
 
-        assert "relative_actions_processor" not in ProcessorStepRegistry.list()
-        assert "delta_actions_processor" in ProcessorStepRegistry.list()
+        assert alias not in ProcessorStepRegistry.list()
+        assert canonical in ProcessorStepRegistry.list()
 
     def test_noop_when_already_registered(self):
         """Calling apply_processor_compat_aliases twice must not raise ValueError."""
         from lerobot.processor.pipeline import ProcessorStepRegistry
 
+        _, alias, _ = self._canonical_and_alias()
         runner = self._make_runner()
-        ProcessorStepRegistry.unregister("relative_actions_processor")
+        ProcessorStepRegistry.unregister(alias)
 
         runner.apply_processor_compat_aliases()
         try:

@@ -1,0 +1,66 @@
+# OpenArm Quest recordings prepared for fine-tuning
+# lerobot-data-collection/folding_final (pi0.5, LeRobot v3.0).
+
+robot_state_topic: "/joint_states"
+
+joint_names:
+  separator: "_"
+  source:
+    follower: observation
+  arms:
+    r: right
+    l: left
+
+action_topics:
+  "/follower_l_forward_position_controller/commands":
+    arm: left
+    joint_order: [joint1, joint2, joint3, joint4, joint5, joint6, joint7, finger_joint1]
+  "/follower_r_forward_position_controller/commands":
+    arm: right
+    joint_order: [joint1, joint2, joint3, joint4, joint5, joint6, joint7, finger_joint1]
+
+# Match the released folding checkpoint's vector semantics exactly.
+robot_order: [right, left]
+joint_order: [joint1, joint2, joint3, joint4, joint5, joint6, joint7, finger_joint1]
+feature_names:
+  - right_joint_1.pos
+  - right_joint_2.pos
+  - right_joint_3.pos
+  - right_joint_4.pos
+  - right_joint_5.pos
+  - right_joint_6.pos
+  - right_joint_7.pos
+  - right_gripper.pos
+  - left_joint_1.pos
+  - left_joint_2.pos
+  - left_joint_3.pos
+  - left_joint_4.pos
+  - left_joint_5.pos
+  - left_joint_6.pos
+  - left_joint_7.pos
+  - left_gripper.pos
+
+camera_topics:
+  - "/cam_chest/image_raw/compressed"
+  - "/cam_wrist_l/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_chest/image_raw/compressed": base
+  "/cam_wrist_l/image_raw/compressed": left_wrist
+  "/cam_wrist_r/image_raw/compressed": right_wrist
+
+# Exact 4x downscale from the native 1920x1080 streams. Pi0.5 performs its
+# own aspect-preserving resize/pad to 224x224 at model input.
+image_resolution: [480, 270]
+
+observation_feature_mapping:
+  state: position
+  others: []
+
+action_feature_mapping:
+  state: position
+  others: []
+
+# --- provenance ---
+code_commit: 5d1c8eb1feeab7b9a9fa4926497176b49eff4a46

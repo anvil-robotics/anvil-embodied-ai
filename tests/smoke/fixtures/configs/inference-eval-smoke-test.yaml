@@ -20,6 +20,9 @@ inference_tuning:
     n_action_steps: null
     num_inference_steps: 10
 
+  sync:
+    n_action_steps: null
+
   rtc:
     inference_delay: 10
     queue_trigger_threshold: 50

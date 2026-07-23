@@ -59,6 +59,10 @@ htmlcov/
 # Data files (users download their own)
 data/raw/*
 data/datasets/*
+# Local and derived LeRobot datasets used by task-specific experiments.
+datasets/
+# Frozen policy outputs used to train embodiment adapters.
+adapter_cache/
 !data/raw/.gitkeep
 !data/datasets/.gitkeep
 !data/README.md
@@ -133,5 +137,8 @@ eval_results/
 # Debug artifacts (inference_node debug_image_dir dump)
 monitor_output*
 debug_images/
+debug_images.*/
 # Git worktrees
 .worktrees/
+
+.hf-cache/

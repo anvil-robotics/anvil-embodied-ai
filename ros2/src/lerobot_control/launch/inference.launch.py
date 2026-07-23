@@ -66,6 +66,12 @@ def generate_launch_description():
         description="Publish /monitor/obs_state, /monitor/raw_output, /monitor/control_cmd for inference_monitor_node",
     )
 
+    max_run_seconds_arg = DeclareLaunchArgument(
+        "max_run_seconds",
+        default_value="0",
+        description="Maximum active inference duration in seconds after model load (0 = unlimited)",
+    )
+
     # Node
     inference_node = Node(
         package="lerobot_control",
@@ -84,6 +90,7 @@ def generate_launch_description():
                 "debug": LaunchConfiguration("debug"),
                 "debug_image_dir": LaunchConfiguration("debug_image_dir"),
                 "monitor_enable": LaunchConfiguration("monitor_enable"),
+                "max_run_seconds": LaunchConfiguration("max_run_seconds"),
             }
         ],
     )
@@ -100,6 +107,7 @@ def generate_launch_description():
             debug_arg,
             debug_image_dir_arg,
             monitor_enable_arg,
+            max_run_seconds_arg,
             inference_node,
         ]
     )

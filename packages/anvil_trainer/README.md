@@ -5,7 +5,7 @@ Training utilities for Anvil robotics workflows with pluggable transforms. Suppo
 ## Features
 
 - **Camera filtering**: Train with a subset of available cameras
-- **Task override**: Override dataset task for SmolVLA training
+- **Task override**: Override dataset task for language-conditioned policy training
 - **Delta actions**: Convert actions to relative (action - observation.state)
 
 ## Installation
@@ -33,12 +33,14 @@ anvil-trainer \
     --policy.type=act \
     --use-delta-actions
 
-# Train SmolVLA with language instruction
+# Train a language-conditioned policy with a task instruction
 LEROBOT_TASK_OVERRIDE="Pick up the red cube" anvil-trainer \
     --dataset.repo_id=local \
     --dataset.root=/path/to/dataset \
     --policy.type=smolvla
 ```
+
+Supported LeRobot policy types are listed in [docs/training.md](../../docs/training.md#supported-policies).
 
 ### Python API
 

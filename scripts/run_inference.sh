@@ -12,6 +12,7 @@
 #   --echo-topic-only  Subscribe + log FPS without loading a model (sets ECHO_TOPIC_ONLY=true);
 #                      useful to verify DDS connectivity on the GPU PC without a checkpoint
 #   --debug            Enable debug metrics: action smoothness, queue depth, Action FPS (sets DEBUG=true)
+#   --preflight-only  Validate real-robot arm routing, then exit without running Compose
 #   -h, --help         Show this message
 #
 # All other arguments (e.g. up --build, down, logs) are passed directly to docker compose.
@@ -20,6 +21,8 @@
 #   MONITOR_OUTPUT_DIR   Host dir for monitor CSV/PNG (default: ./monitor_output)
 #   MODEL_PATH           Path to model checkpoint (required for production inference)
 #   CONFIG_FILE          Path to inference config YAML (default: ./configs/lerobot_control/inference_default.yaml)
+#   INFERENCE_ARM        Required for real-robot startup: left | right | bimanual
+#   MAX_RUN_SECONDS      Maximum active inference duration after model load (0 = unlimited)
 #   IMAGE_TAG            Docker image tag (default: latest)
 #   ROS_DOMAIN_ID        ROS domain ID
 #   HF_CACHE             HuggingFace cache dir (needed for VLA models)
@@ -52,6 +55,7 @@ FAKE_HARDWARE=false
 MONITOR_REQUESTED=false
 ECHO_TOPIC_ONLY_REQUESTED=false
 DEBUG_REQUESTED=false
+PREFLIGHT_ONLY=false
 PASSTHROUGH=()
 
 usage() {
@@ -74,6 +78,10 @@ while [[ $# -gt 0 ]]; do
             ECHO_TOPIC_ONLY_REQUESTED=true
             shift
             ;;
+        --preflight-only)
+            PREFLIGHT_ONLY=true
+            shift
+            ;;
         --debug)
             DEBUG_REQUESTED=true
             shift
@@ -93,6 +101,86 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+read_dotenv_value() {
+    sed -n "s/^${1}=//p" "${REPO_ROOT}/.env" | tail -n 1
+}
+
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+    MODEL_PATH="${MODEL_PATH:-$(read_dotenv_value MODEL_PATH)}"
+    CONFIG_FILE="${CONFIG_FILE:-$(read_dotenv_value CONFIG_FILE)}"
+    INFERENCE_ARM="${INFERENCE_ARM:-$(read_dotenv_value INFERENCE_ARM)}"
+fi
+
+# Fail closed on real-robot arm routing before a command-publishing service starts.
+START_REQUESTED="${PREFLIGHT_ONLY}"
+for _arg in "${PASSTHROUGH[@]}"; do
+    case "${_arg}" in
+        up|start|restart|run) START_REQUESTED=true; break ;;
+    esac
+done
+
+require_config_line() {
+    if ! grep -Fqx "$1" "${CONFIG_PATH}"; then
+        echo "[run_inference] ERROR: ${CONFIG_PATH} is missing expected line: $1" >&2
+        return 1
+    fi
+}
+
+validate_configured_arm() {
+    local arm="$1" short ros_prefix command_topic
+    case "${arm}" in
+        left)
+            short=l
+            ros_prefix=follower_l
+            command_topic=/follower_l_forward_position_controller/commands
+            ;;
+        right)
+            short=r
+            ros_prefix=follower_r
+            command_topic=/follower_r_forward_position_controller/commands
+            ;;
+    esac
+    require_config_line "    ${short}: ${arm}"
+    require_config_line "  ${arm}:"
+    require_config_line "    ros_prefix: \"${ros_prefix}\""
+    require_config_line "    command_topic: \"${command_topic}\""
+}
+
+if [[ "${START_REQUESTED}" == true && "${FAKE_HARDWARE}" == false && "${ECHO_TOPIC_ONLY_REQUESTED}" == false ]]; then
+    CONFIG_PATH="${CONFIG_FILE:-${REPO_ROOT}/configs/lerobot_control/inference_default.yaml}"
+    if [[ "${CONFIG_PATH}" != /* ]]; then
+        CONFIG_PATH="${REPO_ROOT}/${CONFIG_PATH#./}"
+    fi
+    case "${INFERENCE_ARM:-}" in
+        left)
+            validate_configured_arm left
+            if grep -Fqx "    r: right" "${CONFIG_PATH}" || grep -Fqx "  right:" "${CONFIG_PATH}"; then
+                echo "[run_inference] ERROR: config also routes the right arm" >&2
+                exit 2
+            fi
+            ;;
+        right)
+            validate_configured_arm right
+            if grep -Fqx "    l: left" "${CONFIG_PATH}" || grep -Fqx "  left:" "${CONFIG_PATH}"; then
+                echo "[run_inference] ERROR: config also routes the left arm" >&2
+                exit 2
+            fi
+            ;;
+        bimanual)
+            validate_configured_arm left
+            validate_configured_arm right
+            ;;
+        *)
+            echo "[run_inference] ERROR: set INFERENCE_ARM to left, right, or bimanual before real-robot startup" >&2
+            exit 2
+            ;;
+    esac
+    echo "[run_inference] arm preflight passed: ${INFERENCE_ARM} (${CONFIG_PATH})"
+    if [[ "${PREFLIGHT_ONLY}" == true ]]; then
+        exit 0
+    fi
+fi
 
 # Always inject --profile monitor when requested
 if [[ "$MONITOR_REQUESTED" == true ]]; then

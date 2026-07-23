@@ -2,7 +2,7 @@
 
 ``TransformRunner`` owns:
     * The active list of :class:`~anvil_trainer.transforms.Transform` instances.
-    * Five monkey-patches on lerobot modules:
+    * Six monkey-patches on lerobot modules:
         - ``apply_dataset_patches`` — patches ``LeRobotDataset.__getitem__``.
         - ``apply_val_loss_patch`` — patches ``make_dataset`` (split creation),
           captures the preprocessor from ``make_pre_post_processors``, and
@@ -14,6 +14,8 @@
           loss computation.
         - ``apply_metadata_patches`` — runs ``Transform.patch_metadata`` hooks
           (currently used by ``ExcludeObservationTransform``).
+        - ``apply_vla_jepa_input_patch`` — keeps stacked proprioception aligned
+          with the current image instead of leaking the final future state.
 
 Patches are installed via :meth:`TransformRunner._patch` which tracks the
 original attribute so :meth:`restore_all_patches` can put everything back.
@@ -48,6 +50,155 @@ log = logging.getLogger(__name__)
 _PATCHED_MARKER = object()
 
 
+def reconcile_vla_jepa_postprocessor(policy_cfg: Any, postprocessor: Any) -> list[str]:
+    """Make inherited VLA-JEPA processor steps match the effective config.
+
+    LeRobot loads serialized processors from ``policy.path`` before applying the
+    fine-tuning config. Without reconciliation, a recipe that disables gripper
+    snapping can still save the base model's snapping steps. The upstream step
+    classes also omit their dimension/threshold from ``get_config``, so enabled
+    steps need explicit serialization metadata.
+
+    Returns the class names of disabled steps that were removed.
+    """
+    from lerobot.policies.vla_jepa.processor_vla_jepa import (
+        BinarizeGripperProcessorStep,
+        ClipActionsProcessorStep,
+        PreSnapGripperProcessorStep,
+    )
+
+    reconciled_steps = []
+    removed_steps = []
+    for step in postprocessor.steps:
+        if isinstance(step, ClipActionsProcessorStep):
+            if not policy_cfg.clip_normalized_actions:
+                removed_steps.append(type(step).__name__)
+                continue
+        elif isinstance(step, PreSnapGripperProcessorStep):
+            if not policy_cfg.pre_snap_gripper_action:
+                removed_steps.append(type(step).__name__)
+                continue
+            step.gripper_dim = policy_cfg.gripper_dim
+            step.threshold = policy_cfg.gripper_threshold
+            step.get_config = lambda cfg=policy_cfg: {
+                "gripper_dim": cfg.gripper_dim,
+                "threshold": cfg.gripper_threshold,
+            }
+        elif isinstance(step, BinarizeGripperProcessorStep):
+            if not policy_cfg.binarize_gripper_action:
+                removed_steps.append(type(step).__name__)
+                continue
+            step.gripper_dim = policy_cfg.gripper_dim
+            step.threshold = policy_cfg.gripper_threshold
+            step.get_config = lambda cfg=policy_cfg: {
+                "gripper_dim": cfg.gripper_dim,
+                "threshold": cfg.gripper_threshold,
+            }
+        reconciled_steps.append(step)
+
+    postprocessor.steps = reconciled_steps
+    return removed_steps
+
+
+def _normalize_uint8_camera_images(batch: dict[str, Any], camera_keys: tuple[str, ...]):
+    """Match LeRobot's training-loop camera conversion for custom eval hooks."""
+    import torch
+
+    for camera_key in camera_keys:
+        image = batch.get(camera_key)
+        if isinstance(image, torch.Tensor) and image.dtype == torch.uint8:
+            batch[camera_key] = image.to(dtype=torch.float32) / 255.0
+    return batch
+
+
+def _vla_jepa_current_state(state: Any):
+    """Return state at observation time t in LeRobot's [B, 1, D] policy shape."""
+    if state.ndim > 2:
+        state = state[:, 0, :]
+    return state.unsqueeze(1) if state.ndim == 2 else state
+
+
+def _flatten_config_to_cli_args(
+    data: dict[str, Any], prefix: str = ""
+) -> list[str]:
+    """Flatten config values without dropping ordered sequence overrides."""
+    args: list[str] = []
+    for key, value in data.items():
+        if key in {"path", "type"}:
+            continue
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, bool):
+            value = str(value).lower()
+        if isinstance(value, dict):
+            args.extend(_flatten_config_to_cli_args(value, full_key))
+        elif isinstance(value, list):
+            args.append(f"--{full_key}={json.dumps(value, separators=(',', ':'))}")
+        elif value is not None:
+            args.append(f"--{full_key}={value}")
+    return args
+
+
+def _remap_molmoact2_processor_overrides(policy_cfg: Any, kwargs: dict[str, Any]):
+    """Use MolmoAct2's registered masked-normalizer step names for fine-tuning."""
+    if getattr(policy_cfg, "type", None) != "molmoact2":
+        return kwargs
+
+    remapped_kwargs = dict(kwargs)
+    for kwarg_name, generic_name, molmoact2_name in (
+        (
+            "preprocessor_overrides",
+            "normalizer_processor",
+            "molmoact2_masked_normalizer",
+        ),
+        (
+            "postprocessor_overrides",
+            "unnormalizer_processor",
+            "molmoact2_masked_unnormalizer",
+        ),
+    ):
+        overrides = remapped_kwargs.get(kwarg_name)
+        if not isinstance(overrides, dict) or generic_name not in overrides:
+            continue
+        overrides = dict(overrides)
+        overrides[molmoact2_name] = overrides.pop(generic_name)
+        remapped_kwargs[kwarg_name] = overrides
+    return remapped_kwargs
+
+
+def _make_pre_post_processors_with_compat(original_make_processors, *args, **kwargs):
+    """Load processors while bridging known serialized step-name migrations."""
+    policy_cfg = kwargs.get("policy_cfg", args[0] if args else None)
+    effective_kwargs = _remap_molmoact2_processor_overrides(policy_cfg, kwargs)
+    try:
+        return original_make_processors(*args, **effective_kwargs)
+    except KeyError as error:
+        message = str(error)
+        overrides = effective_kwargs.get("preprocessor_overrides")
+        is_legacy_delta_mismatch = (
+            isinstance(overrides, dict)
+            and "relative_actions_processor" in overrides
+            and "delta_actions_processor" not in overrides
+            and "Override keys" in message
+            and "Available step keys" in message
+            and "relative_actions_processor" in message
+            and "delta_actions_processor" in message
+        )
+        if not is_legacy_delta_mismatch:
+            raise
+
+        remapped_overrides = dict(overrides)
+        remapped_overrides["delta_actions_processor"] = remapped_overrides.pop(
+            "relative_actions_processor"
+        )
+        remapped_kwargs = dict(effective_kwargs)
+        remapped_kwargs["preprocessor_overrides"] = remapped_overrides
+        log.info(
+            "[anvil_trainer] Remapped relative_actions_processor override to "
+            "legacy delta_actions_processor checkpoint step"
+        )
+        return original_make_processors(*args, **remapped_kwargs)
+
+
 class TransformRunner:
     """
     Manages and applies dataset transforms.
@@ -75,6 +226,7 @@ class TransformRunner:
         self._test_dataloader = None  # set by apply_val_loss_patch when make_dataset is called
         self._split_info: dict = {}   # populated by patched_make_dataset
         self._preprocessor = None     # captured from make_pre_post_processors
+        self._camera_keys: tuple[str, ...] = ()  # captured from dataset metadata
         self._val_freq = 0            # set from cfg.log_freq * 5 inside patched_make_dataset
         self._resume_step = 0         # for absolute step tracking in wandb
         # List of (module, attr_name, original_value) — populated by _patch in
@@ -142,21 +294,22 @@ class TransformRunner:
             finally:
                 self._registered_aliases.clear()
 
+    def apply_config_sequence_patch(self) -> None:
+        """Preserve ordered list overrides in pretrained-policy config files."""
+        import lerobot.configs.parser as parser
+
+        self._patch(parser, "_flatten_to_cli_args", _flatten_config_to_cli_args)
+        log.info(
+            "[anvil_trainer] Patched config flattening to preserve sequence overrides"
+        )
+
     def apply_processor_compat_aliases(self) -> None:
-        """Register backward-compatibility aliases for renamed ProcessorStep registry names.
+        """Register compatibility aliases for renamed action processor registry names.
 
-        Some lerobot Hub checkpoints (e.g. ``lerobot/pi05_base``) were published with
-        an older registry name ``relative_actions_processor`` that was later renamed to
-        ``delta_actions_processor`` in lerobot 0.5.x.  Loading those checkpoints fails
-        with an ImportError because the old name is no longer in the registry.
-
-        This method registers the old name as an alias pointing to the same class
-        (``RelativeActionsProcessorStep``) so that deserialization succeeds.  Crucially,
-        it restores the class's ``_registry_name`` attribute to the *canonical* new name
-        after registration, so that any checkpoints saved during this training run still
-        use ``delta_actions_processor`` rather than the legacy name.
-
-        The alias is unregistered automatically in :meth:`restore_all_patches`.
+        LeRobot releases have used both ``relative_actions_processor`` and
+        ``delta_actions_processor`` for the same processor class. Keep the
+        installed release's canonical name intact, but register the other name
+        as an alias so older checkpoints can still deserialize.
         """
         try:
             from lerobot.processor.pipeline import ProcessorStepRegistry
@@ -167,20 +320,34 @@ class TransformRunner:
             )
             return
 
-        if "relative_actions_processor" in ProcessorStepRegistry.list():
-            return  # Already registered — no-op.
+        canonical_name = getattr(
+            RelativeActionsProcessorStep,
+            "_registry_name",
+            "relative_actions_processor",
+        )
+        names = ProcessorStepRegistry.list()
+        compat_names = {"relative_actions_processor", "delta_actions_processor"}
 
-        canonical_name = getattr(RelativeActionsProcessorStep, "_registry_name", "delta_actions_processor")
         try:
-            ProcessorStepRegistry.register("relative_actions_processor")(RelativeActionsProcessorStep)
-            # register() overwrites _registry_name on the class; restore it so that checkpoints
-            # produced during this training run serialize with the current canonical name.
-            RelativeActionsProcessorStep._registry_name = canonical_name
-            self._registered_aliases.append("relative_actions_processor")
-            log.info(
-                "[anvil_trainer] Registered compat alias 'relative_actions_processor' → %s",
-                canonical_name,
-            )
+            if canonical_name not in names:
+                ProcessorStepRegistry.register(canonical_name)(RelativeActionsProcessorStep)
+                RelativeActionsProcessorStep._registry_name = canonical_name
+                names = ProcessorStepRegistry.list()
+
+            for alias in sorted(compat_names - {canonical_name}):
+                if alias in names:
+                    continue
+                ProcessorStepRegistry.register(alias)(RelativeActionsProcessorStep)
+                # register() overwrites _registry_name on the class; restore the
+                # installed release's canonical name so newly-saved checkpoints use it.
+                RelativeActionsProcessorStep._registry_name = canonical_name
+                self._registered_aliases.append(alias)
+                names = ProcessorStepRegistry.list()
+                log.info(
+                    "[anvil_trainer] Registered compat alias '%s' -> %s",
+                    alias,
+                    canonical_name,
+                )
         except Exception as e:  # pragma: no cover
             log.warning("[anvil_trainer] Failed to register processor compat alias: %s", e)
 
@@ -350,6 +517,30 @@ class TransformRunner:
         for transform in self.active_transforms:
             transform.patch_metadata(self.config, runner=self)
 
+    def apply_vla_jepa_input_patch(self) -> None:
+        """Align VLA-JEPA proprioception with its current-frame visual input.
+
+        World-model training requests observations ``[t, ..., t+7]``. Upstream
+        LeRobot 0.6 correctly uses image ``t`` for action conditioning but takes
+        state ``t+7`` from the same stacked batch, leaking future information and
+        creating a train/inference mismatch. Preserve the future video stack for
+        JEPA loss while replacing only the action model's state input with state
+        ``t``.
+        """
+        from lerobot.policies.vla_jepa.modeling_vla_jepa import VLAJEPAPolicy
+
+        original_prepare = VLAJEPAPolicy._prepare_model_inputs
+
+        def patched_prepare(policy, batch, training=True):
+            inputs = original_prepare(policy, batch, training=training)
+            state = batch.get("observation.state")
+            if state is not None:
+                inputs["state"] = _vla_jepa_current_state(state).float()
+            return inputs
+
+        self._patch(VLAJEPAPolicy, "_prepare_model_inputs", patched_prepare)
+        log.info("[vla_jepa] Patched stacked state selection to use observation time t")
+
     def apply_dataset_patches(self) -> None:
         """Patch LeRobotDataset.__getitem__ to apply transforms and fix index mapping.
 
@@ -361,7 +552,7 @@ class TransformRunner:
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
         # We must capture the original __getitem__ to use it in our patch.
-        # LeRobotDataset.__getitem__ in v0.5.1 does not perform index mapping,
+        # LeRobotDataset.__getitem__ does not perform Anvil split index mapping,
         # but EpisodeAwareSampler yields absolute indices. We add the mapping
         # logic here to support filtered datasets (splits).
         original_getitem = LeRobotDataset.__getitem__
@@ -425,6 +616,7 @@ class TransformRunner:
             # Full dataset to determine total episode count
             full_dataset = original_make_dataset(cfg)
             total_ep = full_dataset.num_episodes
+            val_state._camera_keys = tuple(full_dataset.meta.camera_keys)
 
             # Compute delta action stats when DeltaActionTransform is active so
             # that lerobot's normalizer is built against delta statistics rather
@@ -521,19 +713,52 @@ class TransformRunner:
             return train_dataset
 
         self._patch(factory_mod, "make_dataset", patched_make_dataset)
-        self._patch(lerobot_train_mod, "make_dataset", patched_make_dataset)
+        if hasattr(lerobot_train_mod, "make_dataset"):
+            self._patch(lerobot_train_mod, "make_dataset", patched_make_dataset)
+        if hasattr(lerobot_train_mod, "make_train_eval_datasets"):
+            def patched_make_train_eval_datasets(cfg):
+                return patched_make_dataset(cfg), None
+
+            self._patch(
+                lerobot_train_mod,
+                "make_train_eval_datasets",
+                patched_make_train_eval_datasets,
+            )
+            log.info(
+                "[split] LeRobot's native dataset eval is disabled while --split-ratio "
+                "is active (eval_steps/max_eval_samples are no-ops); anvil-trainer's "
+                "val/test loss hooks are used instead"
+            )
         log.info("[split] Patched make_dataset (split_ratio=%s, random=True)", s)
 
         # Capture preprocessor when it's created by lerobot
         original_make_processors = policy_factory_mod.make_pre_post_processors
 
         def capturing_make_processors(*args, **kwargs):
-            preprocessor, postprocessor = original_make_processors(*args, **kwargs)
+            policy_cfg = kwargs.get("policy_cfg", args[0] if args else None)
+            preprocessor, postprocessor = _make_pre_post_processors_with_compat(
+                original_make_processors, *args, **kwargs
+            )
+            if getattr(policy_cfg, "type", None) == "vla_jepa":
+                removed_steps = reconcile_vla_jepa_postprocessor(policy_cfg, postprocessor)
+                if removed_steps:
+                    log.info(
+                        "[vla_jepa] Removed disabled pretrained postprocessor steps: %s",
+                        ", ".join(removed_steps),
+                    )
+                log.info(
+                    "[vla_jepa] Reconciled postprocessor with effective config "
+                    "(gripper_dim=%d, pre_snap=%s, binarize=%s)",
+                    policy_cfg.gripper_dim,
+                    policy_cfg.pre_snap_gripper_action,
+                    policy_cfg.binarize_gripper_action,
+                )
             val_state._preprocessor = preprocessor
             return preprocessor, postprocessor
 
         self._patch(policy_factory_mod, "make_pre_post_processors", capturing_make_processors)
-        self._patch(lerobot_train_mod, "make_pre_post_processors", capturing_make_processors)
+        if hasattr(lerobot_train_mod, "make_pre_post_processors"):
+            self._patch(lerobot_train_mod, "make_pre_post_processors", capturing_make_processors)
         log.info("[split] Patched make_pre_post_processors to capture preprocessor")
 
     def apply_checkpoint_patch(self) -> None:
@@ -541,12 +766,21 @@ class TransformRunner:
         1. Compute and log test loss (if test split is active) at save_freq.
         2. Write anvil_config.json (with split info) into each checkpoint's pretrained_model/ directory.
         """
+        import importlib
         import time
 
         import lerobot.scripts.lerobot_train as lerobot_train_mod
-        import lerobot.utils.train_utils as train_utils_mod
         import torch
-        from lerobot.utils.train_utils import save_checkpoint as original_save_checkpoint
+
+        train_utils_mod = None
+        with contextlib.suppress(ModuleNotFoundError):
+            train_utils_mod = importlib.import_module("lerobot.utils.train_utils")
+
+        original_save_checkpoint = getattr(
+            train_utils_mod,
+            "save_checkpoint",
+            lerobot_train_mod.save_checkpoint,
+        )
 
         anvil_cfg_base: dict = {
             "action_type": self.config.action_type,
@@ -564,12 +798,17 @@ class TransformRunner:
 
         val_state = self
 
-        def patched_save_checkpoint(checkpoint_dir, **kwargs):
+        def patched_save_checkpoint(checkpoint_dir, *args, **kwargs):
             # --- Test loss (computed at save_freq) ---
             if val_state._test_dataloader is not None:
                 policy = kwargs.get("policy")
-                preprocessor = kwargs.get("preprocessor") or val_state._preprocessor
-                step = kwargs.get("step", "?")
+                if policy is None and len(args) >= 3:
+                    policy = args[2]
+                preprocessor = kwargs.get("preprocessor")
+                if preprocessor is None and len(args) >= 6:
+                    preprocessor = args[5]
+                preprocessor = preprocessor or val_state._preprocessor
+                step = kwargs.get("step", args[0] if args else "?")
 
                 if policy is not None:
                     policy.eval()
@@ -586,6 +825,9 @@ class TransformRunner:
 
                     with torch.no_grad():
                         for batch in val_state._test_dataloader:
+                            batch = _normalize_uint8_camera_images(
+                                batch, val_state._camera_keys
+                            )
                             if preprocessor is not None:
                                 batch = preprocessor(batch)
                             else:
@@ -613,7 +855,7 @@ class TransformRunner:
                         pass
 
             # --- Original save ---
-            original_save_checkpoint(checkpoint_dir, **kwargs)
+            original_save_checkpoint(checkpoint_dir, *args, **kwargs)
 
             # --- Save split_info.json and anvil_config.json ---
             pretrained_dir = checkpoint_dir / "pretrained_model"
@@ -627,8 +869,9 @@ class TransformRunner:
 
                 log.info("[anvil_trainer] Saved configs to %s", pretrained_dir)
 
-        # Patch both the module and the already-imported reference in lerobot_train
-        self._patch(train_utils_mod, "save_checkpoint", patched_save_checkpoint)
+        # Patch both the source module (when present) and the reference used by lerobot_train.
+        if train_utils_mod is not None and hasattr(train_utils_mod, "save_checkpoint"):
+            self._patch(train_utils_mod, "save_checkpoint", patched_save_checkpoint)
         self._patch(lerobot_train_mod, "save_checkpoint", patched_save_checkpoint)
         log.info("[anvil_trainer] Patched save_checkpoint for test loss + anvil_config.json")
 
@@ -643,15 +886,13 @@ class TransformRunner:
         val_state = self
         _counter = {"n": 0}
 
-        def patched_update_policy(
-            train_metrics, policy, batch, optimizer, grad_clip_norm,
-            accelerator=None, lr_scheduler=None, lock=None, rabc_weights_provider=None,
-        ):
-            result = original_update_policy(
-                train_metrics, policy, batch, optimizer, grad_clip_norm,
-                accelerator=accelerator, lr_scheduler=lr_scheduler,
-                lock=lock, rabc_weights_provider=rabc_weights_provider,
-            )
+        def patched_update_policy(*args, **kwargs):
+            result = original_update_policy(*args, **kwargs)
+
+            policy = args[1] if len(args) > 1 else kwargs.get("policy")
+            accelerator = kwargs.get("accelerator")
+            if accelerator is None and len(args) > 5:
+                accelerator = args[5]
 
             _counter["n"] += 1
             val_freq = val_state._val_freq
@@ -682,6 +923,9 @@ class TransformRunner:
 
             with torch.no_grad():
                 for val_batch in val_state._val_dataloader:
+                    val_batch = _normalize_uint8_camera_images(
+                        val_batch, val_state._camera_keys
+                    )
                     if preprocessor is not None:
                         val_batch = preprocessor(val_batch)
                     else:
@@ -737,7 +981,9 @@ def patched_lerobot(config: TrainingConfig):
     """
     runner = TransformRunner(config)
     runner.log_config()
+    runner.apply_config_sequence_patch()
     runner.apply_metadata_patches()
+    runner.apply_vla_jepa_input_patch()
     runner.apply_processor_compat_aliases()
     # Note: the dataset/val_loss/checkpoint patches need lerobot imported,
     # which apply_metadata_patches typically triggers indirectly via

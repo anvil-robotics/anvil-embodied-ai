@@ -194,7 +194,7 @@ class MultiProcessStrategy:
         observation = {}
 
         # Add images (already decompressed by workers)
-        for camera_name, (image, timestamp) in images.items():
+        for camera_name, (image, _timestamp) in images.items():
             # Convert to tensor and normalize to [0, 1]
             image_tensor = torch.from_numpy(image).float() / 255.0
             # Rearrange to (C, H, W) and add batch dimension
@@ -220,7 +220,10 @@ class MultiProcessStrategy:
                     continue
                 data_dict, obs_key = feature_map[feature]
                 ordered = []
-                for arm_key in sorted(arm_mapping.keys()):
+                # YAML mappings preserve insertion order. Honor that explicit
+                # order so checkpoints with right-then-left state vectors are
+                # representable without inventing ROS arm keys.
+                for arm_key in arm_mapping:
                     for joint_id in joint_order:
                         joint_name = f"{obs_prefix}{sep}{arm_key}{sep}{joint_id}"
                         val = data_dict.get(joint_name, 0.0) if data_dict else 0.0

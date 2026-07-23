@@ -20,8 +20,8 @@ cp .env.example .env
 | `MODEL_PATH` | Yes (inference) | Host path to checkpoint dir. Must be absolute or start with `./` — bare relative paths are treated as Docker named volumes. |
 | `ROS_DOMAIN_ID` | Yes | ROS2 domain ID — must match the Anvil Devbox. Leave empty for localhost-only. |
 | `CYCLONEDDS_URI` | Yes | Path to CycloneDDS XML config (e.g. `configs/cyclonedds/two_pc_gpu.xml`). |
-| `LEROBOT_EXTRAS` | VLA only | Comma-separated policy extras built into the Docker image — e.g. `smolvla`, `pi,smolvla`. **Rebuild the image after changing:** `docker compose build`. ACT and Diffusion leave this empty. |
-| `HF_CACHE` | VLA only | Host path to HuggingFace model cache (default: `~/.cache/huggingface`). Required for Pi0, Pi0.5, SmolVLA — they load the PaliGemma tokenizer at runtime. |
+| `LEROBOT_EXTRAS` | Policy-specific | Comma-separated LeRobot extras built into the Docker image. Default is `diffusion` so diffusion checkpoints load. ACT can set this empty to minimize the image. Use extras such as `smolvla`, `pi`, `molmoact2`, `groot`, `multi_task_dit`, `evo1`, `fastwam`, or `vla_jepa`. **Rebuild the image after changing:** `docker compose build`. |
+| `HF_CACHE` | Policy-specific | Host path to HuggingFace model cache (default: `~/.cache/huggingface`). Required for language-conditioned/foundation policies that load tokenizers or pretrained backbones at runtime. |
 | `CONFIG_FILE` | Yes | Path to inference config YAML (default: `configs/lerobot_control/inference_default.yaml`). |
 | `ACTION_TYPE` | No | Action type passed to the **inference monitor node** (`inference_monitor_node`) only. The main inference node always reads this from `anvil_config.json` in the checkpoint via `resolve_action_type()` — this env var does **not** override it. Options: `absolute` · `delta_obs_t` · `delta_sequential`. |
 | `ECHO_TOPIC_ONLY` | No | `true` = skip model loading, subscribe topics and log FPS only. For verifying DDS connectivity without a GPU or checkpoint. Equivalent to `--echo-topic-only`. |
@@ -29,6 +29,44 @@ cp .env.example .env
 | `DEBUG` | No | `true` = enable extra metrics: action smoothness, queue depth stats, Action FPS. |
 
 For full descriptions and defaults, see [`.env.example`](../.env.example).
+
+### Inference Model Helper
+
+Use `scripts/inference_model.py` to inspect local checkpoints and update `.env`:
+
+```bash
+./scripts/inference_model.py list
+./scripts/inference_model.py show
+./scripts/inference_model.py set lego-in-cup/act:last
+./scripts/inference_model.py set lego-in-cup/vla-jepa:last
+```
+
+`set` updates `MODEL_PATH`, sets the matching `LEROBOT_EXTRAS`, and refreshes
+`model_zoo/inference/current`. If `LEROBOT_EXTRAS` changes, rebuild the image:
+
+```bash
+docker compose build
+```
+
+### Supported Policy Types
+
+Docker inference uses `LEROBOT_EXTRAS` to decide which optional LeRobot policy dependencies are built into the image. Set multiple extras as a comma-separated list, then rebuild with `docker compose build`.
+
+| Model | Checkpoint `type` | `LEROBOT_EXTRAS` | Runtime path |
+|-------|-------------------|------------------|--------------|
+| ACT | `act` | empty | Standard chunk |
+| Diffusion | `diffusion` | `diffusion` | Standard chunk |
+| SmolVLA | `smolvla` | `smolvla` | RTC chunk |
+| Pi0 | `pi0` | `pi` | RTC chunk |
+| Pi0.5 | `pi05` | `pi` | RTC chunk |
+| MolmoAct2 | `molmoact2` | `molmoact2` | RTC chunk |
+| GR00T N1.7 | `groot` | `groot` | RTC chunk |
+| Multitask DiT | `multi_task_dit` | `multi_task_dit` | Synchronous chunk |
+| EVO1 | `evo1` | `evo1` | RTC chunk |
+| FastWAM | `fastwam` | `fastwam` | Synchronous chunk |
+| VLA-JEPA | `vla_jepa` | `vla_jepa` | Synchronous by default; opt-in RTC |
+
+All language-conditioned policies use `model.task_description` from the inference config, falling back to `anvil_config.json` in the checkpoint when available.
 
 ### Script Flags
 
@@ -92,7 +130,7 @@ Before running, review this file:
 ```yaml
 model:
   task_description: null
-  # VLA-only (SmolVLA / Pi0 / Pi0.5): task prompt the model was trained on.
+  # Language-conditioned policies: task prompt the model was trained on.
   # null = auto-read from anvil_config.json in the checkpoint (recommended).
 ```
 
@@ -116,8 +154,15 @@ inference_tuning:
     # null = num_train_timesteps (100 steps, ~300ms on GPU).
     # 10   = ~30ms on GPU — recommended for real-time deployment.
 
+  sync:
+    n_action_steps: null
+    # Synchronous policies, including VLA-JEPA unless rtc.enabled is true.
+    # null = use checkpoint value.
+
   rtc:
-    # VLA models only (SmolVLA / Pi0 / Pi0.5)
+    # RTC chunk policies: SmolVLA, Pi0/Pi0.5, MolmoAct2, GR00T, EVO1.
+    # null preserves policy defaults; true opts an RTC-capable policy in.
+    enabled: null
     inference_delay: 10
     # Fallback step-count before LatencyTracker auto-calibrates.
     # Rule of thumb: ceil(first_inference_ms × control_freq / 1000)
@@ -139,6 +184,10 @@ inference_tuning:
 #   # Holds the last command until threshold is crossed — useful for
 #   # overcoming motor dead zones / friction. Default: disabled (null).
 ```
+
+Set both fields explicitly to `null` to disable inference-side rate limiting
+and deadband. Omitting `max_position_delta` retains the backward-compatible
+0.1-radian software limit.
 
 ## DDS Middleware Selection
 

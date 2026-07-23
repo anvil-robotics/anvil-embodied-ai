@@ -43,7 +43,10 @@ def plot_episode_joints(
     ncols = min(4, n_joints)
     nrows_abs = math.ceil(n_joints / ncols)
 
-    show_delta = action_type in ("delta_obs_t", "delta_sequential") and raw_ground_truth is not None
+    show_delta = (
+        action_type in ("delta_obs_t", "delta_sequential", "native_relative")
+        and raw_ground_truth is not None
+    )
     nrows_delta = math.ceil(n_joints / ncols) if show_delta else 0
     total_rows = nrows_abs + nrows_delta
 

@@ -44,7 +44,7 @@ def make_config(split_ratio="8,1,1", dataset_root=DATASET_ROOT, output_dir=None,
                 "--batch_size=2",
                 "--num_workers=0",
                 "--dataset.repo_id=local",
-                "--eval_freq=0",
+                "--env_eval_freq=0",
                 "--policy.push_to_hub=false",
                 ]
     if output_dir:
@@ -247,7 +247,7 @@ class TestSplitInfoWritten:
                     "--batch_size=2",
                     "--num_workers=0",
                     "--dataset.repo_id=local",
-                    "--eval_freq=0",
+                    "--env_eval_freq=0",
                     "--policy.push_to_hub=false",
                     f"--output_dir={output_dir}",
                     "--job_name=test_split",

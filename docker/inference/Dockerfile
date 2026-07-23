@@ -1,8 +1,8 @@
 # Use ROS2 Jazzy as base
 FROM ros:jazzy-ros-base
 
-ARG LEROBOT_VERSION=0.5.1
-ARG LEROBOT_EXTRAS=""
+ARG LEROBOT_VERSION=0.6.0
+ARG LEROBOT_EXTRAS="diffusion"
 
 # Set environment
 ENV DEBIAN_FRONTEND=noninteractive
@@ -23,11 +23,12 @@ ENV PATH="/root/.local/bin:$PATH"
 # Create workspace
 WORKDIR /workspace
 
-# Base lerobot install — cached as long as version doesn't change
-# transformers + scipy are required for VLA models (pi0, pi0.5, smolvla)
+# Base lerobot install — cached as long as version doesn't change.
+# transformers + scipy are required for VLA/foundation policies.
+# LEROBOT_EXTRAS defaults to diffusion so diffusion checkpoints load out of the box.
 RUN pip3 install --break-system-packages --no-cache-dir --ignore-installed \
     numpy packaging "lerobot==${LEROBOT_VERSION}" matplotlib \
-    "transformers==5.3.0" "scipy>=1.14.0,<2.0.0" && \
+    "transformers>=5.4.0,<5.6.0" "scipy>=1.14.0,<2.0.0" && \
     pip3 install --break-system-packages --no-cache-dir "setuptools<80"
 
 # Extras — separate layer, only rebuilt when LEROBOT_EXTRAS changes

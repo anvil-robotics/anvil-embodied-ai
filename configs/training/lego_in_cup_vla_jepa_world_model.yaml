@@ -1,0 +1,95 @@
+# VLA-JEPA world-model fine-tuning recipe for the single left-arm Lego-in-cup task.
+#
+# Run from the repository root (inside the training image, where /workspace/datasets
+# is mounted):
+#
+#   anvil-trainer \
+#     --config_path=configs/training/lego_in_cup_vla_jepa_world_model.yaml \
+#     --task-description="Pick up the Lego brick and place it in the cup." \
+#     --action-type=absolute \
+#     --split-ratio=8,1,1
+#
+# The 32-step chunk covers 1.067 s at the 30 Hz control rate. This is comfortably
+# above the measured ~566 ms VLA-JEPA p95 inference time without asking the
+# world model to predict the ACT baseline's full 3.333-second horizon.
+
+dataset:
+  repo_id: local
+  root: /workspace/datasets/lego-in-cup
+  video_backend: pyav
+  image_transforms:
+    # Keep temporal video frames photometrically consistent for world-model loss.
+    enable: false
+
+policy:
+  # Fine-tune the released base model rather than initializing Qwen/V-JEPA from scratch.
+  path: lerobot/VLA-JEPA-Pretrain
+  pretrained_revision: e946c3e5b538d760f4b4ff239d1b1c12090c041d
+  device: cuda
+  use_amp: false
+  push_to_hub: false
+
+  chunk_size: 32
+  n_action_steps: 32
+  enable_world_model: true
+  world_model_loss_weight: 0.1
+  freeze_qwen: false
+  torch_dtype: bfloat16
+
+  # The released checkpoint has a 7D action head. The Lego dataset is 8D, so
+  # these dimension-dependent modules must be reinitialized while retaining the
+  # pretrained Qwen, V-JEPA, and remaining action-model weights.
+  # Keep list-valued pretrained overrides as one JSON scalar. LeRobot 0.6's
+  # YAML flattener otherwise drops the field before loading the base config.
+  reinit_modules: '["model.action_model.action_encoder","model.action_model.action_decoder","model.action_model.state_encoder"]'
+
+  # The dataset/model action order is [finger_joint1, joint1, ..., joint7].
+  # The gripper is continuous in this dataset, so neither snapping processor belongs
+  # in the saved pipeline. Index 0 is retained for future gripper-aware processing.
+  gripper_dim: 0
+  pre_snap_gripper_action: false
+  binarize_gripper_action: false
+  clip_normalized_actions: true
+
+  # Pretrained-policy overrides are translated to CLI values by LeRobot, so map
+  # fields must remain one YAML scalar rather than being flattened key-by-key.
+  normalization_mapping: '{"VISUAL":"IDENTITY","STATE":"MEAN_STD","ACTION":"MIN_MAX"}'
+
+  # Explicit features prevent the pretrained vision-only feature declaration from
+  # dropping proprioception. Dataset camera keys are renamed below.
+  input_features: '{"observation.images.exterior_1_left":{"type":"VISUAL","shape":[3,224,224]},"observation.images.exterior_2_left":{"type":"VISUAL","shape":[3,224,224]},"observation.state":{"type":"STATE","shape":[8]}}'
+  output_features: '{"action":{"type":"ACTION","shape":[8]}}'
+  action_dim: 8
+  state_dim: 8
+
+  # The prior run converged within 10k steps; decay across this fine-tuning run.
+  optimizer_lr: 0.0001
+  optimizer_betas: [0.9, 0.95]
+  optimizer_eps: 1.0e-8
+  optimizer_weight_decay: 1.0e-8
+  optimizer_grad_clip_norm: 1.0
+  scheduler_warmup_steps: 1000
+  scheduler_decay_steps: 10000
+  scheduler_decay_lr: 0.000001
+
+rename_map:
+  observation.images.waist: observation.images.exterior_1_left
+  observation.images.wrist_l: observation.images.exterior_2_left
+
+output_dir: model_zoo/lego-in-cup/vla-jepa-world-model-h32
+job_name: lego-in-cup-vla-jepa-world-model-h32
+seed: 1000
+cudnn_deterministic: false
+num_workers: 0
+batch_size: 1
+steps: 10000
+env_eval_freq: 0
+log_freq: 500
+save_checkpoint: true
+save_freq: 2500
+use_policy_training_preset: true
+
+wandb:
+  enable: true
+  disable_artifact: true
+  project: lego-in-cup

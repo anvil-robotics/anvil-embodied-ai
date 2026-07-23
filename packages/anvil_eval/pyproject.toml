@@ -22,11 +22,13 @@ classifiers = [
 ]
 
 dependencies = [
-    "lerobot~=0.5.1",
-    "torch>=2.2.1,<2.11.0",
+    "lerobot[dataset,diffusion]~=0.6.0",
+    "torch>=2.7",
     "numpy>=2.0.0,<2.3.0",
     "matplotlib>=3.8.0",
     "tqdm~=4.67",
+    "pyyaml>=6.0",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]
@@ -36,12 +38,19 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.4.0",
 ]
-smolvla = ["lerobot[smolvla]~=0.5.1"]
-pi      = ["lerobot[pi]~=0.5.1"]
-all     = ["lerobot[smolvla,pi]~=0.5.1", "wandb~=0.24"]
+smolvla        = ["lerobot[smolvla]~=0.6.0"]
+pi             = ["lerobot[pi]~=0.6.0"]
+molmoact2      = ["lerobot[molmoact2]~=0.6.0"]
+groot          = ["lerobot[groot]~=0.6.0"]
+multi_task_dit = ["lerobot[multi_task_dit]~=0.6.0"]
+evo1           = ["lerobot[evo1]~=0.6.0"]
+fastwam        = ["lerobot[fastwam]~=0.6.0"]
+vla_jepa       = ["lerobot[vla_jepa]~=0.6.0"]
+all            = ["lerobot[smolvla,pi,molmoact2,groot,multi_task_dit,evo1,fastwam,vla_jepa]~=0.6.0", "wandb~=0.24"]
 
 [project.scripts]
 anvil-eval = "anvil_eval.cli:main"
+anvil-sanity = "anvil_eval.sanity_cli:main"
 # anvil-eval-ros moved to the anvil-eval-ros package (see packages/anvil_eval_ros/)
 
 [build-system]

@@ -19,7 +19,7 @@ class ActionLimiter:
 
     def __init__(
         self,
-        max_delta: float = 0.1,
+        max_delta: float | None = 0.1,
         min_delta_threshold: float | None = None,
         model_joint_order: list[str] | None = None,
         controller_joint_order: list[str] | None = None,
@@ -30,7 +30,8 @@ class ActionLimiter:
         Initialize action limiter.
 
         Args:
-            max_delta: Maximum position change per step (radians)
+            max_delta: Maximum position change per step (radians), or ``None``
+                to disable software-side delta limiting.
             min_delta_threshold: Minimum per-joint change to publish a new command.
                 When set, commands are held at the last published value until the
                 cumulative change exceeds this threshold. Helps overcome motor
@@ -139,7 +140,11 @@ class ActionLimiter:
         Returns:
             Delta-limited action
         """
-        if current_positions is None or len(current_positions) != len(action):
+        if (
+            self.max_delta is None
+            or current_positions is None
+            or len(current_positions) != len(action)
+        ):
             return action
 
         delta = action - current_positions
@@ -150,8 +155,8 @@ class ActionLimiter:
         self,
         action: np.ndarray,
         current_positions: np.ndarray | None = None,
-        joint_order: list[str] | None = None,
-        ref_state: np.ndarray | None = None,
+        joint_order: list[str] | None = None,  # noqa: ARG002
+        ref_state: np.ndarray | None = None,  # noqa: ARG002
     ) -> np.ndarray:
         """
         Process action: reorder and apply delta limiting.
@@ -215,7 +220,11 @@ class ActionLimiter:
         Returns:
             List of joint indices that exceed max_delta
         """
-        if current_positions is None or len(current_positions) != len(action):
+        if (
+            self.max_delta is None
+            or current_positions is None
+            or len(current_positions) != len(action)
+        ):
             return []
 
         delta = np.abs(action - current_positions)

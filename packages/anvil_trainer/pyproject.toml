@@ -23,8 +23,8 @@ classifiers = [
 
 dependencies = [
     "anvil-shared",             # shared pure-python helpers (splits, etc.)
-    "lerobot~=0.5.1",
-    "torch>=2.2.1,<2.11.0",     # lerobot v0.5.0 official range; install from pytorch-cu128 index (see root pyproject.toml)
+    "lerobot[training,diffusion]~=0.6.0",
+    "torch>=2.7",     # Resolved through the CUDA 13.2 PyTorch index configured in the root pyproject.toml
     "numpy>=2.0.0,<2.3.0",
     "wandb~=0.24",
     "pyyaml~=6.0",
@@ -50,11 +50,17 @@ dev = [
 #
 # Usage:
 #   uv sync --all-packages --extra smolvla
-#   uv sync --all-packages --extra smolvla --extra pi0
+#   uv sync --all-packages --extra smolvla --extra pi
 # =============================================================================
-smolvla = ["lerobot[smolvla]~=0.5.1"]   # SmolVLA
-pi      = ["lerobot[pi]~=0.5.1"]          # Pi0 / Pi0.5
-all     = ["lerobot[smolvla,pi]~=0.5.1"]  # all policies
+smolvla        = ["lerobot[smolvla]~=0.6.0"]          # SmolVLA
+pi             = ["lerobot[pi]~=0.6.0"]              # Pi0 / Pi0.5
+molmoact2      = ["lerobot[molmoact2]~=0.6.0"]       # MolmoAct2
+groot          = ["lerobot[groot]~=0.6.0"]           # GR00T N1.7
+multi_task_dit = ["lerobot[multi_task_dit]~=0.6.0"]  # Multitask DiT
+evo1           = ["lerobot[evo1]~=0.6.0"]            # EVO1
+fastwam        = ["lerobot[fastwam]~=0.6.0"]         # FastWAM
+vla_jepa       = ["lerobot[vla_jepa]~=0.6.0"]        # VLA-JEPA
+all            = ["lerobot[smolvla,pi,molmoact2,groot,multi_task_dit,evo1,fastwam,vla_jepa]~=0.6.0"]
 
 [project.scripts]
 anvil-trainer = "anvil_trainer.train:main"

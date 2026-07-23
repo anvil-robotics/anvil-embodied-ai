@@ -1,0 +1,76 @@
+# SmolVLA fine-tuning recipe for the single left-arm Lego-in-cup task.
+#
+# Run from the repository root (inside the training image, where
+# /workspace/datasets is mounted):
+#
+#   anvil-trainer \
+#     --config_path=configs/training/lego_in_cup_smolvla.yaml \
+#     --task-description="Pick up the Lego brick and place it in the cup." \
+#     --action-type=absolute \
+#     --split-ratio=8,1,1
+#
+# At 30 Hz, 50 actions cover 1.667 seconds and preserve the RoboTwin checkpoint's
+# native horizon. The explicit 8D features replace the checkpoint's incompatible
+# 6D state / 14D action declarations.
+
+dataset:
+  repo_id: local
+  root: /workspace/datasets/lego-in-cup
+  video_backend: pyav
+  image_transforms:
+    enable: false
+
+policy:
+  path: lerobot/smolvla_robotwin
+  pretrained_revision: 967623a0f38c7e1236c66b3893c830398d793ff7
+  device: cuda
+  use_amp: false
+  push_to_hub: false
+
+  chunk_size: 50
+  n_action_steps: 50
+
+  # Preserve the pretrained action expert while limiting this 20-demo run to
+  # the expert and state projection. Training the vision encoder/VLM overfits
+  # quickly at this dataset size.
+  load_vlm_weights: true
+  freeze_vision_encoder: true
+  train_expert_only: true
+  train_state_proj: true
+
+  normalization_mapping: '{"VISUAL":"IDENTITY","STATE":"MEAN_STD","ACTION":"MEAN_STD"}'
+  input_features: '{"observation.images.camera1":{"type":"VISUAL","shape":[3,256,256]},"observation.images.camera2":{"type":"VISUAL","shape":[3,256,256]},"observation.images.camera3":{"type":"VISUAL","shape":[3,256,256]},"observation.state":{"type":"STATE","shape":[8]}}'
+  output_features: '{"action":{"type":"ACTION","shape":[8]}}'
+
+  optimizer_lr: 0.0001
+  optimizer_betas: [0.9, 0.95]
+  optimizer_eps: 1.0e-8
+  optimizer_weight_decay: 1.0e-10
+  optimizer_grad_clip_norm: 10.0
+  scheduler_warmup_steps: 1000
+  scheduler_decay_steps: 20000
+  scheduler_decay_lr: 0.0000025
+
+rename_map:
+  observation.images.waist: observation.images.camera1
+  observation.images.wrist_l: observation.images.camera2
+  observation.images.chest: observation.images.camera3
+
+output_dir: model_zoo/lego-in-cup/smolvla-robotwin-h50
+job_name: lego-in-cup-smolvla-robotwin-h50
+seed: 1000
+cudnn_deterministic: false
+num_workers: 0
+persistent_workers: false
+batch_size: 16
+steps: 20000
+env_eval_freq: 0
+log_freq: 500
+save_checkpoint: true
+save_freq: 5000
+use_policy_training_preset: true
+
+wandb:
+  enable: true
+  disable_artifact: true
+  project: lego-in-cup

@@ -1,0 +1,64 @@
+# Controlled 5k fine-tune initialized from Hugging Face's OpenArm shirt-fold policy.
+# Keep this recipe identical to shirt_fold_pi05_base_phase_aligned.yaml except
+# for policy.path/revision and run identity, so the pair is a valid A/B test.
+
+dataset:
+  repo_id: local
+  root: datasets/shirt-fold/lerobot-hf-phase-aligned
+  video_backend: pyav
+  image_transforms:
+    enable: false
+
+policy:
+  path: lerobot-data-collection/folding_final
+  pretrained_revision: 695abe40dbf3aac04efda59c1501d748681fa0fb
+  device: cuda
+  use_amp: false
+  push_to_hub: false
+
+  chunk_size: 30
+  n_action_steps: 30
+  max_state_dim: 32
+  max_action_dim: 32
+  num_inference_steps: 10
+  use_relative_actions: true
+  relative_exclude_joints: [gripper]
+  action_feature_names: [right_joint_1.pos, right_joint_2.pos, right_joint_3.pos, right_joint_4.pos, right_joint_5.pos, right_joint_6.pos, right_joint_7.pos, right_gripper.pos, left_joint_1.pos, left_joint_2.pos, left_joint_3.pos, left_joint_4.pos, left_joint_5.pos, left_joint_6.pos, left_joint_7.pos, left_gripper.pos]
+
+  normalization_mapping: '{"VISUAL":"IDENTITY","STATE":"QUANTILES","ACTION":"QUANTILES"}'
+  input_features: '{"observation.images.left_wrist":{"type":"VISUAL","shape":[3,270,480]},"observation.images.right_wrist":{"type":"VISUAL","shape":[3,270,480]},"observation.images.base":{"type":"VISUAL","shape":[3,270,480]},"observation.state":{"type":"STATE","shape":[16]}}'
+  output_features: '{"action":{"type":"ACTION","shape":[16]}}'
+
+  dtype: bfloat16
+  gradient_checkpointing: true
+  compile_model: false
+  freeze_vision_encoder: false
+  train_expert_only: true
+
+  optimizer_lr: 0.00001
+  optimizer_betas: [0.9, 0.95]
+  optimizer_eps: 1.0e-8
+  optimizer_weight_decay: 0.01
+  optimizer_grad_clip_norm: 1.0
+  scheduler_warmup_steps: 250
+  scheduler_decay_steps: 5000
+  scheduler_decay_lr: 0.000001
+
+output_dir: model_zoo/shirt-fold/pi05-hf-folding-phase-aligned-5k
+job_name: shirt-fold-pi05-hf-folding-phase-aligned-5k
+seed: 1000
+cudnn_deterministic: false
+num_workers: 0
+persistent_workers: false
+batch_size: 16
+steps: 5000
+env_eval_freq: 0
+log_freq: 100
+save_checkpoint: true
+save_freq: 500
+use_policy_training_preset: true
+
+wandb:
+  enable: true
+  disable_artifact: true
+  project: openarm2-shirt-folding

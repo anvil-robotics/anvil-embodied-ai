@@ -11,8 +11,8 @@
 # Model
 # -----------------------------------------------------------------------------
 model:
-  # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion
-  # Set to the task the model was trained/finetuned for.
+  # Language task prompt - required for language-conditioned policies,
+  # ignored for ACT / Diffusion. Set to the task used for training/finetuning.
   task_description: "Pick up the block and place it on the target location"
 
 # -----------------------------------------------------------------------------
@@ -39,9 +39,15 @@ inference_tuning:
     #   Default (null) = num_train_timesteps (100). Set 10 for real-time (78ms vs 711ms).
     num_inference_steps: 10
 
-  # RTC — VLA models only (pi0, pi0.5, smolvla), always enabled
+  # Synchronous chunked foundation policies (multi_task_dit, fastwam, vla_jepa)
+  sync:
+    n_action_steps: null
+
+  # Native RTC policies default on; VLA-JEPA opts in with enabled: true.
   #   Background thread runs inference continuously; control loop reads from ActionQueue.
   rtc:
+    # null preserves the policy default; true opts RTC-capable policies in.
+    enabled: null
     # inference_delay: fallback step-count for first inference before LatencyTracker kicks in.
     #   Real-robot tuned: ceil(~330ms × 30Hz) ≈ 10. Auto-adjusted after first inference.
     inference_delay: 10

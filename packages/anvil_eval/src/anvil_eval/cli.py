@@ -74,6 +74,13 @@ def parse_args() -> argparse.Namespace:
         help="Device to run inference on (cuda or cpu, default: cuda)",
     )
     parser.add_argument(
+        "--video-backend",
+        type=str,
+        default="pyav",
+        choices=["pyav", "torchcodec"],
+        help="Dataset video backend (default: pyav)",
+    )
+    parser.add_argument(
         "--task-description",
         type=str,
         help="Task prompt for VLA models (overrides anvil_config.json)",
@@ -113,6 +120,7 @@ def main() -> None:
         num_episodes=args.num_eps,
         split=args.split,
         device=args.device,
+        video_backend=args.video_backend,
         task_description=args.task_description or anvil_cfg.get("task_description"),
         output_dir=Path(args.output_dir) if args.output_dir else None,
         seed=args.seed,
@@ -120,7 +128,7 @@ def main() -> None:
 
     # 3. Initialize Dataset and Split info
     try:
-        eval_dataset = EvaluationDataset(dataset_path)
+        eval_dataset = EvaluationDataset(dataset_path, video_backend=config.video_backend)
         split_info = eval_dataset.resolve_splits(anvil_cfg, checkpoint_path=checkpoint_path)
         log.info("[anvil-eval] Dataset: %s (%d episodes)", dataset_path.name, eval_dataset.total_episodes)
     except Exception as e:
@@ -183,20 +191,17 @@ def main() -> None:
     all_metrics = []
     for ep_idx, split_label in episodes_to_eval:
         log.info("[anvil-eval] Evaluating episode %d (%s)...", ep_idx, split_label)
-        
+
         frame_indices = eval_dataset.get_episode_frames(ep_idx)
         result = evaluator.evaluate_episode(eval_dataset.dataset, frame_indices, ep_idx, split_label)
-        
-        # Compute metrics in model-output space (raw_output vs raw_ground_truth) so that
-        # delta and absolute models are evaluated on what the model actually predicts,
-        # not on the restored absolute trajectory.
-        _pred_for_metrics = result.raw_output if result.raw_output is not None else result.predicted
-        _gt_for_metrics = result.raw_ground_truth if result.raw_ground_truth is not None else result.ground_truth
+
+        # Robot-space metrics are comparable across absolute, Anvil-delta, and native
+        # relative-action policies. Raw model-space trajectories remain available in plots.
         metrics = compute_episode_metrics(
-            _pred_for_metrics, _gt_for_metrics, result.joint_names, ep_idx, split_label
+            result.predicted, result.ground_truth, result.joint_names, ep_idx, split_label
         )
         all_metrics.append(metrics)
-        
+
         # Plot episode
         plot_path = plots_dir / f"episode_{ep_idx:04d}_{split_label}.png"
         plot_episode_joints(
@@ -212,7 +217,7 @@ def main() -> None:
     log.info("[anvil-eval] Writing summary reports...")
     write_metrics_summary(all_metrics, config.output_dir / "metrics_summary.json")
     write_metrics_csv(all_metrics, config.output_dir / "metrics_per_episode.csv")
-    
+
     # Summary plot
     plot_summary_box_plot(all_metrics, eval_dataset.joint_names, plots_dir / "summary_per_joint_mae.png")
 

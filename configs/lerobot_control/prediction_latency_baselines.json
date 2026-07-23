@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "Synthetic baseline assumptions in milliseconds. Update from deployment-GPU measurements.",
+  "models": {
+    "act": {"mean_ms": 35, "coefficient_of_variation": 0.12, "inference_mode": "single_action", "source": "engineering estimate"},
+    "diffusion": {"mean_ms": 78, "coefficient_of_variation": 0.15, "inference_mode": "single_action", "source": "repository config note; 10 denoising steps"},
+    "smolvla": {"mean_ms": 240, "coefficient_of_variation": 0.18, "inference_mode": "rtc_chunk", "source": "engineering estimate"},
+    "pi0": {"mean_ms": 330, "coefficient_of_variation": 0.18, "inference_mode": "rtc_chunk", "source": "repository RTC tuning note"},
+    "pi05": {"mean_ms": 330, "coefficient_of_variation": 0.18, "inference_mode": "rtc_chunk", "source": "repository RTC tuning note"},
+    "molmoact2": {"mean_ms": 420, "coefficient_of_variation": 0.20, "inference_mode": "rtc_chunk", "source": "engineering estimate"},
+    "groot": {"mean_ms": 300, "coefficient_of_variation": 0.18, "inference_mode": "rtc_chunk", "source": "engineering estimate"},
+    "multi_task_dit": {"mean_ms": 250, "coefficient_of_variation": 0.18, "inference_mode": "sync_chunk", "source": "engineering estimate"},
+    "evo1": {"mean_ms": 380, "coefficient_of_variation": 0.20, "inference_mode": "rtc_chunk", "source": "engineering estimate"},
+    "fastwam": {"mean_ms": 180, "coefficient_of_variation": 0.16, "inference_mode": "sync_chunk", "source": "engineering estimate"},
+    "vla_jepa": {"mean_ms": 338, "coefficient_of_variation": 0.35, "inference_mode": "sync_chunk", "source": "repository measurement: 338 ms mean, 566 ms p95"}
+  }
+}

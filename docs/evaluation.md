@@ -41,8 +41,10 @@ Produces per-joint trajectory plots and a summary box plot.
 | `--episodes "0,3,5"` | — | Manually specify episode indices (overrides `--split`) |
 | `--output-dir PATH` | auto | Output dir (default: `eval_results/{dataset}/{job}/{checkpoint}/raw`) |
 | `--device DEVICE` | `cuda` | Inference device: `cuda` or `cpu` |
-| `--task-description TEXT` | — | VLA task prompt — overrides `anvil_config.json` (SmolVLA / Pi0.5 only) |
+| `--task-description TEXT` | — | Task prompt for language-conditioned policies; overrides `anvil_config.json` |
 | `--seed N` | `42` | Random seed for episode sampling |
+
+Dataset replay supports the same policy types listed in [training](training.md#supported-policies). Install the matching optional extra before evaluating SmolVLA, Pi, MolmoAct2, GR00T, Multitask DiT, EVO1, FastWAM, or VLA-JEPA checkpoints.
 
 Use `--split all` to sample from across the full dataset:
 
@@ -131,7 +133,7 @@ ros/
 
 The orange "Raw" line shows model output **before** postprocessing — useful for diagnosing whether the policy or postprocessor is responsible for a tracking error.
 
-> Requires Docker with NVIDIA GPU support. Set `LEROBOT_EXTRAS` if your model needs extra dependencies (e.g. `pi`, `smolvla`).
+> Requires Docker with NVIDIA GPU support. Set `LEROBOT_EXTRAS` if your model needs extra dependencies (e.g. `pi`, `smolvla`, `groot`, `molmoact2`).
 
 > For running inference on a live robot, see [Run Inference](inference.md).
 

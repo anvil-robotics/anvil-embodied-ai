@@ -1,0 +1,68 @@
+model:
+  task_description: "Put the yellow Lego piece in the red cup"
+
+inference_tuning:
+  act:
+    n_action_steps: null
+    temporal_ensemble_coeff: null
+  diffusion:
+    n_action_steps: null
+    num_inference_steps: 10
+  sync:
+    n_action_steps: null
+    async_prefetch: false
+    prefetch_threshold: 12
+    replace_pending_actions: true
+  rtc:
+    inference_delay: 10
+    queue_trigger_threshold: 50
+    execution_horizon: 12
+    max_guidance_weight: 10.0
+    prefix_attention_schedule: EXP
+
+joint_state_topic: "/joint_states"
+
+joint_names:
+  # Pi0.5 base is embodiment-agnostic. Use the conventional arm-joints-first,
+  # gripper-last order for the eight Anvil state values supplied to its tokenizer.
+  model_joint_order:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - joint7
+    - finger_joint1
+  controller_joint_order:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - joint7
+    - finger_joint1
+  arm_mapping:
+    l: left
+  state_features:
+    - position
+
+arms:
+  left:
+    ros_prefix: "follower_l"
+    # Shadow mode: deliberately disconnected from the real controller topic.
+    command_topic: "/eval/follower_l_forward_position_controller/commands"
+    action_start: 0
+    action_end: 8
+
+cameras:
+  fps: 60.0
+  mapping:
+    "/cam_waist/image_raw/compressed": "base_0_rgb"
+    "/cam_wrist_l/image_raw/compressed": "left_wrist_0_rgb"
+    "/cam_wrist_r/image_raw/compressed": "right_wrist_0_rgb"
+
+safety:
+  # Relevant only to the disconnected shadow command stream.
+  max_position_delta: 0.02

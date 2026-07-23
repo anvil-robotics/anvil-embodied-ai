@@ -51,6 +51,43 @@ def _parse_resume_path(raw: str) -> tuple[str, str]:
     return raw, "last"
 
 
+def _load_config_path_args() -> dict:
+    """Read a LeRobot ``--config_path`` for Anvil's default resolution.
+
+    LeRobot parses this file later.  Anvil still needs a few values early for
+    output naming and for deciding which defaults to inject.  Previously those
+    values were visible only when repeated on the command line, so a valid YAML
+    recipe could be silently overridden with ``model_zoo/dataset/...`` defaults.
+    """
+    raw = _pop_argv("config_path", remove=False)
+    if not raw:
+        return {}
+    path = Path(raw)
+    if not path.is_file():
+        return {}
+    try:
+        if path.suffix.lower() == ".json":
+            data = json.loads(path.read_text())
+        else:
+            import yaml
+
+            data = yaml.safe_load(path.read_text())
+    except Exception as exc:
+        log.warning("[anvil_trainer] Could not inspect --config_path=%s: %s", path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _config_value(data: dict, *keys: str):
+    """Return a nested config value, or ``None`` when any key is absent."""
+    value = data
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return None
+        value = value[key]
+    return value
+
+
 @dataclass
 class TrainingConfig:
     """
@@ -60,7 +97,7 @@ class TrainingConfig:
         exclude_observs: Observation suffixes to DROP (None = keep all).
             Use the key suffix after "observation." — supports both image and non-image keys:
             e.g. ["images.chest", "images.wrist_l", "velocity", "effort"]
-        task_override: Override task string for all samples (for SmolVLA)
+        task_override: Override task string for all samples (language-conditioned policies)
         use_delta_actions: Convert actions to delta (action - observation.state)
         dataset_root: Path to local dataset (for validation)
         note: Free-text note attached to this run (stored in anvil_config.json and wandb)
@@ -68,6 +105,8 @@ class TrainingConfig:
     """
 
     exclude_observs: list[str] | None = None
+    # Backward-compatible alias for the older --exclude-observation spelling.
+    exclude_observation: list[str] | None = None
     task_override: str | None = None
     # action_type: "absolute" | "delta_obs_t" | "delta_sequential"
     # delta_obs_t:     delta[k] = action[t+k] - obs[t]  (all k share the same obs reference)
@@ -81,10 +120,15 @@ class TrainingConfig:
     resume_checkpoint: str = "last"       # Checkpoint to resume from ("last" or e.g. "020000")
     split_ratio: list[float] = field(default_factory=lambda: [8.0, 1.0, 1.0])  # train/val/test episode split ratios
     max_episodes: int | None = None  # Randomly subsample N episodes before train/val/test split (None = use all)
-    # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50 (VLA models ignore this)
+    # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50
     backbone: str = "resnet18"
     note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
     note_append: str | None = None  # Append to existing note during --resume
+
+    def __post_init__(self) -> None:
+        if self.exclude_observs is None and self.exclude_observation is not None:
+            self.exclude_observs = self.exclude_observation
+        self.exclude_observation = self.exclude_observs
 
     @property
     def use_delta_actions(self) -> bool:
@@ -108,7 +152,18 @@ class TrainingConfig:
             --use-delta-actions: Legacy flag, maps to --action-type=delta_obs_t
             --exclude-observs=SUFFIX1,SUFFIX2: Drop observations by suffix
         """
-        excl_str = _pop_argv("exclude-observs") or os.environ.get("LEROBOT_EXCLUDE_OBSERVS", "")
+        file_config = _load_config_path_args()
+
+        # Pop both spellings unconditionally so neither leaks through to
+        # lerobot's parser (draccus rejects unknown args) if both are passed.
+        excl_primary = _pop_argv("exclude-observs")
+        excl_legacy = _pop_argv("exclude-observation")
+        excl_str = (
+            excl_primary
+            or excl_legacy
+            or os.environ.get("LEROBOT_EXCLUDE_OBSERVS")
+            or os.environ.get("LEROBOT_EXCLUDE_OBSERVATION", "")
+        )
         exclude_observs = [k.strip() for k in excl_str.split(",") if k.strip()] or None
 
         task_override = _pop_argv("task-description") or os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
@@ -150,10 +205,17 @@ class TrainingConfig:
         max_episodes: int | None = int(_me_raw) if _me_raw else None
 
         # peek (no remove) — needed for naming and backbone injection
-        dataset_root = _pop_argv("dataset.root", remove=False)
+        dataset_root = (
+            _pop_argv("dataset.root", remove=False)
+            or _config_value(file_config, "dataset", "root")
+        )
         dataset_name = Path(dataset_root).name if dataset_root else "dataset"
 
-        policy_type = _pop_argv("policy.type", remove=False) or "run"
+        policy_type = (
+            _pop_argv("policy.type", remove=False)
+            or _config_value(file_config, "policy", "type")
+            or "run"
+        )
 
         # When --policy.path is given without --policy.type, read the type from
         # the checkpoint's config.json so the auto-generated job_name is meaningful.
@@ -246,7 +308,7 @@ class TrainingConfig:
         else:
             # Resolve output_dir for NEW job: model_zoo/{dataset_name}/{run_name}
             # Extract job_name if provided (passed through to lerobot as-is)
-            job_name = None
+            job_name = _config_value(file_config, "job_name")
             for arg in sys.argv:
                 if arg.startswith("--job_name="):
                     job_name = arg.split("=", 1)[1]
@@ -255,7 +317,7 @@ class TrainingConfig:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             run_name = job_name if job_name else f"{policy_type}_{timestamp}"
 
-            output_dir = None
+            output_dir = _config_value(file_config, "output_dir")
             for arg in sys.argv:
                 if arg.startswith("--output_dir="):
                     output_dir = arg.split("=", 1)[1]
@@ -269,46 +331,94 @@ class TrainingConfig:
                 sys.argv.append(f"--job_name={run_name}")
 
             # Set wandb project = dataset_name (not hardcoded "anvil")
-            if not any(a.startswith("--wandb.project=") for a in sys.argv):
+            if (
+                not any(a.startswith("--wandb.project=") for a in sys.argv)
+                and _config_value(file_config, "wandb", "project") is None
+            ):
                 sys.argv.append(f"--wandb.project={dataset_name}")
 
         backbone = _pop_argv("backbone") or "resnet18"
         note: str | None = _pop_argv("note")
         note_append: str | None = _pop_argv("note-append")
 
+        # Back-compat: LeRobot 0.6 renamed --eval_freq to --env_eval_freq.
+        # Rewrite in-place (even on resume) — draccus rejects the old flag as unknown.
+        for i, arg in enumerate(sys.argv):
+            if arg == "--eval_freq" or arg.startswith("--eval_freq="):
+                sys.argv[i] = "--env_eval_freq" + arg[len("--eval_freq"):]
+                log.info("[anvil_trainer] Rewrote legacy %s to %s", arg, sys.argv[i])
+
         # Defaults injection — skip if resuming to avoid draccus decoding errors
         if not is_resume:
             # Default push_to_hub=false unless explicitly set
-            if not any(arg.startswith("--policy.push_to_hub") for arg in sys.argv):
+            if (
+                not any(arg.startswith("--policy.push_to_hub") for arg in sys.argv)
+                and _config_value(file_config, "policy", "push_to_hub") is None
+            ):
                 sys.argv.append("--policy.push_to_hub=false")
 
             # Default dataset.repo_id=local for local dataset training
-            if not any(arg.startswith("--dataset.repo_id") for arg in sys.argv):
+            if (
+                not any(arg.startswith("--dataset.repo_id") for arg in sys.argv)
+                and _config_value(file_config, "dataset", "repo_id") is None
+            ):
                 sys.argv.append("--dataset.repo_id=local")
 
-            # Disable eval by default — no gym env available for Anvil datasets
-            if not any(arg.startswith("--eval_freq") for arg in sys.argv):
-                sys.argv.append("--eval_freq=0")
+            # TorchCodec's CUDA 13 wheels require extra runtime library path setup on Jetson.
+            # PyAV is already part of LeRobot's dataset extra and works for local Anvil datasets.
+            if (
+                not any(arg.startswith("--dataset.video_backend") for arg in sys.argv)
+                and _config_value(file_config, "dataset", "video_backend") is None
+            ):
+                sys.argv.append("--dataset.video_backend=pyav")
+
+            # Disable env eval by default — no gym env available for Anvil datasets.
+            # (Legacy --eval_freq has already been rewritten to --env_eval_freq above.)
+            if (
+                not any(arg.startswith("--env_eval_freq") for arg in sys.argv)
+                and _config_value(file_config, "env_eval_freq") is None
+            ):
+                sys.argv.append("--env_eval_freq=0")
 
             # Default total training steps
-            if not any(arg.startswith("--steps") for arg in sys.argv):
+            if (
+                not any(arg.startswith("--steps") for arg in sys.argv)
+                and _config_value(file_config, "steps") is None
+            ):
                 sys.argv.append("--steps=100000")
 
             # Default checkpoint save frequency
-            if not any(arg.startswith("--save_freq") for arg in sys.argv):
+            if (
+                not any(arg.startswith("--save_freq") for arg in sys.argv)
+                and _config_value(file_config, "save_freq") is None
+            ):
                 sys.argv.append("--save_freq=10000")
 
             # If --policy.path is given (loading from checkpoint), lerobot rejects --policy.type.
             # Strip --policy.type from sys.argv; we've already captured the value for naming purposes.
             # Also skip backbone injection — the checkpoint already contains backbone config.
-            has_policy_path = any(a.startswith("--policy.path=") for a in sys.argv)
+            has_policy_path = (
+                any(a.startswith("--policy.path=") for a in sys.argv)
+                or _config_value(file_config, "policy", "path") is not None
+            )
             if has_policy_path:
                 sys.argv = [a for a in sys.argv if not a.startswith("--policy.type=")]
 
-            # Inject backbone settings for non-VLA policies (ACT, Diffusion).
-            # Pi0.5 / SmolVLA use their own vision encoders and ignore these flags.
-            _VLA_POLICIES = {"pi05", "smolvla", "pi0"}
-            if policy_type not in _VLA_POLICIES and not has_policy_path:
+            # Inject backbone settings only for policies that use LeRobot's ResNet-style
+            # vision backbone fields. Foundation policies define their own encoders and
+            # should not receive --policy.vision_backbone overrides.
+            _NO_BACKBONE_POLICIES = {
+                "pi05",
+                "smolvla",
+                "pi0",
+                "molmoact2",
+                "groot",
+                "multi_task_dit",
+                "evo1",
+                "fastwam",
+                "vla_jepa",
+            }
+            if policy_type not in _NO_BACKBONE_POLICIES and not has_policy_path:
                 _BACKBONE_MAP = {
                     "resnet18": ("resnet18", "ResNet18_Weights.IMAGENET1K_V1"),
                     "resnet34": ("resnet34", "ResNet34_Weights.IMAGENET1K_V1"),
@@ -331,7 +441,10 @@ class TrainingConfig:
                         sys.argv.append("--policy.use_group_norm=false")
 
         # Disable wandb artifact upload by default for all runs (new + resume)
-        if not any(arg.startswith("--wandb.disable_artifact") for arg in sys.argv):
+        if (
+            not any(arg.startswith("--wandb.disable_artifact") for arg in sys.argv)
+            and _config_value(file_config, "wandb", "disable_artifact") is None
+        ):
             sys.argv.append("--wandb.disable_artifact=true")
 
         return cls(
@@ -363,7 +476,7 @@ class TrainingConfig:
         if _action_type == "absolute" and data.get("use_delta_actions", False):
             _action_type = "delta_obs_t"
         return cls(
-            exclude_observs=data.get("exclude_observs"),
+            exclude_observs=data.get("exclude_observs") or data.get("exclude_observation"),
             task_override=data.get("task_override"),
             action_type=_action_type,
             delta_exclude_joints=data.get("delta_exclude_joints"),

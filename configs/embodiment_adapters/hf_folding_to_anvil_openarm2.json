@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "adapter_id": "hf-folding-final-to-anvil-openarm2-v1",
+  "deployment_status": "offline_only",
+  "base_policy": {
+    "repo_id": "lerobot-data-collection/folding_final",
+    "revision": "695abe40dbf3aac04efda59c1501d748681fa0fb",
+    "processor_sha256": {
+      "policy_preprocessor.json": "5db1a609cea50762b37c7a9d6dc539808f4f7817c7e0349a858be109fb5d9fb9",
+      "policy_postprocessor.json": "2b1b189a52228cbdb12b012012785b17ce519db6b4e3ffe786cb7cdfed1bd583",
+      "policy_preprocessor_step_3_normalizer_processor.safetensors": "7ee1325aedd9377bcc831275919b06e00bc7fe25a4dfba057b51afd4564ab756",
+      "policy_postprocessor_step_0_unnormalizer_processor.safetensors": "7ee1325aedd9377bcc831275919b06e00bc7fe25a4dfba057b51afd4564ab756"
+    }
+  },
+  "reference_vector": {
+    "arm_order": [
+      "right",
+      "left"
+    ],
+    "joints_per_arm": 8,
+    "joint_unit": "degree",
+    "names": [
+      "right_joint_1.pos",
+      "right_joint_2.pos",
+      "right_joint_3.pos",
+      "right_joint_4.pos",
+      "right_joint_5.pos",
+      "right_joint_6.pos",
+      "right_joint_7.pos",
+      "right_gripper.pos",
+      "left_joint_1.pos",
+      "left_joint_2.pos",
+      "left_joint_3.pos",
+      "left_joint_4.pos",
+      "left_joint_5.pos",
+      "left_joint_6.pos",
+      "left_joint_7.pos",
+      "left_gripper.pos"
+    ]
+  },
+  "target_vector": {
+    "arm_order": [
+      "right",
+      "left"
+    ],
+    "joints_per_arm": 8,
+    "joint_unit": "radian",
+    "names": [
+      "right_joint_1.pos",
+      "right_joint_2.pos",
+      "right_joint_3.pos",
+      "right_joint_4.pos",
+      "right_joint_5.pos",
+      "right_joint_6.pos",
+      "right_joint_7.pos",
+      "right_gripper.pos",
+      "left_joint_1.pos",
+      "left_joint_2.pos",
+      "left_joint_3.pos",
+      "left_joint_4.pos",
+      "left_joint_5.pos",
+      "left_joint_6.pos",
+      "left_joint_7.pos",
+      "left_gripper.pos"
+    ]
+  },
+  "models": {
+    "reference": {
+      "model_id": "hf_openarm_v1_extended",
+      "sha256": "67b65cc33290465df73a654cab94c27bbd6aaca36e3fe6c0ee717598ec164362",
+      "provenance": "enactic/openarm v1 plus lerobot/openarms-hardware-modifications@5299ad9 J4_5cm_extended"
+    },
+    "target": {
+      "model_id": "anvil_openarm_v2",
+      "sha256": "fb12028a8b08fc6f0aaab6a472727419b7aff2ab07ec4bb0672de88a7c5bbac2",
+      "provenance": "anvil-openarm-mujoco models/anvil_openarm_bimanual.xml"
+    }
+  },
+  "grippers": {
+    "right": {
+      "reference_closed": 0.0,
+      "reference_open": -65.0,
+      "target_closed": 0.0,
+      "target_open": 0.0523599
+    },
+    "left": {
+      "reference_closed": 0.0,
+      "reference_open": -65.0,
+      "target_closed": 0.0,
+      "target_open": 0.0523599
+    }
+  },
+  "ik": {
+    "max_iterations": 200,
+    "restart_count": 12,
+    "damping": 0.01,
+    "continuity_weight": 0.001,
+    "position_tolerance_m": 0.005,
+    "orientation_tolerance_rad": 0.0349066,
+    "joint_limit_margin_rad": 0.005,
+    "max_step_rad": 0.15
+  },
+  "residual": {
+    "chunk_size": 30,
+    "hidden_size": 128,
+    "num_layers": 2,
+    "max_joint_correction_rad": 0.15,
+    "max_joint_range_fraction": 0.1,
+    "correct_grippers": false
+  }
+}

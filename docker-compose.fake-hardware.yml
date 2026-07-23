@@ -25,14 +25,15 @@
 #   HF_CACHE      — host path to HuggingFace cache (default: ~/.cache/huggingface)
 #                   VLA models (pi0/pi05/smolvla) need the PaliGemma tokenizer from this cache.
 
+x-image-build: &image_build
+  context: .
+  dockerfile: docker/inference/Dockerfile
+  args:
+    LEROBOT_VERSION: ${LEROBOT_VERSION:-0.6.0}
+    LEROBOT_EXTRAS: ${LEROBOT_EXTRAS-diffusion}
+
 x-base: &base
   image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}
-  build:
-    context: .
-    dockerfile: docker/inference/Dockerfile
-    args:
-      LEROBOT_VERSION: ${LEROBOT_VERSION:-0.5.1}
-      LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-}
   networks:
     - ros2_test
   environment:
@@ -46,6 +47,7 @@ services:
 
   mock-robot:
     <<: *base
+    build: *image_build
     container_name: lerobot-fake-robot
     profiles: [monitor, inference]
     command: >
@@ -90,6 +92,8 @@ services:
       # ACT/Diffusion models are unaffected if this is empty.
       # HuggingFace needs write access to create lock files when loading tokenizers.
       - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface
+      # ACT needs torchvision's pretrained ResNet vision-backbone weights at runtime.
+      - ${TORCH_CACHE:-.docker_empty_torch_cache}:/root/.cache/torch
     depends_on:
       mock-robot:
         condition: service_healthy
@@ -102,7 +106,7 @@ services:
               capabilities: [gpu]
     # MODEL_PATH is mounted at /workspace/model. HF cache structure (blobs/ + snapshots/)
     # is auto-detected by inference_node — no need for MODEL_SNAPSHOT_PATH.
-    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml debug:=${DEBUG:-false} control_frequency:=${CONTROL_FREQ:-30.0}
+    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml debug:=${DEBUG:-false} control_frequency:=${CONTROL_FREQ:-30.0} max_run_seconds:=${MAX_RUN_SECONDS:-0}
 
 networks:
   ros2_test:

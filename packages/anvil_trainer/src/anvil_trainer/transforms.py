@@ -14,7 +14,6 @@ from typing import Any
 
 from anvil_trainer.config import TrainingConfig
 
-
 log = logging.getLogger(__name__)
 
 
@@ -106,28 +105,44 @@ class ExcludeObservationTransform(Transform):
 
     def patch_metadata(self, config: TrainingConfig, runner: Any = None) -> None:
         """Patch dataset_to_policy_features to exclude the specified observation keys."""
-        import lerobot.datasets.feature_utils
-        import lerobot.policies.factory
-        from lerobot.datasets.feature_utils import dataset_to_policy_features
+        from importlib import import_module
 
-        original_func = dataset_to_policy_features
         excluded = self._excluded_keys(config)
+        targets: list[tuple[Any, Any]] = []
+        for module_name in (
+            "lerobot.datasets.feature_utils",  # LeRobot <=0.5
+            "lerobot.policies.factory",        # LeRobot 0.6+
+        ):
+            try:
+                module = import_module(module_name)
+            except ImportError:
+                continue
+            original = getattr(module, "dataset_to_policy_features", None)
+            if original is not None:
+                targets.append((module, original))
 
-        def filtered_func(features: dict) -> dict:
-            filtered = {}
-            for key, value in features.items():
-                if key in excluded:
-                    log.info("[exclude_observs] Excluding: %s", key)
-                    continue
-                filtered[key] = value
-            return original_func(filtered)
+        if not targets:
+            log.debug("[exclude_observs] No dataset_to_policy_features hook found")
+            return
 
-        if runner is not None:
-            runner._patch(lerobot.datasets.feature_utils, "dataset_to_policy_features", filtered_func)
-            runner._patch(lerobot.policies.factory, "dataset_to_policy_features", filtered_func)
-        else:
-            lerobot.datasets.feature_utils.dataset_to_policy_features = filtered_func
-            lerobot.policies.factory.dataset_to_policy_features = filtered_func
+        def make_filtered(original_func):
+            def filtered_func(features: dict) -> dict:
+                filtered = {}
+                for key, value in features.items():
+                    if key in excluded:
+                        log.info("[exclude_observs] Excluding: %s", key)
+                        continue
+                    filtered[key] = value
+                return original_func(filtered)
+
+            return filtered_func
+
+        for module, original_func in targets:
+            filtered_func = make_filtered(original_func)
+            if runner is not None:
+                runner._patch(module, "dataset_to_policy_features", filtered_func)
+            else:
+                module.dataset_to_policy_features = filtered_func
 
 
 # =============================================================================

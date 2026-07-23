@@ -20,10 +20,14 @@ log = logging.getLogger(__name__)
 class EvaluationDataset:
     """Wrapper for LeRobotDataset to handle evaluation-specific logic."""
 
-    def __init__(self, dataset_path: Path):
+    def __init__(self, dataset_path: Path, video_backend: str = "pyav"):
         self.dataset_path = dataset_path
         # We assume dataset is local for offline eval
-        self.dataset = LeRobotDataset(repo_id="local", root=str(dataset_path))
+        self.dataset = LeRobotDataset(
+            repo_id="local",
+            root=str(dataset_path),
+            video_backend=video_backend,
+        )
         self.total_episodes = self.dataset.num_episodes
         self.joint_names = self._load_joint_names()
 

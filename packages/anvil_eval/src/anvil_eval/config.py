@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -18,6 +18,7 @@ class EvalConfig:
     num_episodes: int = 3
     split: str = "all"
     device: str = "cuda"
+    video_backend: str = "pyav"
     task_description: str | None = None
     output_dir: Path | None = None
     seed: int = 42

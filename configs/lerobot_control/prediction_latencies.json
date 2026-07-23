@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "kind": "synthetic_prediction_latency",
+  "warning": "Simulation for inference planning; replace with target-hardware measurements.",
+  "generated_at": "2026-07-12T22:27:40.829333+00:00",
+  "seed": 20260712,
+  "control_hz": 30.0,
+  "models": {
+    "act": {
+      "inference_mode": "single_action",
+      "source": "engineering estimate",
+      "samples": 10000,
+      "mean_ms": 34.969,
+      "std_ms": 4.157,
+      "p50_ms": 34.679,
+      "p95_ms": 42.267,
+      "p99_ms": 45.838,
+      "recommended_delay_steps": 2
+    },
+    "diffusion": {
+      "inference_mode": "single_action",
+      "source": "repository config note; 10 denoising steps",
+      "samples": 10000,
+      "mean_ms": 78.032,
+      "std_ms": 11.835,
+      "p50_ms": 77.098,
+      "p95_ms": 98.996,
+      "p99_ms": 109.455,
+      "recommended_delay_steps": 3
+    },
+    "evo1": {
+      "inference_mode": "rtc_chunk",
+      "source": "engineering estimate",
+      "samples": 10000,
+      "mean_ms": 380.595,
+      "std_ms": 76.28,
+      "p50_ms": 372.702,
+      "p95_ms": 516.994,
+      "p99_ms": 591.315,
+      "recommended_delay_steps": 16
+    },
+    "fastwam": {
+      "inference_mode": "sync_chunk",
+      "source": "engineering estimate",
+      "samples": 10000,
+      "mean_ms": 180.278,
+      "std_ms": 29.176,
+      "p50_ms": 177.614,
+      "p95_ms": 232.82,
+      "p99_ms": 259.214,
+      "recommended_delay_steps": 7
+    },
+    "groot": {
+      "inference_mode": "rtc_chunk",
+      "source": "engineering estimate",
+      "samples": 10000,
+      "mean_ms": 299.469,
+      "std_ms": 53.999,
+      "p50_ms": 295.293,
+      "p95_ms": 395.789,
+      "p99_ms": 446.686,
+      "recommended_delay_steps": 12
+    },
+    "molmoact2": {
+      "inference_mode": "rtc_chunk",
+      "source": "engineering estimate",
+      "samples": 10000,
+      "mean_ms": 420.366,
+      "std_ms": 84.883,
+      "p50_ms": 411.451,
+      "p95_ms": 575.702,
+      "p99_ms": 655.728,
+      "recommended_delay_steps": 18
+    },
+    "multi_task_dit": {
+      "inference_mode": "sync_chunk",
+      "source": "engineering estimate",
+      "samples": 10000,
+      "mean_ms": 249.978,
+      "std_ms": 45.262,
+      "p50_ms": 245.838,
+      "p95_ms": 330.455,
+      "p99_ms": 374.105,
+      "recommended_delay_steps": 10
+    },
+    "pi0": {
+      "inference_mode": "rtc_chunk",
+      "source": "repository RTC tuning note",
+      "samples": 10000,
+      "mean_ms": 329.605,
+      "std_ms": 59.199,
+      "p50_ms": 324.694,
+      "p95_ms": 433.294,
+      "p99_ms": 492.061,
+      "recommended_delay_steps": 13
+    },
+    "pi05": {
+      "inference_mode": "rtc_chunk",
+      "source": "repository RTC tuning note",
+      "samples": 10000,
+      "mean_ms": 330.159,
+      "std_ms": 59.166,
+      "p50_ms": 325.183,
+      "p95_ms": 434.61,
+      "p99_ms": 491.98,
+      "recommended_delay_steps": 14
+    },
+    "smolvla": {
+      "inference_mode": "rtc_chunk",
+      "source": "engineering estimate",
+      "samples": 10000,
+      "mean_ms": 240.02,
+      "std_ms": 43.004,
+      "p50_ms": 236.15,
+      "p95_ms": 316.172,
+      "p99_ms": 355.736,
+      "recommended_delay_steps": 10
+    },
+    "vla_jepa": {
+      "inference_mode": "sync_chunk",
+      "source": "repository measurement: 338 ms mean, 566 ms p95",
+      "samples": 10000,
+      "mean_ms": 338.894,
+      "std_ms": 119.634,
+      "p50_ms": 318.466,
+      "p95_ms": 561.693,
+      "p99_ms": 711.875,
+      "recommended_delay_steps": 17
+    }
+  }
+}

@@ -1,0 +1,78 @@
+# OpenArm 2.0 live control for the shirt-fold Pi0.5 fine-tune.
+# Commands publish to the physical bimanual follower controllers. Full chunks
+# are prefetched and executed in order; RTC tail-action clamping is disabled.
+# Command limiting is delegated to anvil-loader on the robot-control PC.
+
+model:
+  task_description: "Fold the T-shirt properly"
+
+inference_tuning:
+  act:
+    n_action_steps: null
+    temporal_ensemble_coeff: null
+  diffusion:
+    n_action_steps: null
+    num_inference_steps: 10
+  sync:
+    n_action_steps: null
+    async_prefetch: true
+    prefetch_threshold: 20
+    replace_pending_actions: true
+  rtc:
+    enabled: false
+    inference_delay: 10
+    queue_trigger_threshold: 30
+    execution_horizon: 20
+    max_guidance_weight: 10.0
+    prefix_attention_schedule: EXP
+
+joint_state_topic: "/joint_states"
+
+joint_names:
+  model_joint_order:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - joint7
+    - finger_joint1
+  controller_joint_order:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - joint7
+    - finger_joint1
+  # Insertion order is the model state-vector order: right 0:8, left 8:16.
+  arm_mapping:
+    r: right
+    l: left
+  state_features:
+    - position
+
+arms:
+  right:
+    ros_prefix: "follower_r"
+    command_topic: "/follower_r_forward_position_controller/commands"
+    action_start: 0
+    action_end: 8
+  left:
+    ros_prefix: "follower_l"
+    command_topic: "/follower_l_forward_position_controller/commands"
+    action_start: 8
+    action_end: 16
+
+cameras:
+  fps: 30.0
+  mapping:
+    "/cam_chest/image_raw/compressed": "base"
+    "/cam_wrist_l/image_raw/compressed": "left_wrist"
+    "/cam_wrist_r/image_raw/compressed": "right_wrist"
+
+safety:
+  max_position_delta: null
+  min_position_delta: null

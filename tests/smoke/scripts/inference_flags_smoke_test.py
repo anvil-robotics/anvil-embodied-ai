@@ -130,17 +130,22 @@ def _run_with_shim(*script_flags: str) -> dict:
 
 
 def _compose_fake_config_inference() -> str:
-    """Render docker-compose.fake-hardware.yml --profile inference as text."""
+    """Render the fake-hardware compose source enough to verify DEBUG wiring.
+
+    Section A is documented as a no-Docker mapping check, so avoid depending on
+    `docker compose config` being installed. For this assertion we only need
+    Compose-style ${VAR:-default} interpolation for the inference command.
+    """
     env = _clean_env()
-    env["DEBUG"] = "true"   # set so config rendering reflects the flag
-    proc = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FAKE),
-         "--profile", "inference", "config"],
-        capture_output=True, text=True, cwd=REPO, env=env,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"docker compose config failed:\n{proc.stderr}")
-    return proc.stdout
+    env["DEBUG"] = "true"
+    text = COMPOSE_FAKE.read_text()
+
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        default = match.group(2) or ""
+        return env.get(name) or default
+
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}", _replace, text)
 
 
 def _poll_container_log(container: str, pattern: str,
@@ -391,7 +396,7 @@ def run_section_c(checkpoint: Path) -> None:
     if started:
         print("      polling lerobot-fake-inference logs for [DEBUG] Action FPS ...",
               flush=True)
-        found = _poll_container_log(
+        _poll_container_log(
             container="lerobot-fake-inference",
             # Matches either the debug marker, a topology-mismatch normalization error,
             # or any other fatal startup error
@@ -468,7 +473,7 @@ def main() -> int:
             print(f"\n{'═'*70}")
             print("  SECTION C — skipped (checkpoint not found)")
             print(f"  {ckpt}")
-            print(f"  Run pipeline_smoke_test.py --scenario cmd first to build it.")
+            print("  Run pipeline_smoke_test.py --scenario cmd first to build it.")
             print(f"{'═'*70}")
     else:
         if args.skip_gpu:

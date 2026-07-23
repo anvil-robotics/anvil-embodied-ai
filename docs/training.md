@@ -20,6 +20,7 @@ All training runs through the `anvil-trainer` CLI — a thin wrapper around LeRo
   - [Diffusion](#diffusion)
   - [SmolVLA](#smolvla)
   - [Pi0.5](#pi05)
+  - [Selected LeRobot Foundation Policies](#selected-lerobot-foundation-policies)
 - [Outputs](#outputs)
   - [Structure](#structure)
   - [Loss Reading](#loss-reading)
@@ -43,15 +44,23 @@ uv run anvil-trainer \
 
 ## Supported Policies
 
-| Policy | `--policy.type` | Notes |
-|--------|----------------|-------|
-| ACT | `act` | Action Chunking Transformer — fast, reliable baseline |
-| Diffusion | `diffusion` | Diffusion Policy — smooth, handles multimodal distributions |
-| SmolVLA | `smolvla` | Language-conditioned VLA; requires `--extra smolvla` |
-| Pi0 | `pi0` | Flow-matching VLA; PaliGemma-3B backbone; requires `--extra pi` |
-| Pi0.5 | `pi05` | Larger Pi0 variant (~4B params); higher VRAM; requires `--extra pi` |
+| Policy | `--policy.type` | Install extra | Inference mode | Notes |
+|--------|----------------|---------------|----------------|-------|
+| ACT | `act` | Base install | Standard chunk | Action Chunking Transformer baseline |
+| Diffusion | `diffusion` | Base install | Standard chunk | Diffusion Policy baseline |
+| SmolVLA | `smolvla` | `smolvla` | RTC chunk | Language-conditioned VLA |
+| Pi0 | `pi0` | `pi` | RTC chunk | Flow-matching VLA; PaliGemma-3B backbone |
+| Pi0.5 | `pi05` | `pi` | RTC chunk | Larger Pi0 variant (~4B params); higher VRAM |
+| MolmoAct2 | `molmoact2` | `molmoact2` | RTC chunk | Language-conditioned foundation policy |
+| GR00T N1.7 | `groot` | `groot` | RTC chunk | Language-conditioned foundation policy |
+| Multitask DiT | `multi_task_dit` | `multi_task_dit` | Synchronous chunk | Language-conditioned foundation policy |
+| EVO1 | `evo1` | `evo1` | RTC chunk | Language-conditioned foundation policy |
+| FastWAM | `fastwam` | `fastwam` | Synchronous chunk | Language-conditioned foundation policy |
+| VLA-JEPA | `vla_jepa` | `vla_jepa` | Sync default / RTC opt-in | Language-conditioned foundation policy |
 
-Checkpoints are saved to `model_zoo/<dataset>/<job_name>/`. Run `uv run anvil-trainer --help` for the full flag reference.
+This branch intentionally includes only policies exposed as native LeRobot v0.6 policies. OpenVLA-OFT, RDT, TinyVLA, and MiniVLA are adapter/custom-integration work and are not included here.
+
+Checkpoints are saved to `model_zoo/<dataset>/<job_name>/`. Use `uv sync --all-packages --extra all` to install every optional policy dependency, or install only the extras needed for your selected model. Run `uv run anvil-trainer --help` for the full flag reference.
 
 ---
 
@@ -67,7 +76,7 @@ Checkpoints are saved to `model_zoo/<dataset>/<job_name>/`. Run `uv run anvil-tr
 | `--log_freq=N` | `200` | Log train loss every N steps; val loss every `log_freq × 5` steps |
 | `--split-ratio=T,V,S` | `8,1,1` | Train/val/test episode split. Two values = no test set. |
 | `--max-episodes=N` | all | Subsample N episodes before splitting (reproducible with training seed) |
-| `--backbone=NAME` | `resnet18` | Vision backbone for ACT/Diffusion: `resnet18` · `resnet34` · `resnet50`. Ignored for VLA policies (Pi0, Pi0.5, SmolVLA). Under the hood this injects `--policy.vision_backbone`, `--policy.pretrained_backbone_weights` (ImageNet), and for Diffusion also `--policy.use_group_norm=false`. |
+| `--backbone=NAME` | `resnet18` | Vision backbone for ACT/Diffusion: `resnet18` · `resnet34` · `resnet50`. Ignored for Pi/SmolVLA and the selected LeRobot foundation policies because those policies define their own encoders. Under the hood this injects `--policy.vision_backbone`, `--policy.pretrained_backbone_weights` (ImageNet), and for Diffusion also `--policy.use_group_norm=false`. |
 | `--save_freq=N` | `10000` | Save a checkpoint every N steps. Lower (e.g. `5000`) for unstable runs; higher (e.g. `25000`) if disk is tight — each checkpoint can be several GB |
 | `--resume=PATH` | — | Resume from job root or specific checkpoint |
 
@@ -129,7 +138,8 @@ Additional delta flags:
 
 **Guidance by policy:**
 - **Diffusion** → `ACTION: MIN_MAX`. Diffusion clips denoised actions to ±1 at every step (`clip_sample=True`); `MEAN_STD` silently truncates extreme actions.
-- **ACT / SmolVLA / Pi0 / Pi0.5** → `ACTION: MEAN_STD`
+- **ACT / SmolVLA / Pi0 / Pi0.5 / selected LeRobot foundation policies** → `ACTION: MEAN_STD` unless the specific pretrained checkpoint documents a different mapping
+- **VLA-JEPA** → `ACTION: MIN_MAX`. Its postprocessor clips normalized actions before unnormalizing, so the training range must map to [−1, 1].
 
 > **Pi0.5 note:** Pi0.5's default normalization is `QUANTILE10`, which requires `q01`/`q99` fields in `stats.json`. Datasets converted with `mcap-convert` do not include these. Use `MEAN_STD` instead (recommended), or see [Pi0.5](#pi05) for the quantile augmentation option.
 
@@ -388,6 +398,12 @@ uv run anvil-trainer \
 
 Always fine-tune from `lerobot/smolvla_base` — training from scratch is not recommended. `--policy.load_vlm_weights=true` is required when loading from a SmolVLA checkpoint; without it only the VLM backbone loads and the action expert starts from random weights.
 
+For Lego-in-cup, use the checked-in
+`configs/training/lego_in_cup_smolvla.yaml` recipe. It fine-tunes the RoboTwin
+checkpoint with explicit 8D state/action features, freezes the vision encoder,
+trains the action expert and state projection, and preserves its native
+50-action (1.667 s at 30 Hz) training horizon.
+
 **Task description**
 
 A clear, specific description improves performance significantly. The description is saved to `anvil_config.json` in the checkpoint and auto-loaded at inference. Mirror it in your inference YAML:
@@ -477,6 +493,57 @@ main()
 > **Warning:** this modifies the dataset in-place. Back up first: `cp -r data/datasets/my-dataset data/datasets/my-dataset.bak`
 
 After augmentation you can omit `--policy.normalization_mapping` and use the default `QUANTILE10`.
+
+---
+
+### Selected LeRobot Foundation Policies
+
+These policies are supported through LeRobot v0.6 factory classes and optional dependencies:
+
+| Policy type | Install extra | Inference path |
+|---|---|---|
+| `molmoact2` | `--extra molmoact2` | RTC background chunking |
+| `groot` | `--extra groot` | RTC background chunking |
+| `multi_task_dit` | `--extra multi_task_dit` | Synchronous chunking; optional background prefetch |
+| `evo1` | `--extra evo1` | RTC background chunking |
+| `fastwam` | `--extra fastwam` | Synchronous chunking; optional background prefetch |
+| `vla_jepa` | `--extra vla_jepa` | Synchronous by default; opt-in full RTC |
+
+Use the same Anvil dataset flags as other policies, plus the model-specific LeRobot flags required by the pretrained checkpoint you choose. Always pass `--task-description`; it is saved into `anvil_config.json` and reused by offline evaluation and ROS2 inference.
+
+```bash
+uv sync --all-packages --extra groot
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=groot \
+  --task-description="Grab the gray doll and put it in the bucket" \
+  --wandb.enable=false
+```
+
+#### Lego-in-cup VLA-JEPA world model
+
+The checked-in recipe at
+`configs/training/lego_in_cup_vla_jepa_world_model.yaml` is the reproducible
+configuration for this task. It includes the left-arm feature layout, camera
+renames, continuous gripper index, world-model settings, and a 32-action
+training horizon:
+
+```bash
+uv run anvil-trainer \
+  --config_path=configs/training/lego_in_cup_vla_jepa_world_model.yaml \
+  --task-description="Pick up the Lego brick and place it in the cup." \
+  --action-type=absolute \
+  --split-ratio=8,1,1
+```
+
+At the 30 Hz robot control rate, 32 actions cover 1.067 seconds. This is
+comfortably above the measured 566 ms p95 inference time while focusing the
+world-model objective on near-term dynamics. Async prefetch starts immediately
+and replaces the unconsumed tail when a fresh prediction completes.
+
+The existing seven-action checkpoint remains usable with prefetch, but it can
+supply only about 21 actions/s at 338 ms mean inference latency. The longer
+trained chunk is required for gap-free 30 Hz execution.
 
 ---
 
