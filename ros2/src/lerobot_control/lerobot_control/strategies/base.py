@@ -71,6 +71,16 @@ class InferenceStrategy(Protocol):
         """
         ...
 
+    def get_latest_ee_state_quat(self) -> Any:
+        """
+        Freshest EE pose (quat layout, flat, per-arm order), no images required.
+
+        EE mode only. Used by the ee_delta arrival check and second (pre-compose)
+        obs read — see ``inference_node._obs_update``. Returns ``None`` outside
+        EE mode or before any EE pose has arrived yet.
+        """
+        ...
+
     def get_incomplete_reason(self) -> str:
         """
         Get human-readable reason why observation is incomplete.

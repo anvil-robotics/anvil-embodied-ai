@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Dataset GT-Replayer Node
 
-Replays a converted dataset's recorded ground-truth ``action`` rows through the
-real inference pipeline (``LeRobotInferenceNode``), injected at the exact seam
-where a model's predicted action would normally appear (``_produce_action``).
-Everything downstream of that seam — the classic action deque, the decoupled
-delta-mode publish loop's per-tick ``obs ∘ delta`` composition, absolute
-restoration, message building, and publishing — runs completely unmodified.
-This validates mcap_converter's output against the real inference pipeline's
-own consumption of it end-to-end, not just the transform math in isolation
-(see claude_docs/dataset-gt-replayer-plan.md for the full design).
+Replays a converted dataset's recorded ground-truth ``action`` rows, injected
+at the exact seam where a model's predicted action would normally appear
+(``_produce_action``). Drives its own single-timer replay loop (``_replay_step``
+— see class docstring) rather than ``LeRobotInferenceNode``'s dual-timer
+obs/publish split; message building/publishing (``_publish_action``) is reused
+unmodified. This validates mcap_converter's output against the real
+inference-pipeline message-building/publish path end-to-end, not just the
+transform math in isolation (see claude_docs/dataset-gt-replayer-plan.md for
+the full design).
 
 v1 scope: classic (non-VLA) action_types only — joint_abs, ee_abs, ee_delta.
 ee_relative is not a dataset-native encoding (mcap_converter's "relative" is
@@ -31,13 +31,38 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 
 from . import dataset_reader
+from .ee_runtime import ee_delta_restore_step, ee_poses_from_chunk, pose_arrival_error
 from .inference_node import LeRobotInferenceNode
 
 
 class DatasetGtReplayerNode(LeRobotInferenceNode):
     """Replays a dataset's recorded GT ``action`` rows as if they were model output.
 
-    Overrides exactly the seams ``LeRobotInferenceNode`` exposes for this:
+    Single-timer design (as of 2026-07-23 — see claude_docs/gt-replay/
+    2026-07-23-single-timer-dataset-gt-replayer-plan.md): this node does NOT use
+    ``LeRobotInferenceNode``'s dual-timer ``_obs_timer``/``_publish_timer``
+    split at all. Its ``__init__`` destroys both inherited timers immediately
+    after ``super().__init__()`` and replaces them with a single
+    ``_replay_timer`` calling ``_replay_step`` — one tick does obs-read,
+    homing-check-or-wait-until-arrived-gate, produce, compose (ee_delta), and
+    publish, all sequentially, every time. This was a deliberate fix for a real
+    bug: the dual-timer split let ``_obs_update`` (compose) and
+    ``_publish_loop`` (actual transmit) race on shared ee_delta state across
+    two independently-scheduled threads, corrupting the obs/delta pairing
+    GT-replay depends on. Collapsing to one thread removes that race
+    structurally rather than papering over symptoms — confirmed against
+    robosuite's own ``OperationalSpaceController`` (the reference this
+    codebase's ee_delta math was validated against): its ``set_goal()`` also
+    composes every tick against live state in one synchronous call, no
+    obs/publish split at all.
+
+    This is entirely subclass-local. ``LeRobotInferenceNode``'s own
+    ``_obs_timer``/``_publish_timer``/``_obs_update``/``_publish_loop`` are
+    completely unmodified and still drive live model inference (ACT/Diffusion/
+    VLA) exactly as before — zero behavior change there, zero diff in
+    ``inference_node.py``.
+
+    Overrides exactly the seams ``LeRobotInferenceNode`` exposes for setup:
       - ``_validate_required_params``: requires ``dataset`` instead of ``model_path``.
       - ``_load_run_metadata``: derives the same meta-dict shape from the dataset's
         ``conversion_config.yaml`` + ``meta/info.json`` instead of a checkpoint's
@@ -45,16 +70,12 @@ class DatasetGtReplayerNode(LeRobotInferenceNode):
       - ``_setup_model``: no model to load — loads the target episode's raw
         ``action`` rows (native on-disk encoding, physical units) instead.
       - ``_produce_action``: returns the next recorded row instead of running the
-        model, with backpressure so rows are never dropped by the deque's ``maxlen``.
+        model (dry-run/end-of-episode handling unchanged; its deque-backpressure
+        check is now a permanent no-op — ``_replay_step`` never populates
+        ``_classic_action_deque`` — harmless, left as-is to minimize diff).
 
-    Everything else — obs reading, the shared EE-conversion head in
-    ``_obs_update``, the classic action deque, ``_publish_loop`` (including the
-    ee_delta decoupled composition), publishers, and shutdown/hold-position — is
-    inherited unchanged.
-
-    Two more capabilities layered on top, both for
-    ``scripts/gt_replay_human_eval.py`` (see claude_docs/real-hardware-gt-replay-
-    eval-plan.md):
+    Two more capabilities, both for ``scripts/gt_replay_human_eval.py`` (see
+    claude_docs/real-hardware-gt-replay-eval-plan.md):
 
     - ``completion_signal_path``: when set, a small JSON sentinel is written the
       moment this episode's replay finishes (``{"status": "complete", ...}``),
@@ -64,14 +85,103 @@ class DatasetGtReplayerNode(LeRobotInferenceNode):
       ``gt_replay_verifier_node``'s ``report_path`` convention.
     - Pre-replay homing (EE mode only, ``home_before_replay`` default true):
       before GT playback begins, the robot is commanded to this episode's
-      frame-0 recorded pose and held there — via small hooks in the inherited
-      ``_obs_update``/``_publish_loop`` (see ``_check_homing_arrival``/
-      ``_publish_home_target``) — until the live observation confirms arrival
-      within tolerance, or ``homing_timeout_sec`` elapses. This is NOT the same
-      check as ``GtReplayVerifierNode``'s tight trajectory-match tolerances —
-      it's a coarser "did the robot get close enough to start" gate, using
-      real-hardware-appropriate defaults.
+      frame-0 recorded pose and held there — via ``_check_homing_arrival``/
+      ``_publish_home_target``, now called sequentially from ``_replay_step``
+      instead of split across two timer callbacks — until the live
+      observation confirms arrival within tolerance, or ``homing_timeout_sec``
+      elapses. This is NOT the same check as ``GtReplayVerifierNode``'s tight
+      trajectory-match tolerances — it's a coarser "did the robot get close
+      enough to start" gate, using real-hardware-appropriate defaults.
     """
+
+    def __init__(self):
+        super().__init__()
+        # Replace the inherited dual-timer setup with one single-timer replay
+        # loop (see class docstring). Guarded by echo_topic_only exactly like
+        # the base class's own timer creation, so this is a no-op in that mode.
+        if not self.echo_topic_only:
+            if hasattr(self, "_obs_timer"):
+                self.destroy_timer(self._obs_timer)
+            if hasattr(self, "_publish_timer"):
+                self.destroy_timer(self._publish_timer)
+            self._replay_timer = self.create_timer(1.0 / self.control_freq, self._replay_step)
+
+    def _replay_step(self) -> None:
+        """Single-timer replay tick: obs-read, homing-or-arrival-gate, produce,
+        compose (ee_delta), publish — all sequentially, every tick. See class
+        docstring for why this replaces the inherited ``_obs_update``/
+        ``_publish_loop`` split for this node specifically.
+        """
+        if self._shutting_down:
+            return
+
+        obs_quat = self.strategy.get_latest_ee_state_quat()
+        if obs_quat is None:
+            return  # no EE pose yet (startup warm-up)
+        # Satisfies _check_homing_arrival's/_publish_home_target's precondition
+        # (both were written expecting _obs_update to keep this fresh).
+        self._last_raw_ee_obs_np = obs_quat
+
+        if self.is_ee and not getattr(self, "_homing_confirmed", True):
+            self._check_homing_arrival()
+            if not self._homing_confirmed:
+                self._publish_home_target()
+            return
+
+        # ee_delta wait-until-arrived gate (togglable — see wait_until_arrived's
+        # docstring in _setup_config). Held -> return before ever calling
+        # _produce_action: no cursor advance, retried automatically next tick.
+        if (
+            self.is_ee_delta
+            and self._wait_until_arrived
+            and self._ee_delta_last_commanded_quat is not None
+        ):
+            prev_commanded = self._ee_delta_last_commanded_quat
+            n_arms = len(obs_quat) // 8
+            for i in range(n_arms):
+                s0 = i * 8
+                pos_err, rot_err = pose_arrival_error(
+                    obs_quat[s0:s0 + 8], prev_commanded[s0:s0 + 8]
+                )
+                if (
+                    pos_err > self._ee_delta_anchor_atol_pos_m
+                    or rot_err > self._ee_delta_anchor_atol_rot_deg
+                ):
+                    if self._debug:
+                        self.get_logger().info(
+                            f"[gt-replay] HELD: arm={i} pos_err={pos_err:.4f}m "
+                            f"rot_err={rot_err:.2f}deg (tol pos<="
+                            f"{self._ee_delta_anchor_atol_pos_m}m "
+                            f"rot<={self._ee_delta_anchor_atol_rot_deg}deg)"
+                        )
+                    return
+
+        action = self._produce_action(None, None)
+        if action is None:
+            return
+
+        if self.is_ee_delta:
+            delta = action
+            action = ee_delta_restore_step(delta, obs_quat)
+            n_arms = len(obs_quat) // 8
+            commanded_poses = ee_poses_from_chunk(action[np.newaxis, :], n_arms=n_arms)[0]
+            self._ee_delta_last_commanded_quat = np.concatenate([
+                np.concatenate([
+                    commanded_poses[i]["pos"],
+                    commanded_poses[i]["quat_xyzw"],
+                    [commanded_poses[i]["gripper"]],
+                ])
+                for i in range(n_arms)
+            ])
+            if self._debug:
+                cursor = self._replay_cursor - 1  # already incremented by _produce_action
+                self.get_logger().info(
+                    f"[gt-replay] row={cursor}/{len(self._gt_actions)} COMPOSED "
+                    f"obs={obs_quat.round(4).tolist()} "
+                    f"delta={np.asarray(delta).round(4).tolist()}"
+                )
+
+        self._publish_action(action)
 
     def _setup_config(self) -> None:
         # New params must be declared (and read) before super()._setup_config()
@@ -96,6 +206,14 @@ class DatasetGtReplayerNode(LeRobotInferenceNode):
         self.declare_parameter("homing_timeout_sec", 30.0)
         self.declare_parameter("home_max_pos_delta_m", 0.01)
         self.declare_parameter("home_max_rot_delta_deg", 2.0)
+        # ee_delta only: gate the single-timer replay loop's pop/compose/publish
+        # on the previous target having been reached (see _replay_step). Declared
+        # here, subclass-local, rather than on the shared LeRobotInferenceNode —
+        # this replayer no longer uses the base class's dual-timer obs/publish
+        # split at all, so this param has no effect on (and requires no changes
+        # to) live model inference. See claude_docs/gt-replay/
+        # 2026-07-23-single-timer-dataset-gt-replayer-plan.md.
+        self.declare_parameter("wait_until_arrived", True)
 
         self.episode_idx: int = self.get_parameter("episode").value
         self.loop_replay: bool = self.get_parameter("loop").value
@@ -108,6 +226,7 @@ class DatasetGtReplayerNode(LeRobotInferenceNode):
         self.homing_timeout_sec: float = float(self.get_parameter("homing_timeout_sec").value)
         self.home_max_pos_delta_m: float = float(self.get_parameter("home_max_pos_delta_m").value)
         self.home_max_rot_delta_deg: float = float(self.get_parameter("home_max_rot_delta_deg").value)
+        self._wait_until_arrived: bool = bool(self.get_parameter("wait_until_arrived").value)
         self._signal_written: bool = False
 
         super()._setup_config()
@@ -201,9 +320,10 @@ class DatasetGtReplayerNode(LeRobotInferenceNode):
         ``home_before_replay`` is false (e.g. the fake-hardware wrapper's default
         for ``--target fake``, since the mock's ``ee_seed_pose`` already provides
         an instant, exact seed — homing against it would just be redundant).
-        When active, ``_homing_confirmed`` starts false; the inherited
-        ``_obs_update``/``_publish_loop`` hold on it (see inference_node.py) until
-        ``_check_homing_arrival`` flips it.
+        When active, ``_homing_confirmed`` starts false; ``_replay_step`` holds
+        on it (calling ``_check_homing_arrival``/``_publish_home_target`` every
+        tick instead of running normal replay) until ``_check_homing_arrival``
+        flips it.
         """
         if not self.is_ee or not self.home_before_replay:
             self._homing_confirmed = True
@@ -225,7 +345,7 @@ class DatasetGtReplayerNode(LeRobotInferenceNode):
         )
 
     def _check_homing_arrival(self) -> None:
-        """Called from ``_obs_update`` every tick while homing is unconfirmed.
+        """Called from ``_replay_step`` every tick while homing is unconfirmed.
 
         Compares the freshest observed pose (``_last_raw_ee_obs_np``, quat
         layout) against ``_home_target_quat``, per arm, and confirms once EVERY
@@ -286,7 +406,7 @@ class DatasetGtReplayerNode(LeRobotInferenceNode):
                 rclpy.shutdown()
 
     def _publish_home_target(self) -> None:
-        """Called from ``_publish_loop`` every tick while homing is unconfirmed.
+        """Called from ``_replay_step`` every tick while homing is unconfirmed.
 
         Publishes a RAMPED step toward the frame-0 target — at most
         ``home_max_pos_delta_m``/``home_max_rot_delta_deg`` of motion this

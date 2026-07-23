@@ -133,6 +133,16 @@ def generate_launch_description():
         "guard). See inference.launch.py's arg of the same name.",
     )
 
+    wait_until_arrived_arg = DeclareLaunchArgument(
+        "wait_until_arrived",
+        default_value="true",
+        description="ee_delta only: gate compose/publish on the previous target having "
+        "been reached before advancing to the next one. False disables the gate "
+        "entirely (every tick unconditionally composes/publishes). Exists to A/B the "
+        "gate's effect — see claude_docs/gt-replay/"
+        "2026-07-22-async-architecture-fix-proposal.md.",
+    )
+
     replayer_node = Node(
         package="lerobot_control",
         executable="dataset_gt_replayer_node",
@@ -160,6 +170,7 @@ def generate_launch_description():
                 "home_max_pos_delta_m": LaunchConfiguration("home_max_pos_delta_m"),
                 "home_max_rot_delta_deg": LaunchConfiguration("home_max_rot_delta_deg"),
                 "mock_ee_pose_echo": LaunchConfiguration("mock_ee_pose_echo"),
+                "wait_until_arrived": LaunchConfiguration("wait_until_arrived"),
             }
         ],
     )
@@ -186,6 +197,7 @@ def generate_launch_description():
             home_max_pos_delta_m_arg,
             home_max_rot_delta_deg_arg,
             mock_ee_pose_echo_arg,
+            wait_until_arrived_arg,
             replayer_node,
         ]
     )

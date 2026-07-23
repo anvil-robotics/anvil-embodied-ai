@@ -375,6 +375,32 @@ class TrainingConfig:
                             )
                     except Exception:
                         pass
+
+            # Auto-inherit dataset.root from checkpoint if not set on CLI.
+            # validate_action_space() (called early in train(), before lerobot's
+            # own --config_path=<ckpt>/train_config.json injection below is ever
+            # parsed) needs dataset_root to resolve observation_encoding from the
+            # dataset's conversion_config.yaml — without this, a --resume run
+            # that omits --dataset.root silently defaults to "quaternion" even
+            # for a rot6d/axis_angle-encoded dataset.
+            if not dataset_root:
+                ckpt_train_cfg = (
+                    Path(resume_job_path) / "checkpoints" / resume_checkpoint
+                    / "pretrained_model" / "train_config.json"
+                )
+                if ckpt_train_cfg.exists():
+                    try:
+                        prev_train_cfg = json.loads(ckpt_train_cfg.read_text())
+                        _inherited_root = prev_train_cfg.get("dataset", {}).get("root")
+                        if _inherited_root:
+                            dataset_root = _inherited_root
+                            sys.argv.append(f"--dataset.root={dataset_root}")
+                            log.info(
+                                "[anvil_trainer] --resume: inherited dataset.root=%s from checkpoint",
+                                dataset_root,
+                            )
+                    except Exception:
+                        pass
         else:
             # Resolve output_dir for NEW job:
             #   model_zoo/{data_space}-space/{dataset_name}/{run_name}

@@ -15,6 +15,7 @@ import threading
 import time
 from typing import Any
 
+import numpy as np
 import torch
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
@@ -361,6 +362,23 @@ class MultiProcessStrategy:
             else (self._ee_seq_guard.last_accepted(arm) or 0)
             for arm in self._ee_arm_order
         )
+
+    def get_latest_ee_state_quat(self) -> np.ndarray | None:
+        """Freshest EE pose (quat layout, flat, ``_ee_arm_order``), no images required.
+
+        Same underlying source as ``get_observation()``'s EE branch
+        (``_ee_state_by_arm``), but usable standalone — the ee_delta arrival
+        check and second (pre-compose) obs read in ``_obs_update`` need only
+        the pose, not a full model-ready observation dict, and shouldn't have
+        to wait on camera frames to read it. Returns ``None`` outside EE mode
+        or before any EE pose has arrived yet.
+        """
+        if not self._is_ee or not self._ee_state_by_arm:
+            return None
+        state_flat: list[float] = []
+        for arm_name in self._ee_arm_order:
+            state_flat.extend(self._ee_state_by_arm.get(arm_name, [0.0] * 8))
+        return np.array(state_flat, dtype=np.float64)
 
     def _joint_callback(self, msg: JointState) -> None:
         """Process joint state (lightweight, no GIL issue)."""

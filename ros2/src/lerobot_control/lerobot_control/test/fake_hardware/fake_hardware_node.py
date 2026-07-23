@@ -236,8 +236,7 @@ class MockControllerNode(Node):
         # Per-arm current EE pose state. Seeded from ee_seed_pose when given
         # (e.g. the GT-replayer correctness test seeds this from a converted
         # dataset's own first recorded observation.state row); otherwise an
-        # arbitrary but reasonable default (not physically meaningful; this is
-        # a software timing/plumbing smoke test, not a dynamics simulator).
+        # all-zero "never commanded yet" sentinel (see the else branch below).
         # Updated in-place by _ee_command_callback whenever a command arrives —
         # this IS the "echo/integrate" closed-loop behavior.
         self._ee_state: dict[str, dict]
@@ -249,11 +248,15 @@ class MockControllerNode(Node):
                 f"for arms: {list(seeded_state.keys())}"
             )
         else:
+            # All-zero sentinel (including a non-unit [0,0,0,0] quat) — deliberately
+            # invalid as a rotation, so it's trivially distinguishable from any real
+            # command's echo. Fine because nothing reads it as a rotation before the
+            # first command overwrites it in-place.
             self._ee_state = {
                 arm: {
-                    "pos": np.array([0.4, 0.0, 0.5], dtype=np.float64),
-                    "quat": np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64),  # identity, xyzw
-                    "gripper": 0.02,
+                    "pos": np.array([0.0, 0.0, 0.0], dtype=np.float64),
+                    "quat": np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64),
+                    "gripper": 0.0,
                 }
                 for arm in self._ee_arms
             }
@@ -290,35 +293,44 @@ class MockControllerNode(Node):
         self.ee_pose_timer = self.create_timer(1.0 / self._ee_pose_fps, self.publish_ee_poses)
 
     def publish_ee_poses(self):
-        """Publish each arm's current (possibly just-echoed) EE pose.
+        """Publish every arm's current (possibly just-echoed) EE pose.
 
-        Publishes MockEEPose (base pose/gripper + sequence), not plain
-        CommandedEEPose — see MockEEPose.msg's docstring for why this needs to
-        be a separate fake-hardware-only type.
+        Called by the fixed-rate ``ee_pose_timer``. See ``_publish_one_ee_pose``
+        for the actual per-arm publish (also called directly, per-arm, from
+        ``_ee_command_callback`` for a latency-minimizing immediate push).
+        """
+        for arm in self._ee_state:
+            self._publish_one_ee_pose(arm)
+
+    def _publish_one_ee_pose(self, arm: str) -> None:
+        """Publish MockEEPose (base pose/gripper + sequence) for a single arm.
+
+        Publishes MockEEPose, not plain CommandedEEPose — see MockEEPose.msg's
+        docstring for why this needs to be a separate fake-hardware-only type.
         """
         from anvil_msgs.msg import CommandedEEPose, MockEEPose
         from geometry_msgs.msg import Point, Pose, Quaternion
         from std_msgs.msg import Header
 
+        state = self._ee_state[arm]
         stamp = self.get_clock().now().to_msg()
-        for arm, state in self._ee_state.items():
-            base = CommandedEEPose()
-            base.header = Header(stamp=stamp, frame_id="world")
-            pos, quat = state["pos"], state["quat"]
-            base.pose = Pose(
-                position=Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2])),
-                orientation=Quaternion(
-                    x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3])
-                ),
-            )
-            base.gripper = float(state["gripper"])
+        base = CommandedEEPose()
+        base.header = Header(stamp=stamp, frame_id="world")
+        pos, quat = state["pos"], state["quat"]
+        base.pose = Pose(
+            position=Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2])),
+            orientation=Quaternion(
+                x=float(quat[0]), y=float(quat[1]), z=float(quat[2]), w=float(quat[3])
+            ),
+        )
+        base.gripper = float(state["gripper"])
 
-            msg = MockEEPose()
-            msg.base = base
-            # Whatever _ee_command_callback last set — NOT incremented here (see
-            # _ee_seq_by_arm's comment above for why).
-            msg.sequence = self._ee_seq_by_arm[arm]
-            self._ee_pose_pubs[arm].publish(msg)
+        msg = MockEEPose()
+        msg.base = base
+        # Whatever _ee_command_callback last set — NOT incremented here (see
+        # _ee_seq_by_arm's comment above for why).
+        msg.sequence = self._ee_seq_by_arm[arm]
+        self._ee_pose_pubs[arm].publish(msg)
 
     def _ee_command_callback(self, arm: str, msg) -> None:
         """Echo/integrate a received CommandedEEPose as the arm's next observed pose.
@@ -347,6 +359,10 @@ class MockControllerNode(Node):
         self._ee_state[arm]["quat"] = np.array(values[3:7], dtype=np.float64)
         self._ee_state[arm]["gripper"] = values[7]
         self._ee_seq_by_arm[arm] += 1
+
+        # Immediate push, in addition to the periodic ee_pose_timer — minimizes
+        # echo latency instead of waiting up to 1/ee_pose_fps for the next tick.
+        self._publish_one_ee_pose(arm)
 
         self._record_valid_action()
 

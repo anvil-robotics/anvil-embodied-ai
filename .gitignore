@@ -83,6 +83,7 @@ runs/
 
 # GT-replayer correctness test scratch reports
 tests/smoke/.gt_replay_reports/
+tests/smoke/.gt_replay_reports_single_thread/
 
 # gt_replay_human_eval.py default report output (always written unless --report-path overrides)
 /gt_replay_human_eval_report.json

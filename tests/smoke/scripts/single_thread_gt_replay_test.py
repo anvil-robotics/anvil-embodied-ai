@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
-"""GT-Replayer correctness test — validates dataset_gt_replayer_node against fake hardware.
+"""Correctness test for the experimental single-thread GT replayer.
 
-For each fixture dataset (ee_abs, ee_delta), seeds the fake-hardware mock's initial
-EE pose from the dataset's own first recorded observation.state row, replays the
-dataset through the real inference pipeline, and has gt_replay_verifier_node compare
-the live published commands against the dataset's own recorded trajectory
-(``published_cmd[t] == dataset.observation.state[t+1]``, converted to quat) — see
-claude_docs/gt-replayer-correctness-test-plan.md for the full design.
-
-Orchestrates docker-compose.fake-hardware.yml's ``replay-verify`` profile in
-explicit stages (mock-robot -> gt-replay-verify -> replay, with a DDS-discovery
-delay between the last two) rather than bringing all three up at once, so the
-verifier is guaranteed to be subscribed before the replay run starts publishing
-(compose's ``depends_on`` only gates start order, not "has finished subscribing").
+Mirrors ``gt_replay_correctness_test.py``'s staged bring-up (mock-robot ->
+verifier -> replayer, with a DDS-discovery delay), but targets the
+``replay-verify-single-thread`` profile (``single_thread_gt_replayer_node`` +
+``single_thread_gt_replay_verifier_node``) instead of the production
+``dataset_gt_replayer_node``/``gt_replay_verifier_node`` pair — see both
+nodes' module docstrings for why this variant exists.
 
 Usage:
-    uv run python tests/smoke/scripts/gt_replay_correctness_test.py
-    uv run python tests/smoke/scripts/gt_replay_correctness_test.py --timeout-sec 120
-    uv run python tests/smoke/scripts/gt_replay_correctness_test.py --no-build
+    uv run python tests/smoke/scripts/single_thread_gt_replay_test.py
+    uv run python tests/smoke/scripts/single_thread_gt_replay_test.py --repeat 10
 """
-
 from __future__ import annotations
 
 import argparse
@@ -30,16 +22,14 @@ import sys
 import time
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[3]   # tests/smoke/scripts/ -> repo root
+REPO = Path(__file__).resolve().parents[3]
 
-# dataset_reader.py has no rclpy dependency, so it's importable directly here —
-# reuse it instead of re-implementing the observation-row read + quat conversion.
 sys.path.insert(0, str(REPO / "ros2" / "src" / "lerobot_control"))
 from lerobot_control import dataset_reader  # noqa: E402
 
 COMPOSE_FILE = REPO / "docker-compose.fake-hardware.yml"
-REPORTS_DIR = REPO / "tests" / "smoke" / ".gt_replay_reports"
-GT_REPLAY_TEST_CONFIG = REPO / "configs" / "lerobot_control" / "inference_ee_gt_replay_test.yaml"
+REPORTS_DIR = REPO / "tests" / "smoke" / ".gt_replay_reports_single_thread"
+PROFILE = "replay-verify-single-thread"
 
 FIXTURES = [
     ("ee-abs", REPO / "data" / "debug" / "ee-abs" / "ee-space-testing"),
@@ -51,14 +41,16 @@ DDS_DISCOVERY_SLEEP_SEC = 3.0
 REPORT_POLL_INTERVAL_SEC = 1.0
 REPORT_POLL_MARGIN_SEC = 10.0
 MOCK_CONTAINER = "lerobot-fake-robot"
-CONTAINERS = [MOCK_CONTAINER, "lerobot-fake-replay", "lerobot-gt-replay-verify"]
+CONTAINERS = [
+    MOCK_CONTAINER, "lerobot-fake-replay-single-thread", "lerobot-gt-replay-verify-single-thread",
+]
 
 
 def _compose(*args: str, env_extra: dict | None = None) -> int:
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
-    cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), "--profile", "replay-verify", *args]
+    cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), "--profile", PROFILE, *args]
     print(f"  $ {' '.join(cmd)}", flush=True)
     return subprocess.run(cmd, cwd=REPO, env=env).returncode
 
@@ -87,19 +79,17 @@ def _save_docker_logs(log_dir: Path) -> None:
 
 
 def _compute_seed(dataset_root: Path) -> str:
-    """The dataset's own first observation.state row, quat layout, comma-formatted."""
     obs = dataset_reader.load_episode_observations_quat(dataset_root, EPISODE)
     return ",".join(f"{v:.10g}" for v in obs[0])
 
 
 def run_scenario(
-    name: str, dataset_root: Path, timeout_sec: float, wait_until_arrived: bool = True,
+    name: str, dataset_root: Path, timeout_sec: float, run_idx: int, wait_until_arrived: bool,
 ) -> bool:
-    print(f"\n=== {name} [wait_until_arrived={wait_until_arrived}]: {dataset_root} ===")
+    mode = "wait-until-arrived" if wait_until_arrived else "30hz-no-gate"
+    print(f"\n=== {name} [{mode}] (run {run_idx}): {dataset_root} ===")
 
-    # gt-replay-verify writes <REPORTS_DIR>/gt_replay_report.json (fixed name inside
-    # the container); give each scenario its own report dir so they don't clobber.
-    scenario_reports_dir = REPORTS_DIR / name
+    scenario_reports_dir = REPORTS_DIR / mode / name
     scenario_reports_dir.mkdir(parents=True, exist_ok=True)
     report_path = scenario_reports_dir / "gt_replay_report.json"
     if report_path.exists():
@@ -109,7 +99,6 @@ def run_scenario(
     env = {
         "EE_MODE": "true",
         "DATASET_PATH": str(dataset_root),
-        "CONFIG_FILE": str(GT_REPLAY_TEST_CONFIG),
         "EPISODE": str(EPISODE),
         "EE_SEED_POSE": seed,
         "REPORTS_DIR": str(scenario_reports_dir),
@@ -125,13 +114,13 @@ def run_scenario(
             print("  mock-robot never became healthy")
             return False
 
-        if _compose("up", "-d", "gt-replay-verify", env_extra=env) != 0:
-            print("  gt-replay-verify failed to start")
+        if _compose("up", "-d", "gt-replay-verify-single-thread", env_extra=env) != 0:
+            print("  verifier failed to start")
             return False
         time.sleep(DDS_DISCOVERY_SLEEP_SEC)
 
-        if _compose("up", "-d", "replay", env_extra=env) != 0:
-            print("  replay failed to start")
+        if _compose("up", "-d", "replay-single-thread", env_extra=env) != 0:
+            print("  replayer failed to start")
             return False
 
         deadline = time.monotonic() + timeout_sec + REPORT_POLL_MARGIN_SEC
@@ -157,22 +146,12 @@ def run_scenario(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--timeout-sec", type=float, default=60.0)
+    parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--repeat", type=int, default=1, help="Repeat each fixture N times (flakiness check)")
     parser.add_argument(
-        "--timeout-sec", type=float, default=60.0,
-        help="Verifier safety timeout per scenario (default: 60.0)",
-    )
-    parser.add_argument(
-        "--no-build", action="store_true",
-        help="Skip `docker compose build` (use the already-built image as-is)",
-    )
-    parser.add_argument(
-        "--repeat", type=int, default=1,
-        help="Repeat each fixture N times (flakiness check, default: 1)",
-    )
-    parser.add_argument(
-        "--wait-until-arrived", choices=["true", "false", "both"], default="true",
-        help="ee_delta wait-until-arrived gate setting to test — 'both' A/Bs "
-        "true vs false per fixture/run (default: true)",
+        "--modes", choices=["both", "wait-until-arrived", "30hz-no-gate"], default="both",
+        help="Which replayer mode(s) to A/B (default: both)",
     )
     args = parser.parse_args()
 
@@ -182,40 +161,41 @@ def main() -> int:
             print("Docker build failed")
             return 1
 
-    settings = [True, False] if args.wait_until_arrived == "both" else [args.wait_until_arrived == "true"]
+    modes = (
+        [("wait-until-arrived", True), ("30hz-no-gate", False)] if args.modes == "both"
+        else [(args.modes, args.modes == "wait-until-arrived")]
+    )
 
-    # results[wait_until_arrived][name] = [bool, ...] one per run
-    results: dict[bool, dict[str, list[bool | None]]] = {
-        w: {name: [] for name, _ in FIXTURES} for w in settings
-    }
+    # results[mode][fixture] = [bool, ...] one per run
+    results: dict[str, dict[str, list[bool]]] = {m: {name: [] for name, _ in FIXTURES} for m, _ in modes}
 
-    for wait_until_arrived in settings:
+    for mode_name, wait_until_arrived in modes:
         for run_idx in range(1, args.repeat + 1):
             for name, dataset_root in FIXTURES:
                 if not dataset_root.exists():
                     print(f"SKIP {name}: dataset not found at {dataset_root}")
-                    results[wait_until_arrived][name].append(None)
                     continue
                 ok = run_scenario(
-                    name, dataset_root, timeout_sec=args.timeout_sec,
+                    name, dataset_root, timeout_sec=args.timeout_sec, run_idx=run_idx,
                     wait_until_arrived=wait_until_arrived,
                 )
-                results[wait_until_arrived][name].append(ok)
+                results[mode_name][name].append(ok)
                 if not ok:
-                    print(f"  !! {name} [wait_until_arrived={wait_until_arrived}] run {run_idx} FAILED")
+                    print(f"  !! {name} [{mode_name}] run {run_idx} FAILED")
 
-    print("\n=== Summary ===")
+    print("\n=== Comparison summary ===")
     all_ok = True
-    for wait_until_arrived in settings:
+    for mode_name, _ in modes:
         for name, _ in FIXTURES:
-            runs = [r for r in results[wait_until_arrived][name] if r is not None]
+            runs = results[mode_name][name]
             if not runs:
-                print(f"  {name} [wait_until_arrived={wait_until_arrived}]: SKIPPED")
                 continue
             n_pass = sum(runs)
             ok = n_pass == len(runs)
             all_ok = all_ok and ok
-            print(f"  {name} [wait_until_arrived={wait_until_arrived}]: {n_pass}/{len(runs)} passed {runs}")
+            print(f"  {mode_name:20s} {name:10s}: {n_pass}/{len(runs)} passed  {runs}")
+
+    print(f"\n=== Overall: {'PASS' if all_ok else 'FAIL'} ===")
     return 0 if all_ok else 1
 
 

@@ -1,0 +1,45 @@
+# =============================================================================
+# OpenArm MCAP to LeRobot — EE Cartesian, BIMANUAL (ee_abs debug variant)
+# =============================================================================
+#
+# Same as openarm_ee_bimanual_debug.yaml (delta) except action_encoding —
+# exists to convert the same raw session both ways for an ee_abs vs ee_delta
+# real-hardware GT-replay comparison (see claude_docs/gt-replay/).
+#
+# Output (per frame; action[t] = the NEXT frame's pose — act-from-obs, baked
+# at convert time via a 1-frame lookahead):
+#   observation.state  float32 (16,)  =  [left:  x,y,z, qx,qy,qz,qw, gripper]
+#                                        [right: x,y,z, qx,qy,qz,qw, gripper]
+#   action             float32 (20,)  =  [left:  x,y,z, rot6d(6), gripper]
+#                                        [right: x,y,z, rot6d(6), gripper]
+#   observation.images.{chest,waist,wrist_l,wrist_r}
+#
+# `action_topics: {}` is mandatory in EE mode — the action source is the same
+# /ee_pose_<arm> message used for observation, encoded with rot6d.
+# =============================================================================
+
+schema_version: "1.1"
+data_space: "ee"
+
+observation_topics:
+  left:  "/ee_pose_left"
+  right: "/ee_pose_right"
+
+action_topics: {}   # mandatory empty in EE mode
+
+action_encoding: "absolute"    # ["absolute", "delta"] -- only field that differs from the debug config
+observation_encoding: "rot6d"  # ["quaternion", "rot6d", "axis_angle"]
+
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+  - "/cam_wrist_l/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed":  "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed":  "chest"
+  "/cam_wrist_l/image_raw/compressed": "wrist_l"
+
+image_resolution: [480, 270]
