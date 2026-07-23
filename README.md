@@ -22,6 +22,10 @@
 
 ## 📢 News
 
+- **2026-07-23** — 🚧 Development paused. Active development and updates on this
+  repository are on hold for now. The codebase remains fully usable at the current
+  release, and we plan to resume work in the future. See [PAUSE_STATUS.md](PAUSE_STATUS.md)
+  for what's still in progress. Thanks for your interest.
 - **2026-05-08** — Upgraded to LeRobot v0.5.1.
 
 _See full history in [CHANGELOG.md](CHANGELOG.md)._
