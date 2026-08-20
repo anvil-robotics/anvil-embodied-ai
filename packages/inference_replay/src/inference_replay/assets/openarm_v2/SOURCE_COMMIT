@@ -1,0 +1,3 @@
+openarm_v2_description @ 2c14726c9653a102b142d7b1315f6ad5d6f059ca 2026-06-30
+xacro: urdf/robot/teleop.xacro ros2_control:=false hand:=true follower_l_can_interface:=follower_l follower_r_can_interface:=follower_r
+regenerate: uv run --package inference-replay --extra sync python scripts/sync_openarm_assets.py

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inference-replay"
+version = "0.1.0"
+description = "URDF-accurate virtual replay of inference_data.csv monitor traces, rendered with Rerun"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.12"
+authors = [
+    { name = "Anvil Robotics" }
+]
+keywords = ["robotics", "rerun", "visualization", "inference", "openarm"]
+
+# Deliberately light. This package exists so you can look at a CSV without pulling the
+# torch/lerobot stack that mcap_converter needs -- do not add heavy deps here.
+dependencies = [
+    "rerun-sdk>=0.26.2",
+    "yourdfpy>=0.0.56",
+    "numpy>=2.0.0,<2.3.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+# Only needed to regenerate the vendored assets (scripts/sync_openarm_assets.py), not to
+# use the viewer. `xacro` is the PyPI build, which is enough here because the sync script
+# stubs out the one ament_index_python call it makes.
+sync = [
+    "xacro>=2.0",
+    "trimesh>=4.0",
+    "pycollada>=0.8",
+    "fast-simplification>=0.1",
+]
+
+[project.scripts]
+inference-replay = "inference_replay.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inference_replay"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/inference_replay/assets" = "inference_replay/assets"
