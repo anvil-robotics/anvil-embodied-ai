@@ -7,13 +7,13 @@ for sharing and training.
 
 Prerequisites:
 1. Login to Hugging Face first:
-   $ huggingface-cli login
+   $ hf auth login
 
 2. Or set HF_TOKEN environment variable:
    $ export HF_TOKEN=your_token_here
 
 3. Verify login:
-   $ huggingface-cli whoami
+   $ hf auth whoami
 """
 
 import argparse
@@ -93,7 +93,7 @@ def upload_dataset(
         except Exception as e:
             print("\n[ERROR] Not logged in to Hugging Face")
             print("\nPlease login first:")
-            print("  $ huggingface-cli login")
+            print("  $ hf auth login")
             print("\nOr set token:")
             print("  $ export HF_TOKEN=your_token_here")
             print(f"\nError details: {e}")
