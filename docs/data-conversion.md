@@ -246,7 +246,7 @@ Upload a converted LeRobot dataset to HuggingFace Hub.
 
 ```bash
 # Login first (one-time)
-huggingface-cli login
+hf auth login
 
 uv run hf-upload /path/to/dataset                                  # repo-id auto from dir name
 uv run hf-upload /path/to/dataset --repo-id your-org/my_dataset

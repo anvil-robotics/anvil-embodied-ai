@@ -419,8 +419,7 @@ Pi0.5 downloads `google/paligemma-3b-pt-224` on first use. This model is gated â
 2. Log in from the CLI (one-time setup):
 
 ```bash
-uv run huggingface-cli login
-# Paste your HF token when prompted (get one at https://huggingface.co/settings/tokens)
+uv run hf auth login
 ```
 
 After login, the model is cached locally and subsequent runs skip the download.
